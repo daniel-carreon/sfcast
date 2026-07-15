@@ -13,7 +13,7 @@ struct Uploader {
         var stoppedAt: String
         var durationSeconds: Double
         var segments: [String]
-        var appVersion = "1.4.0"
+        var appVersion = "1.5.0"
     }
 
     /// Publica la página "Procesando…" instantánea en /v/<id>/ ANTES del upload.

@@ -16,9 +16,20 @@ if let i = cliArgs.firstIndex(of: "--selftest") {
 }
 if cliArgs.contains("--no-upload") { demoNoUpload = true }
 if cliArgs.contains("--version") {
-    print("SFCast 1.4.0")
+    print("SFCast 1.5.0")
     exit(0)
 }
+
+/// QA del pill de grabación (`--paneltest N`): lo muestra N segundos SIN grabar
+/// nada. Existe porque el pill lleva `sharingType = .none` y por diseño es
+/// invisible para cualquier captura — sin este modo no hay forma de revisar el
+/// diseño con un screenshot. En este modo (y SOLO en este) el pill se deja
+/// capturable.
+let panelTestSeconds: Int? = {
+    guard let i = cliArgs.firstIndex(of: "--paneltest") else { return nil }
+    return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 8
+}()
+let panelTestMode = panelTestSeconds != nil
 
 /// Selftest headless: graba N segundos de pantalla (sin burbuja, sin mic, sin
 /// upload) y verifica que el MP4 exista con peso real. Prueba el motor completo
@@ -60,23 +71,40 @@ func runSelftest(seconds: Int) async {
     }
 }
 
+/// QA visual del pill: lo muestra N segundos, sin grabar ni tocar permisos.
+@MainActor
+func runPanelTest(seconds: Int) async {
+    guard let screen = RecordingController.captureScreen() else { exit(2) }
+    let panel = RecordingController.shared.panel
+    panel.show(on: screen)
+    print("PANELTEST: pill visible \(seconds)s en \(panel.panel?.frame ?? .zero)")
+    try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
+    panel.hide()
+    print("PANELTEST_OK")
+    exit(0)
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let statusBar = StatusBar()
     let demo: Int?
     let noUpload: Bool
     let selftest: Int?
+    let paneltest: Int?
 
-    init(demo: Int?, noUpload: Bool, selftest: Int?) {
+    init(demo: Int?, noUpload: Bool, selftest: Int?, paneltest: Int?) {
         self.demo = demo
         self.noUpload = noUpload
         self.selftest = selftest
+        self.paneltest = paneltest
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusBar.setup()
         Log.info("SFCast arriba (demo=\(demo.map(String.init) ?? "no") selftest=\(selftest.map(String.init) ?? "no"))")
-        if let seconds = selftest {
+        if let seconds = paneltest {
+            Task { @MainActor in await runPanelTest(seconds: seconds) }
+        } else if let seconds = selftest {
             Task { @MainActor in await runSelftest(seconds: seconds) }
         } else if let seconds = demo {
             Task { @MainActor in
@@ -124,7 +152,8 @@ MainActor.assumeIsolated {
     appItem.submenu = appMenu
     app.mainMenu = mainMenu
 
-    let appDelegate = AppDelegate(demo: demoSeconds, noUpload: demoNoUpload, selftest: selftestSeconds)
+    let appDelegate = AppDelegate(demo: demoSeconds, noUpload: demoNoUpload,
+                                  selftest: selftestSeconds, paneltest: panelTestSeconds)
     app.delegate = appDelegate
     // retain del delegate (app.delegate es weak)
     objc_setAssociatedObject(app, "sfcastDelegate", appDelegate, .OBJC_ASSOCIATION_RETAIN)

@@ -58,6 +58,21 @@ final class RecordingController {
             }
         }
         panel.onCancel = { [weak self] in Task { await self?.cancel() } }
+        panel.onRestart = { [weak self] in Task { await self?.restart() } }
+    }
+
+    /// Reiniciar (el ↺ del pill, estilo Loom): tira lo grabado y arranca de
+    /// cero en el MISMO modo. Sale por cancel() para no duplicar limpieza.
+    func restart() async {
+        guard state == .recording || state == .paused else { return }
+        let m = mode
+        let w = windowTarget
+        await cancel()
+        switch m {
+        case .screen: await startScreen()
+        case .window: if let w { await startWindow(w) }
+        case .camOnly: await startCamOnly()
+        }
     }
 
     var publicURL: String { "\(settings.baseURL)/v/\(videoID)" }
@@ -258,29 +273,48 @@ final class RecordingController {
         guard state == .recording || state == .paused else { return (publicURL, false) }
         let wasPaused = state == .paused
         state = .stopping
-        if !wasPaused {
-            if mode == .camOnly { stopCamSegment() } else { await engine.stopSegment() }
-        }
 
-        // Snapshot de la sesión ANTES de liberar el estado (una grabación nueva
-        // puede pisar las properties mientras el upload sigue en vuelo).
+        // Snapshot de la sesión ANTES de tocar nada (una grabación nueva puede
+        // pisar las properties mientras el upload sigue en vuelo).
         let duration = panel.elapsed
         let url = publicURL
         let id = videoID
         let dir = sessionDir!
-        let segments = currentSegments().map { $0.lastPathComponent }
         let began = startedAt
         let modeRaw = mode.rawValue
         let uploaderSettings = settings
 
-        // ⚡ EL MOMENTO MÁGICO: link al portapapeles ANTES de subir nada.
+        // ⚡ EL MOMENTO MÁGICO, AHORA INSTANTÁNEO (Daniel 15 jul: "se tarda unos
+        // segundos y se pierde la experiencia"): link al portapapeles y pill
+        // fuera ANTES de cerrar el MP4 — cerrar el segmento tarda ~0.3-1s
+        // esperando el didFinish del writer, y ese era TODO el lag percibido.
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(url, forType: .string)
+        panel.hide()
         notify("SFCast — link copiado 🔗", "Subiendo video… te aviso cuando esté listo.")
         Log.info("Link copiado al portapapeles: \(url)")
 
-        bubble.hide()
-        panel.hide()
+        if wasPaused {
+            bubble.hide()
+        } else if mode == .camOnly {
+            // OJO camOnly: la burbuja ES la fuente del video (el movieOutput
+            // cuelga de SU sesión). Apagarla antes de que el archivo cierre lo
+            // truncaría → primero el stop, luego la burbuja.
+            stopCamSegment()
+            // 10s, no 3: el usuario YA tiene su link y la UI ya se fue, así que
+            // esperar sale gratis. Cortar a los 3s podía truncar el .mov con
+            // disco lento (Time Machine, USB) — justo lo que este orden evita.
+            await waitCamFinished(timeout: 10)
+            bubble.hide()
+        } else {
+            // Burn-in: esconder la burbuja ~1s antes de cortar el stream solo
+            // recorta el último instante del video. Imperceptible, y el pill
+            // desaparece al toque.
+            bubble.hide()
+            await engine.stopSegment()
+        }
+
+        let segments = currentSegments().map { $0.lastPathComponent }
         state = .idle
 
         var entry = History.Entry(
@@ -422,11 +456,29 @@ final class RecordingController {
     private func stopCamSegment() {
         movieOutput?.stopRecording()
     }
+
+    /// Espera a que el .mov de camOnly quede FINALIZADO antes de apagar la
+    /// sesión de la burbuja (si no, el archivo se trunca).
+    private func waitCamFinished(timeout: Double) async {
+        guard let del = camDelegate else { return }
+        let deadline = Date().addingTimeInterval(timeout)
+        while !del.finished && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 60_000_000)
+        }
+        if !del.finished {
+            Log.error("camOnly: didFinish no llegó en \(Int(timeout))s (el archivo suele quedar OK igual)")
+        }
+    }
 }
 
-final class CamFileDelegate: NSObject, AVCaptureFileOutputRecordingDelegate {
+final class CamFileDelegate: NSObject, AVCaptureFileOutputRecordingDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _finished = false
+    var finished: Bool { lock.lock(); defer { lock.unlock() }; return _finished }
+
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL,
                     from connections: [AVCaptureConnection], error: Error?) {
         if let error { Log.error("camOnly segmento: \(error.localizedDescription)") }
+        lock.lock(); _finished = true; lock.unlock()
     }
 }

@@ -105,7 +105,14 @@ final class CaptureEngine: NSObject {
     /// Cierra el segmento actual y espera a que el MP4 quede finalizado.
     func stopSegment() async {
         guard let stream else { return }
-        try? await stream.stopCapture()
+        // CON DEADLINE (v1.5): desde que el stop esconde la UI ANTES de cerrar
+        // el segmento, un `stopCapture()` colgado (tccd atascado — pasa, ver
+        // startCaptureWithTimeout) dejaría `state` en .stopping PARA SIEMPRE y
+        // sin señal visible: grabar de nuevo simplemente "no haría nada".
+        let s = stream
+        try? await Self.withDeadline(seconds: 10, name: "stopCapture") {
+            try await s.stopCapture()
+        }
         if let del = recDelegate {
             for _ in 0..<100 where !del.finished {
                 try? await Task.sleep(nanoseconds: 100_000_000)

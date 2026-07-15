@@ -185,3 +185,44 @@ glow más sutil, y menos "basura" instructiva en el hub.
 
 Gotcha vigente: cada rebuild cambia el cdhash → macOS re-pide el permiso de
 PANTALLA una vez (cámara/mic sobreviven por bundle ID + cert estable).
+
+## v1.5 — El pill de Loom: vertical, con hover vivo y stop instantáneo (15 jul)
+
+Daniel, con captura de Loom al lado: "la nuestra se ve bien fea y la de Loom se
+ve bien sutil… cuando poso el mouse se amplía y salen botones de reiniciar/
+eliminar… la de Loom tiene un hover muy bonito, la nuestra ni siquiera tiene
+animación y encima se tarda unos segundos".
+
+1. **Pill VERTICAL** (58×112): cuadro mostaza de stop arriba (protagonista,
+   como el rojo de Loom) · timer "2:02" (formato Loom, sin cero a la izquierda)
+   · pausa. **Hover → 188px** revelando separador + **reiniciar (↺)** +
+   **descartar (🗑)** con fade. Colapsa con 0.3s de gracia (cruzar entre
+   botones no lo hace parpadear). Crece HACIA ABAJO: el borde superior queda
+   clavado donde Daniel lo arrastró. Sin punto rojo pulsante — Loom no lo
+   tiene; la pausa se señala con timer ámbar + icono play.
+2. **PillButton**: hover = fondo que aparece + escala 1.09; clic = rebote a
+   0.9. Las animaciones son **CABasicAnimation explícitas** a propósito: en
+   vistas layer-backed de AppKit las implícitas están apagadas (el layer
+   delegate devuelve NSNull), así que `layer.transform = …` saltaría sin
+   animar.
+3. **Geometría por constantes, no fittingSize**: el stack va pineado ARRIBA y
+   el pill CLIPA los extras al colapsar (cero conflictos de constraints, cero
+   medición por hover).
+4. **STOP INSTANTÁNEO** (el "se tarda unos segundos"): `stopAndWait` cerraba el
+   segmento ANTES de esconder la UI y copiar el link — cerrar el MP4 tarda
+   ~0.3-1s esperando el didFinish del writer, y ese era TODO el lag. Ahora:
+   link al portapapeles + pill fuera → y el cierre ocurre después, sin que
+   nadie lo vea. La burbuja está quemada en el video: esconderla ~1s antes solo
+   recorta el último instante.
+   **Excepción camOnly:** ahí la burbuja ES la fuente (el movieOutput cuelga de
+   SU sesión) → stopCamSegment → esperar al delegate (10s) → recién entonces
+   apagar la burbuja, o el .mov se trunca.
+5. **`stopCapture()` con deadline (10s)**: consecuencia del reorden — un
+   stopCapture colgado (tccd atascado) dejaría `state` en .stopping para
+   siempre y AHORA sin UI visible que lo delatara ("grabar de nuevo no hace
+   nada"). Cazado por el review adversarial.
+6. **`--paneltest N`**: modo QA que muestra el pill sin grabar. Existe porque
+   el pill lleva `sharingType = .none` y es invisible a cualquier captura —
+   sin este modo no hay forma de revisar su diseño con un screenshot. Es el
+   ÚNICO modo donde el pill se deja capturable. Hover verificado midiendo el
+   frame real: 112 → 188 → 112.

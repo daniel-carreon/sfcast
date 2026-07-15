@@ -46,8 +46,10 @@ estable evita revocar cámara/mic).
 - **Burbuja de cámara**: arrástrala a donde quieras · hover = chips S·M·L·⛶ ·
   doble clic = ciclar tamaño · clic derecho = tamaños y glow (ámbar/morado/nada).
   Se queda GRABADA en el video tal como la ves (burn-in, decisión de diseño).
-- **Panel inferior (pill)**: punto rojo pulsante + timer · ⏸ pausa/reanuda ·
-  **Detener** (mostaza) · ✕ cancelar. Arrastrable. NO sale en el video.
+- **Pill vertical (v1.5, arriba-izquierda, arrastrable)**: cuadro mostaza =
+  **detener y copiar link** · timer · ⏸ pausa. **Pásale el mouse por encima y
+  se expande**: ↺ reiniciar (tira lo grabado y empieza de cero) · 🗑 descartar.
+  NO sale en el video.
 - **Al detener**: el link queda EN EL PORTAPAPELES al instante Y se abre el
   navegador en la página del video ("Procesando…" que se convierte sola en el
   viewer: ~1-3 min para un video de 5 min).

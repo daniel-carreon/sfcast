@@ -1,80 +1,166 @@
-# SFCast — Runbook (el Loom soberano de SaaS Factory)
+# SFCast — el Loom soberano de SaaS Factory
 
-> App macOS nativa (Swift) + pipeline en el VPS. Grabas pantalla con burbuja de
-> cámara, al dar stop el link YA está en tu portapapeles, y el VPS genera
-> transcript español + título + resumen + capítulos + viewer web solo.
-> $0/mes (Loom Business costaba $18-24/user/mes).
+> App macOS nativa (Swift) + pipeline propio en el VPS. Grabas pantalla con
+> burbuja de cámara, al dar stop **el link YA está en tu portapapeles**, y el VPS
+> genera transcript en español + título + resumen + capítulos + viewer web, solo.
+> **$0/mes** (Loom Business cobra $18-24 por usuario al mes).
+>
+> Repo: `~/Developer/software/sfcast` (independiente, sin remote).
+> Por qué cada decisión es como es: **`DECISIONS.md`** (v1.1 → v1.6).
 
-## Instalar / actualizar (Mac)
+---
+
+## 1. El camino de un video, de punta a punta
+
+```
+   TU MAC                                    │   VPS (hermes-vps)
+                                             │
+  micropanel ⏺                               │
+      ↓  Empezar a grabar                    │
+  SCStream + SCRecordingOutput ──→ seg-NNN.mp4   (0.6-1.6% CPU, HEVC ~7 Mbps)
+      ↓  stop                                │
+  ① link al portapapeles  ← INSTANTÁNEO      │
+  ② pill fuera + navegador abre "Procesando…"│
+  ③ se cierra el MP4                         │
+  ④ Transcoder: re-encode por hardware       │   (~4.5x más chico, ~2.6s/17s)
+  ⑤ rsync ──────────────────────────────────→│  /opt/sfcast/incoming/{id}/
+                                             │        ↓ UPLOAD_DONE
+                                             │  concat (stream copy) → thumb
+                                             │        ↓
+                                             │  faster-whisper es (~4x realtime)
+                                             │        ↓
+                                             │  LLM: título+resumen+capítulos
+                                             │        ↓
+                                             │  viewer HTML pisa el "Procesando…"
+```
+
+**El orden 1-2-3 no es casual y no se toca:** cerrar el MP4 tarda ~0.3-1s
+esperando al writer, y ESE era todo el lag percibido. El link sale primero.
+
+**Dónde se va el tiempo de verdad** (medido el 15 jul, video de 17s):
+
+| Etapa | Tiempo |
+|---|---|
+| **Subida Mac → VPS** | **~15 min** ← el cuello, siempre |
+| Pipeline entero del VPS | 89s (73 de ellos: cargar el modelo, ya precargado) |
+
+La captura escribe a **7 Mbps** (52 MB por minuto grabado) y el upstream de
+Daniel mide **≤0.33 Mbps** (medido contra Cloudflare, no contra el VPS: es el
+ISP, no la infra). De ahí que comprimir antes de subir sea el fix grande.
+
+---
+
+## 2. Instalar / actualizar
 
 ```bash
-cd software/sfcast
+cd ~/Developer/software/sfcast
 ./scripts/build-app.sh                    # compila + firma "SFlow Dev" → dist/SFCast.app
-cp -R dist/SFCast.app /Applications/      # instalar (Spotlight/Launchpad: "SFCast")
-open /Applications/SFCast.app             # abre el HUB (panel de control estilo SFlow)
+rm -rf /Applications/SFCast.app
+cp -R dist/SFCast.app /Applications/
+open /Applications/SFCast.app
 ```
 
-La app vive en **/Applications** con su icono propio (anillo mostaza): se abre
-desde Spotlight/Launchpad como cualquier app, sin depender de nadie. Con el hub
-abierto aparece en el Dock y Cmd+Tab; al cerrarlo queda solo el ⏺ del menu bar.
-Salir: Cmd+Q, el botón "Salir de SFCast" del hub, o el menú ⏺.
+Vive en **/Applications** con su icono propio (anillo mostaza): Spotlight o
+Launchpad, como cualquier app. Con el hub abierto sale en el Dock y Cmd+Tab; al
+cerrarlo queda solo el ⏺ del menu bar. Salir: Cmd+Q o "Salir de SFCast".
 
-**Permisos one-time (v1.3, broker serializado):** al abrir la app pide cámara y
-micrófono EN SERIE (un solo `requestAccess` por tipo, jamás en ráfaga — la ráfaga
-atascaba tccd, ver DECISIONS v1.3). El estado vive en el hub → Inicio → tarjeta
-"Permisos", con el botón grande **"Activar cámara y micrófono"** (pídelo por gesto:
-es lo más confiable para que el diálogo pinte) y "Reparar" (resetea + re-pide). La
-pantalla se pide al primer Grabar. Da "Permitir" en los DOS diálogos (si tienes dos
-monitores, míralos ambos).
+**Cada rebuild cuesta UNA re-aprobación del permiso de pantalla.** macOS 26 lo
+liga al cdhash del binario. Cámara y micrófono NO se revocan porque la firma
+("SFlow Dev") es estable — por eso existe.
 
-> **Si NINGÚN diálogo aparece ni con el botón:** la cola de permisos de macOS (tccd)
-> quedó atascada — en macOS 26 no se puede reiniciar tccd con SIP activo. **Reinicia
-> la Mac UNA vez** y al reabrir SFCast los diálogos salen solos. Es cosa de macOS, no
-> de SFCast; el broker ya no inunda tccd, así que no se vuelve a atascar en uso normal.
+---
 
-Tras un UPDATE de la app, macOS 26 re-pide SOLO el de pantalla (1 toggle; el cert
-estable evita revocar cámara/mic).
+## 3. Permisos (el arco que más dolió — ver DECISIONS v1.2/v1.3)
 
-## Grabar (uso diario)
+- Al abrir, la app pide cámara y micrófono **EN SERIE** por un broker único.
+  Jamás en ráfaga: la ráfaga atasca tccd y los diálogos dejan de pintar.
+- Estado y reparación: hub → Inicio → tarjeta **Permisos**. El botón
+  **"Activar cámara y micrófono"** es lo más confiable (un diálogo pedido por
+  gesto del usuario pinta mejor). **Reparar** = resetea + vuelve a pedir.
+- La de pantalla se pide al primer Grabar.
 
-- **Click en el icono ⏺ del menu bar → MICROPANEL (v1.4, estilo Loom):** modo
-  Pantalla/Ventana/Cámara · cámara con toggle On/Off (la burbuja se enciende
-  EN VIVO como preview) · mic con toggle + VÚMETRO en tiempo real (verificas
-  que se escucha ANTES de grabar) · botón **Empezar a grabar**. Click al icono
-  otra vez, ✕ o Esc = se oculta todo. Click DERECHO = menú clásico.
-- También: **⌘⇧L** directo, o menú ⏺ (clic derecho): countdown 3s → grabando.
-- **Burbuja de cámara**: arrástrala a donde quieras · hover = chips S·M·L·⛶ ·
-  doble clic = ciclar tamaño · clic derecho = tamaños y glow (ámbar/morado/nada).
-  Se queda GRABADA en el video tal como la ves (burn-in, decisión de diseño).
-- **Pill vertical (v1.5, arriba-izquierda, arrastrable)**: cuadro mostaza =
-  **detener y copiar link** · timer · ⏸ pausa. **Pásale el mouse por encima y
-  se expande**: ↺ reiniciar (tira lo grabado y empieza de cero) · 🗑 descartar.
-  NO sale en el video.
-- **Al detener**: el link queda EN EL PORTAPAPELES al instante Y se abre el
-  navegador en la página del video ("Procesando…" que se convierte sola en el
-  viewer). Detrás, sin que se note: se comprime por hardware (~4.5x más chico,
-  ~2.6s por cada 17s de video) y se sube. **El tiempo de espera es la SUBIDA,
-  no el VPS** (el pipeline entero tarda ~20-90s): con ~0.5 Mbps de subida, un
-  video de 5 min pasa de ~70 min a ~14. Si algún día el internet mejora, esto
-  baja a menos de un minuto.
-- Otros modos en el menú ⏺: **Grabar ventana** (una app específica, sin
-  burbuja) y **Grabar solo cámara** (talking head).
-- **Historial**: hub → Historial (o menú ⏺, últimas 8, clic = copiar link).
-- Cámara/mic/modo se eligen en el MICROPANEL (cambiar la cámara con la burbuja
-  en pantalla la cambia EN VIVO). Tamaño/glow de la burbuja: en la burbuja
-  misma (clic derecho). El hub queda para permisos, audio del sistema,
-  countdown e historial.
+> **Un permiso que dice "falta" y NUNCA pregunta está DENEGADO**, no pendiente
+> (típico: un diálogo huérfano que macOS resolvió solo al reiniciar). Fix:
+> `tccutil reset Camera so.saasfactory.sfcast` y relanzar. Con SIP activo no se
+> puede reiniciar tccd; si NINGÚN diálogo sale ni con el botón, **reinicia la Mac
+> una vez**. Nunca toques UserNotificationCenter: envenena la cola y todo se
+> vuelve deny instantáneo.
 
-## Selftest del motor (headless)
+---
 
-```bash
-/Applications/SFCast.app/Contents/MacOS/SFCast --selftest 4
-# SELFTEST_OK bytes=NNN → SCStream+SCRecordingOutput graban de verdad
-# Requiere que el permiso de pantalla del build ACTUAL ya esté aprobado
-# (macOS 26 lo liga al cdhash: tras un rebuild hay que re-aprobar 1 vez).
-```
+## 4. Grabar (uso diario)
 
-## URLs
+- **Click en el ⏺ del menu bar → MICROPANEL** (estilo Loom): modo
+  Pantalla/Ventana/Cámara · cámara con toggle (la burbuja se enciende **en vivo**
+  como preview) · mic con toggle + **vúmetro en tiempo real** · **Empezar a
+  grabar**. Click otra vez, ✕ o Esc = se oculta. **Click derecho = menú clásico.**
+- Atajo directo: **⌘⇧L** (countdown 3s → grabando).
+- **Burbuja**: arrástrala · hover = chips S·M·L·⛶ · doble clic = ciclar tamaño ·
+  clic derecho = tamaño y glow. **Queda quemada en el video** tal como la ves.
+- **Pill vertical** (arriba-izquierda, arrastrable): cuadro mostaza = **detener
+  y copiar link** · timer · ⏸ pausa. **Hover = se expande**: ↺ reiniciar · 🗑
+  descartar. No sale en el video.
+- **Al detener**: link copiado al instante + el navegador abre la página del
+  video ("Procesando…" que se convierte sola en el viewer).
+- **Historial**: hub → Historial (o menú ⏺: últimas 8, clic = copiar link).
+
+---
+
+## 5. Mejores prácticas (sacarle el jugo)
+
+**Antes de grabar**
+- **Usa el micropanel, no el atajo.** Los 3 segundos que te toma ver tu cara en
+  la burbuja y ver el vúmetro moverse te ahorran regrabar 10 minutos. Para eso
+  existe: es lo único que Loom hacía y nosotros no.
+- **Graba en la pantalla más chica que tengas.** La captura toma la resolución
+  NATIVA: un Retina o un 5K es 3-6x más píxeles = 3-6x más peso = 3-6x más
+  subida. Un monitor externo 1080p es el modo barato.
+- **Modo Ventana cuando no necesites tu cara.** Menos píxeles y sin burbuja.
+
+**Durante**
+- El pill se arrastra: si te tapa algo, muévelo. No sale en el video.
+- Pausa (⏸) en vez de rehacer: cada pausa abre un segmento nuevo y el VPS los
+  pega solos.
+- ¿Te trabaste? Hover al pill → **↺ reiniciar** tira lo grabado y empieza de
+  cero sin salir de la grabación.
+
+**Después**
+- **Pega el link YA.** Ya está en tu portapapeles y ya funciona: la página se
+  convierte sola en el viewer cuando el video llegue. No esperes mirando.
+- **Cada minuto grabado ≈ 12 MB ≈ 3 min de subida** con tu conexión actual (era
+  52 MB/min antes de comprimir). Un video de 20 minutos son ~50 min de subida:
+  si vas a grabar largo, arráncalo y vete a hacer otra cosa.
+- **No duermas la Mac mientras sube.** Si se corta, el video NO se pierde
+  (queda en `~/Movies/SFCast/{id}/`) y `--partial` reanuda, pero es tiempo tirado.
+- Si algo falla, **la grabación siempre está a salvo en local**. Dile a Levy que
+  la suba.
+
+**La palanca real**
+- Tu subida (~0.3-0.5 Mbps por Ethernet, contra 3.6 de bajada) es anormalmente
+  mala y es el techo de todo. Ya exprimimos el software: comprimimos 4.5x y
+  quitamos el gzip inútil. Lo que queda es tu ISP.
+
+---
+
+## 6. Ajustes
+
+Casi todo se opera desde el micropanel (modo, cámara, mic) o la burbuja (tamaño,
+glow). El hub guarda permisos, audio del sistema, countdown e historial.
+
+Lo demás vive en `~/Library/Application Support/SFCast/settings.json` (decode
+tolerante: agregar un campo no resetea tu config):
+
+| Campo | Default | Para qué |
+|---|---|---|
+| `compressBeforeUpload` | `true` | `false` sube el original de 7 Mbps (subida ~5x más lenta) |
+| `videoBitrateKbps` | `1200` | Ancla medida a 1080p de pantalla. **Escala sola con la resolución** (3024x1964 → ~3437k) y la cámara lleva el doble. Súbelo solo si ves borroso |
+| `fps` | `30` | |
+| `countdownSeconds` | `3` | |
+| `baseURL` | `https://videos.saasfactory.so` | |
+
+---
+
+## 7. URLs
 
 | Qué | URL |
 |---|---|
@@ -82,62 +168,89 @@ estable evita revocar cámara/mic).
 | Embed (iframe) | `https://videos.saasfactory.so/embed/{id}/` |
 | Biblioteca privada | `https://videos.saasfactory.so/biblioteca/` (user `daniel`, password en `~/Library/Application Support/SFCast/biblioteca-access.txt`) |
 
-**Embed en la comunidad/about:** botón "Copiar embed" en el viewer → pegar el
-`<iframe>` en cualquier lección HTML de SFC o página externa.
+**Embed en la comunidad:** botón "Copiar embed" en el viewer → pegar el
+`<iframe>` en cualquier lección de SFC o página externa.
 
-## Operar via Levy (AI-first — la UI es espejo)
+`livekit.saasfactory.so/v/{id}` sigue en 200 (ambos dominios sirven la misma
+carpeta): ningún link viejo se rompe. Ahí vive además el stack de videollamadas.
 
-Los videos viven en el VPS en `/opt/sfcast/www/media/{id}/` (video.mp4,
-thumb.jpg, data.json con transcript). Dile a Levy:
+---
+
+## 8. Operar via Levy (AI-first — la UI es espejo)
+
+Los videos viven en `/opt/sfcast/www/media/{id}/` (video.mp4, thumb.jpg,
+data.json con el transcript). Dile a Levy:
 
 - *"lista mis videos de SFCast"* → lee `/opt/sfcast/www/library.json`
-- *"borra el video X"* → borra `www/media/{id}`, `www/v/{id}`, `www/embed/{id}` y regenera biblioteca (reinicia el worker o toca `rebuild_library`)
-- *"renómbralo a …"* → edita `titulo` en data.json + regenera HTML (worker tiene las funciones)
-- *"recórtale los primeros N segundos"* → ffmpeg stream-copy sobre video.mp4 + regenerar thumb/transcript si hace falta
+- *"borra el video X"* → borra `www/media/{id}`, `www/v/{id}`, `www/embed/{id}` y regenera la biblioteca
+- *"renómbralo a …"* → edita `titulo` en data.json + regenera el HTML
+- *"recórtale los primeros N segundos"* → ffmpeg stream-copy + regenerar thumb
+- *"resube el video X"* → el que se quedó en `~/Movies/SFCast/{id}/`
 
-## Dominio propio: videos.saasfactory.so ✅ (activado 15 jul 2026)
+---
 
-Corriendo `/opt/sfcast/setup-domain.sh` en el VPS (lo ejecuta Daniel: correr
-scripts remotos con sudo es un denial del clasificador para Levy). El script es
-idempotente y hace todo: backup del Caddyfile → site `videos.saasfactory.so`
-(con `/biblioteca` protegida y `/api/cast/*` al worker) → validate + reload →
-`SFCAST_BASE_URL` del pipeline → restart del worker → **regenera los HTML de
-todos los videos ya existentes** con el dominio nuevo.
-
-En la Mac: `baseURL` de `settings.json` + el default de `Settings.swift`.
-
-**Los dos dominios sirven la misma carpeta**, así que ningún link viejo se
-rompe: `livekit.saasfactory.so/v/{id}` sigue en 200 (ahí vive además el stack
-de videollamadas). Lo nuevo sale como `videos.saasfactory.so/v/{id}`.
-
-## Monitoreo / recuperación
+## 9. Monitoreo / recuperación
 
 | Síntoma | Qué hacer |
 |---|---|
 | ¿Pipeline vivo? | `curl -s https://videos.saasfactory.so/api/cast/health` |
-| Video no aparece tras subir | `ssh hermes-vps 'tail -50 /var/log/sfcast-pipeline.log'` — sesiones fallidas quedan en `/opt/sfcast/incoming/{id}/` con archivo `FAILED`; borrar FAILED y `touch UPLOAD_DONE` para reintentar |
-| Upload falló en la Mac | el video queda en `~/Movies/SFCast/{id}/`; re-subir: `rsync -az ~/Movies/SFCast/{id}/ hermes-vps:/opt/sfcast/incoming/{id}/ && ssh hermes-vps touch /opt/sfcast/incoming/{id}/UPLOAD_DONE` |
-| Reiniciar worker | `ssh hermes-vps systemctl restart sfcast-pipeline` |
 | Validación completa | `./scripts/validate.sh` (5 checks, GREEN esperado) |
-| App no graba pantalla | System Settings → Privacidad → Grabación de pantalla → SFCast ON (y relanzar app) |
-| Disco Mac <10GB | ScreenCaptureKit puede cortar grabaciones (-3821). Liberar disco |
-| Video tarda mucho en aparecer | Es la SUBIDA, casi nunca el VPS. Comprobar: `tail -20 /var/log/sfcast-pipeline.log` en el VPS (el pipeline tarda ~20-90s desde que LLEGA el archivo). El techo real es el upstream de Daniel (~0.5 Mbps medido) |
-| Se ve borroso / quiero más calidad | Subir `videoBitrateKbps` en `~/Library/Application Support/SFCast/settings.json` (default 1200, ancla a 1080p — escala solo con la resolución). `compressBeforeUpload: false` desactiva la compresión y sube el original de 7 Mbps |
+| **El video tarda mucho** | Es la SUBIDA, casi nunca el VPS. El pipeline tarda 20-90s **desde que LLEGA** el archivo: `ssh hermes-vps 'tail -20 /var/log/sfcast-pipeline.log'` |
+| Video no aparece tras subir | Mismo log. Las sesiones fallidas quedan en `/opt/sfcast/incoming/{id}/` con un archivo `FAILED`; borrar `FAILED` y `touch UPLOAD_DONE` para reintentar |
+| Upload falló en la Mac | El video está en `~/Movies/SFCast/{id}/`. Resubir: `rsync -a ~/Movies/SFCast/{id}/ hermes-vps:/opt/sfcast/incoming/{id}/ && ssh hermes-vps touch /opt/sfcast/incoming/{id}/UPLOAD_DONE` |
+| Reiniciar worker | `ssh hermes-vps systemctl restart sfcast-pipeline` (ojo: el modelo tarda ~130s en precargar; el health responde antes) |
+| App no graba pantalla | System Settings → Privacidad → Grabación de pantalla → SFCast ON, y relanzar (típico tras un rebuild) |
+| Se ve borroso | `videoBitrateKbps` arriba (ver §6) |
+| Disco Mac <10GB | ScreenCaptureKit corta grabaciones (-3821). Liberar disco |
 
-## Primer uso real de Daniel (los clics one-time)
+**QA headless** (no requieren gesto humano):
 
-Al abrir SFCast y grabar por primera vez macOS pedirá, UNA vez: (1) re-confirmar
-**Grabación de pantalla** (toggle en Settings), (2) **Cámara** → Permitir (la
-burbuja pasa de placeholder negro a tu cara), (3) **Micrófono** → Permitir.
-Tras otorgar el mic: poner `"micEnabled": true` en
-`~/Library/Application Support/SFCast/settings.json` (quedó en `false` porque
-sin el permiso otorgado la grabación se colgaba). El audio de SISTEMA ya graba.
+```bash
+/Applications/SFCast.app/Contents/MacOS/SFCast --selftest 4       # motor de captura real
+/Applications/SFCast.app/Contents/MacOS/SFCast --paneltest 8      # muestra el pill sin grabar
+/Applications/SFCast.app/Contents/MacOS/SFCast --compresstest ~/Movies/SFCast/{id}   # compresor sobre una COPIA
+```
 
-## Límites conocidos (v1, decisiones honestas)
+---
 
-- Burbuja quemada = no editable post (a cambio: link instantáneo).
-- Modo ventana = sin burbuja (la burbuja vive en el display, no en la ventana).
-- Grabación en pausa NO sobrevive reinicio de la app.
-- El unit de Caddy puede mostrar estado "reloading" cosmético (la config nueva
-  SÍ está aplicada vía admin API); `systemctl restart caddy` lo limpia cuando
-  no haya clases en vivo.
+## 10. Invariantes (para quien toque el código — Levy incluido)
+
+1. **Una grabación JAMÁS se pierde.** Todo lo opcional es best-effort: sin
+   ffmpeg, ffmpeg falla, rebasa el deadline, el resultado sale más grande o con
+   otra duración ⇒ **se sube el original**. Comprimir no puede costar un video.
+2. **El link se copia ANTES de cerrar el MP4.** Ese orden ES la experiencia.
+3. **Todo proceso o llamada de sistema lleva deadline.** tccd se atasca y
+   `startCapture`/`stopCapture` se cuelgan para siempre; sin deadline el estado
+   queda en `.stopping` y "grabar de nuevo no hace nada". Y ojo:
+   `withTaskGroup` NO sirve de timeout (espera a las child tasks) — tasks no
+   estructuradas + continuation resume-once.
+4. **stderr de subprocesos a un ARCHIVO, nunca a un Pipe que nadie drena.** Se
+   llena a los ~64KB y bloquea al hijo para siempre. Mismo pie, dos veces ya.
+5. **camOnly graba `.mov`; los otros modos `.mp4`.** Cualquier cosa que itere
+   segmentos debe cubrir las dos extensiones.
+6. **La captura no baja de resolución** (nativa × backingScaleFactor): todo
+   bitrate fijo hay que escalarlo por píxeles o el texto sale borroso en Retina.
+7. **Las vistas layer-backed de AppKit tienen las animaciones implícitas
+   APAGADAS.** `layer.transform = x` salta. Usa `CABasicAnimation` explícita.
+8. **El pill lleva `sharingType = .none`**: es invisible a CUALQUIER captura,
+   incluido `screencapture`. Para revisar su diseño: `--paneltest`.
+9. **Review adversarial antes de shippear.** 3 rondas, 3 veces encontró algo
+   real que se me había pasado (el `.mov`, el bitrate sin escalar, el
+   `stopCapture` sin deadline).
+
+---
+
+## 11. Límites conocidos (decisiones honestas)
+
+- **Burbuja quemada** = no editable después. A cambio: link instantáneo.
+- **Modo ventana = sin burbuja** (la burbuja vive en el display, no en la ventana).
+- **Grabación en pausa no sobrevive** al reinicio de la app.
+- **No controlamos el bitrate de captura**: `SCRecordingOutputConfiguration` solo
+  expone outputURL, fileType y codec. Bajarlo en origen exigiría re-arquitecturar
+  a SCStream + AVAssetWriter y perder el 0.6-1.6% de CPU. Por eso comprimimos
+  después.
+- **ffmpeg es dependencia externa** (Homebrew). Si no está, todo funciona igual:
+  solo sube más lento.
+- El unit de Caddy puede mostrar "reloading" cosmético (la config nueva SÍ está
+  aplicada vía admin API); `systemctl restart caddy` lo limpia cuando no haya
+  clases en vivo.

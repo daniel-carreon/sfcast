@@ -1,0 +1,7 @@
+# Swift build artifacts
+.build/
+
+# Bundles / binarios compilados (la fuente se conserva)
+dist/
+*.app
+spike/spike

@@ -1,0 +1,27 @@
+[Unit]
+Description=SFCast pipeline (concat + whisper + LLM + publish) — Loom soberano SaaS Factory
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Reusa el venv del meet-pipeline (mismas deps: faster-whisper + aiohttp).
+ExecStart=/opt/livekit/pipeline/venv/bin/python3 /opt/sfcast/pipeline/sfcast_worker.py
+WorkingDirectory=/opt/sfcast/pipeline
+Restart=always
+RestartSec=10
+
+# INVARIANTE Meet Soberano: SFU dueño de cores 0-4. Todo lo pesado va a 5-7.
+# Nice=15 → SIEMPRE por debajo de meet-pipeline (Nice=10): si hay clase
+# grabándose, la clase gana.
+AllowedCPUs=5-7
+CPUQuota=200%
+MemoryMax=6G
+Nice=15
+IOSchedulingClass=idle
+
+StandardOutput=append:/var/log/sfcast-pipeline.log
+StandardError=append:/var/log/sfcast-pipeline.log
+
+[Install]
+WantedBy=multi-user.target

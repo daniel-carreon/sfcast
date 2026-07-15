@@ -367,6 +367,11 @@ final class RecordingController {
     }
 
     private func prepareSession(mode: Mode) {
+        // TODO arranque pasa por aquí (botón del micropanel, ⌘⇧L, menú clásico):
+        // cerrar el micropanel y apagar su vúmetro SIEMPRE — el meter tiene su
+        // propia AVCaptureSession sobre el mic y competiría con SCStream o con
+        // el session de la burbuja (hallazgo CONFIRMADO del review v1.4).
+        LauncherPanelController.shared.hide(keepPreview: true)
         self.mode = mode
         generation += 1
         videoID = makeVideoID()

@@ -37,7 +37,12 @@ estable evita revocar cámara/mic).
 
 ## Grabar (uso diario)
 
-- **Hub → "Grabar pantalla"**, **⌘⇧L**, o menú ⏺: countdown 3s → grabando.
+- **Click en el icono ⏺ del menu bar → MICROPANEL (v1.4, estilo Loom):** modo
+  Pantalla/Ventana/Cámara · cámara con toggle On/Off (la burbuja se enciende
+  EN VIVO como preview) · mic con toggle + VÚMETRO en tiempo real (verificas
+  que se escucha ANTES de grabar) · botón **Empezar a grabar**. Click al icono
+  otra vez, ✕ o Esc = se oculta todo. Click DERECHO = menú clásico.
+- También: **⌘⇧L** directo, o menú ⏺ (clic derecho): countdown 3s → grabando.
 - **Burbuja de cámara**: arrástrala a donde quieras · hover = chips S·M·L·⛶ ·
   doble clic = ciclar tamaño · clic derecho = tamaños y glow (ámbar/morado/nada).
   Se queda GRABADA en el video tal como la ves (burn-in, decisión de diseño).
@@ -49,8 +54,10 @@ estable evita revocar cámara/mic).
 - Otros modos en el menú ⏺: **Grabar ventana** (una app específica, sin
   burbuja) y **Grabar solo cámara** (talking head).
 - **Historial**: hub → Historial (o menú ⏺, últimas 8, clic = copiar link).
-- Cámara/mic se eligen en hub → Ajustes (cambiar la cámara con la burbuja en
-  pantalla la cambia EN VIVO).
+- Cámara/mic/modo se eligen en el MICROPANEL (cambiar la cámara con la burbuja
+  en pantalla la cambia EN VIVO). Tamaño/glow de la burbuja: en la burbuja
+  misma (clic derecho). El hub queda para permisos, audio del sistema,
+  countdown e historial.
 
 ## Selftest del motor (headless)
 

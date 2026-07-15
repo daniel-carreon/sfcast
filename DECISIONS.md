@@ -146,3 +146,42 @@ UNC (log limpio). En un tccd sano eso pinta el diálogo a la primera.
 kill de UNC; (b) `resetAndReRequest` bloqueaba el MainActor con `waitUntilExit()` →
 ahora corre en `Task.detached`; (c) la cámara en background podía encenderse tras
 cancelar → guarda `bubble.isVisible`.
+
+## v1.4 — El micropanel Loom-style y el preview honesto (15 jul, mañana)
+
+Daniel pidió (con capturas de Loom): panel pre-grabación minimalista desde el
+icono del menu bar, saber si el mic escucha y ver la cámara ANTES de grabar,
+glow más sutil, y menos "basura" instructiva en el hub.
+
+1. **LauncherPanel.swift (nuevo):** click IZQUIERDO en el icono → micropanel
+   (modo Pantalla/Ventana/Cámara, fila cámara picker+toggle, fila mic
+   picker+toggle+VÚMETRO en vivo, Empezar a grabar, footer mínimo). Click
+   derecho (u Option, o durante grabación) → menú clásico. Esc o click al
+   icono = se oculta todo.
+2. **Preview honesto:** al abrir el panel, la burbuja se enciende EN VIVO
+   (misma CameraBubble que se quema en el video) y el vúmetro
+   (MicLevelMeter: AVCaptureSession propia + AVCaptureAudioDataOutput,
+   -50dB→0dB normalizado, ataque rápido/caída suave) confirma que el mic
+   escucha. **Invariante:** el meter se detiene SIEMPRE antes de grabar —
+   centralizado en `RecordingController.prepareSession()` para que ⌘⇧L y el
+   menú clásico también lo cumplan (hallazgo CONFIRMADO del review
+   adversarial: 3 de 4 caminos de arranque dejaban el meter vivo peleando el
+   mic con SCStream).
+3. **Glow sutil:** shadowRadius 24→10, opacity .95→.5, borde 2→1.5. El blur
+   viejo desbordaba el glowPad (34px) y se recortaba contra el borde cuadrado
+   del panel — eso eran los "contornos cuadrados" que Daniel veía.
+4. **cameraEnabled (setting nuevo)** con decode TOLERANTE en AppSettings
+   (decodeIfPresent campo por campo): agregar un campo ya no invalida el
+   settings.json viejo (antes reseteaba la config en silencio).
+5. **Declutter:** hub sin card "Cómo grabar" ni marketing del sidebar;
+   Ajustes queda solo audio del sistema + countdown (cámara/mic/modo viven en
+   el micropanel; tamaño/glow en la burbuja misma con clic derecho).
+6. **Fixes del review adversarial (workflow 17 agentes, 5 confirmados):**
+   meter.stop() síncrono (queue.sync — carrera con countdown 0), keepPreview
+   solo para arranque de grabación (el engrane/Historial apagan la cámara),
+   clamp del panel contra la pantalla DEL ANCLA (no NSScreen.main), botón
+   deshabilitado en modo Cámara con cámara OFF (startCamOnly ignoraba el
+   toggle).
+
+Gotcha vigente: cada rebuild cambia el cdhash → macOS re-pide el permiso de
+PANTALLA una vez (cámara/mic sobreviven por bundle ID + cert estable).

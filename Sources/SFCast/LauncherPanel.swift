@@ -41,7 +41,12 @@ final class MicLevelMeter: NSObject, ObservableObject {
     }
 
     func stop() {
-        if let s = session { queue.async { s.stopRunning() } }
+        // SÍNCRONO a propósito (hallazgo del review v1.4): con countdown en 0,
+        // un stop fire-and-forget podía seguir vivo cuando la grabación ya
+        // estaba tomando el mismo mic. queue.sync espera a que el último
+        // callback del delegate termine (el callback no bloquea main: solo
+        // agenda un Task, así que no hay deadlock) y detiene la sesión YA.
+        if let s = session { queue.sync { s.stopRunning() } }
         session = nil
         level = 0
     }
@@ -120,7 +125,12 @@ final class LauncherPanelController {
         guard let panel, let hosting else { return }
         let size = hosting.fittingSize
         var x = anchorMidX - size.width / 2
-        if let vf = NSScreen.main?.visibleFrame {
+        // clamp contra la pantalla DEL ANCLA (el icono puede vivir en el
+        // monitor secundario — NSScreen.main es la pantalla con foco, no esa).
+        let anchorScreen = NSScreen.screens.first {
+            $0.frame.contains(NSPoint(x: anchorMidX, y: anchorTop - 1))
+        } ?? NSScreen.main
+        if let vf = anchorScreen?.visibleFrame {
             x = min(max(x, vf.minX + 8), vf.maxX - size.width - 8)
         }
         panel.setFrame(NSRect(x: x, y: anchorTop - size.height,
@@ -253,7 +263,9 @@ struct LauncherView: View {
             Text("SFCast").font(.system(size: 14, weight: .bold)).foregroundColor(Theme.txt)
             Spacer()
             iconButton("gearshape.fill", tip: "Ajustes") {
-                LauncherPanelController.shared.hide(keepPreview: true)
+                // hide() PLENO: si no va a arrancar grabación, la cámara se
+                // apaga (keepPreview era fuga: luz encendida sin propósito).
+                LauncherPanelController.shared.hide()
                 HubWindowController.shared.show()
             }
             iconButton("xmark", tip: "Cerrar") {
@@ -422,7 +434,11 @@ struct LauncherView: View {
     }
 
     private var startDisabled: Bool {
-        mode == .window && (selectedWindow < 0 || selectedWindow >= windows.count)
+        if mode == .window { return selectedWindow < 0 || selectedWindow >= windows.count }
+        // modo Cámara con la cámara apagada = combo sin sentido (hallazgo del
+        // review v1.4: startCamOnly prendería la cámara pese al toggle OFF)
+        if mode == .camOnly { return !s.cameraEnabled }
+        return false
     }
 
     private func start() {
@@ -444,7 +460,7 @@ struct LauncherView: View {
     private var footer: some View {
         HStack(spacing: 18) {
             footItem("clock.fill", "Historial") {
-                LauncherPanelController.shared.hide(keepPreview: true)
+                LauncherPanelController.shared.hide()
                 HubWindowController.shared.show()
             }
             footItem("books.vertical.fill", "Biblioteca") {

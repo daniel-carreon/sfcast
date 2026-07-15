@@ -16,11 +16,11 @@ step "[2/5] py_compile (worker VPS)"
 if python3 -m py_compile "$ROOT/infra/sfcast_worker.py" 2>/dev/null; then ok; else bad "sintaxis"; fi
 
 step "[3/5] worker /health (VPS via Caddy)"
-H=$(curl -s --max-time 10 https://livekit.saasfactory.so/api/cast/health 2>/dev/null)
+H=$(curl -s --max-time 10 https://videos.saasfactory.so/api/cast/health 2>/dev/null)
 if echo "$H" | grep -q '"ok": true'; then ok; else bad "$H"; fi
 
 step "[4/5] biblioteca gated (401 sin auth)"
-CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 https://livekit.saasfactory.so/biblioteca/ 2>/dev/null)
+CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 https://videos.saasfactory.so/biblioteca/ 2>/dev/null)
 if [ "$CODE" = "401" ]; then ok; else bad "HTTP $CODE"; fi
 
 step "[5/5] healthcheck LiveKit VPS (invariante Meet)"

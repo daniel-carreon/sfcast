@@ -3,7 +3,7 @@ import Foundation
 struct AppSettings: Codable {
     var sshHost = "hermes-vps"
     var remoteIncoming = "/opt/sfcast/incoming"
-    var baseURL = "https://livekit.saasfactory.so"
+    var baseURL = "https://videos.saasfactory.so"
     var bubbleSize = "m"            // s | m | l | full
     var bubbleGlow = "ambar"        // ambar | morado | nada
     var cameraDeviceID: String? = nil   // uniqueID; nil = default del sistema

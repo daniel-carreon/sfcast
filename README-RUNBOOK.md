@@ -74,9 +74,9 @@ estable evita revocar cámara/mic).
 
 | Qué | URL |
 |---|---|
-| Video | `https://livekit.saasfactory.so/v/{id}/` |
-| Embed (iframe) | `https://livekit.saasfactory.so/embed/{id}/` |
-| Biblioteca privada | `https://livekit.saasfactory.so/biblioteca/` (user `daniel`, password en `~/Library/Application Support/SFCast/biblioteca-access.txt`) |
+| Video | `https://videos.saasfactory.so/v/{id}/` |
+| Embed (iframe) | `https://videos.saasfactory.so/embed/{id}/` |
+| Biblioteca privada | `https://videos.saasfactory.so/biblioteca/` (user `daniel`, password en `~/Library/Application Support/SFCast/biblioteca-access.txt`) |
 
 **Embed en la comunidad/about:** botón "Copiar embed" en el viewer → pegar el
 `<iframe>` en cualquier lección HTML de SFC o página externa.
@@ -91,19 +91,26 @@ thumb.jpg, data.json con transcript). Dile a Levy:
 - *"renómbralo a …"* → edita `titulo` en data.json + regenera HTML (worker tiene las funciones)
 - *"recórtale los primeros N segundos"* → ffmpeg stream-copy sobre video.mp4 + regenerar thumb/transcript si hace falta
 
-## Migrar a videos.saasfactory.so (5 min, cuando Daniel quiera)
+## Dominio propio: videos.saasfactory.so ✅ (activado 15 jul 2026)
 
-1. Namecheap → saasfactory.so → DNS → **A record**: `videos` → `187.77.22.235`.
-2. VPS: duplicar el bloque SFCast del Caddyfile en un site `videos.saasfactory.so { ... }` (mismo root; Caddy emite TLS solo).
-3. `/opt/sfcast/pipeline/.env` → `SFCAST_BASE_URL=https://videos.saasfactory.so` + `systemctl restart sfcast-pipeline`.
-4. Mac: `~/Library/Application Support/SFCast/settings.json` → `baseURL` nuevo.
-5. Los videos viejos siguen sirviendo en ambos dominios (mismo root).
+Corriendo `/opt/sfcast/setup-domain.sh` en el VPS (lo ejecuta Daniel: correr
+scripts remotos con sudo es un denial del clasificador para Levy). El script es
+idempotente y hace todo: backup del Caddyfile → site `videos.saasfactory.so`
+(con `/biblioteca` protegida y `/api/cast/*` al worker) → validate + reload →
+`SFCAST_BASE_URL` del pipeline → restart del worker → **regenera los HTML de
+todos los videos ya existentes** con el dominio nuevo.
+
+En la Mac: `baseURL` de `settings.json` + el default de `Settings.swift`.
+
+**Los dos dominios sirven la misma carpeta**, así que ningún link viejo se
+rompe: `livekit.saasfactory.so/v/{id}` sigue en 200 (ahí vive además el stack
+de videollamadas). Lo nuevo sale como `videos.saasfactory.so/v/{id}`.
 
 ## Monitoreo / recuperación
 
 | Síntoma | Qué hacer |
 |---|---|
-| ¿Pipeline vivo? | `curl -s https://livekit.saasfactory.so/api/cast/health` |
+| ¿Pipeline vivo? | `curl -s https://videos.saasfactory.so/api/cast/health` |
 | Video no aparece tras subir | `ssh hermes-vps 'tail -50 /var/log/sfcast-pipeline.log'` — sesiones fallidas quedan en `/opt/sfcast/incoming/{id}/` con archivo `FAILED`; borrar FAILED y `touch UPLOAD_DONE` para reintentar |
 | Upload falló en la Mac | el video queda en `~/Movies/SFCast/{id}/`; re-subir: `rsync -az ~/Movies/SFCast/{id}/ hermes-vps:/opt/sfcast/incoming/{id}/ && ssh hermes-vps touch /opt/sfcast/incoming/{id}/UPLOAD_DONE` |
 | Reiniciar worker | `ssh hermes-vps systemctl restart sfcast-pipeline` |

@@ -13,6 +13,12 @@ struct AppSettings: Codable {
     var systemAudioEnabled = true
     var countdownSeconds = 3
     var fps = 30
+    /// Re-encode por hardware antes de subir (~5x más chico ⇒ ~5x más rápido).
+    /// Ver Transcoder.swift para el porqué y las mediciones.
+    var compressBeforeUpload = true
+    /// 1200 kbps medido sobre grabación real de pantalla 1080p: 5x más chico y
+    /// se leen los menús y la barra lateral. Subir a 2000 si algún día se nota.
+    var videoBitrateKbps = 1200
 
     init() {}
 
@@ -33,6 +39,8 @@ struct AppSettings: Codable {
         systemAudioEnabled = try c.decodeIfPresent(Bool.self, forKey: .systemAudioEnabled) ?? systemAudioEnabled
         countdownSeconds = try c.decodeIfPresent(Int.self, forKey: .countdownSeconds) ?? countdownSeconds
         fps = try c.decodeIfPresent(Int.self, forKey: .fps) ?? fps
+        compressBeforeUpload = try c.decodeIfPresent(Bool.self, forKey: .compressBeforeUpload) ?? compressBeforeUpload
+        videoBitrateKbps = try c.decodeIfPresent(Int.self, forKey: .videoBitrateKbps) ?? videoBitrateKbps
     }
 
     static let dir = URL(fileURLWithPath: NSString(

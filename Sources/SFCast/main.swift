@@ -16,7 +16,30 @@ if let i = cliArgs.firstIndex(of: "--selftest") {
 }
 if cliArgs.contains("--no-upload") { demoNoUpload = true }
 if cliArgs.contains("--version") {
-    print("SFCast 1.5.0")
+    print("SFCast 1.6.0")
+    exit(0)
+}
+
+/// QA del compresor (`--compresstest <dir>`): corre Transcoder sobre una COPIA
+/// del directorio dado y reporta antes/después. Existe porque comprimir es lo
+/// único del flujo que toca el MP4 en sitio: quiero poder probar el camino real
+/// (temporal fuera de sessionDir, compuertas de tamaño y duración, replace)
+/// contra un video de verdad sin arriesgar una grabación.
+if let i = cliArgs.firstIndex(of: "--compresstest"), i + 1 < cliArgs.count {
+    let src = URL(fileURLWithPath: cliArgs[i + 1])
+    let tmp = FileManager.default.temporaryDirectory
+        .appendingPathComponent("sfcast-compresstest-\(UUID().uuidString)")
+    let kbps = AppSettings.load().videoBitrateKbps
+    do { try FileManager.default.copyItem(at: src, to: tmp) } catch {
+        print("COMPRESSTEST_FAIL no pude copiar: \(error.localizedDescription)"); exit(1)
+    }
+    let sem = DispatchSemaphore(value: 0)
+    Task.detached {
+        let (before, after) = await Transcoder.compressSegments(in: tmp, bitrateKbps: kbps)
+        print("COMPRESSTEST before=\(before) after=\(after) dir=\(tmp.path)")
+        sem.signal()
+    }
+    sem.wait()
     exit(0)
 }
 

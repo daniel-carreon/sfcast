@@ -109,7 +109,7 @@ struct HubView: View {
                 .buttonStyle(.plain)
             }
             Spacer()
-            Text("v1.5").font(.system(size: 9)).foregroundColor(Theme.dim.opacity(0.6))
+            Text("v1.6").font(.system(size: 9)).foregroundColor(Theme.dim.opacity(0.6))
                 .padding(.bottom, 16)
         }
         .padding(.horizontal, 14)

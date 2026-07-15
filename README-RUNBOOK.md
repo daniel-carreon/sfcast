@@ -52,7 +52,11 @@ estable evita revocar cámara/mic).
   NO sale en el video.
 - **Al detener**: el link queda EN EL PORTAPAPELES al instante Y se abre el
   navegador en la página del video ("Procesando…" que se convierte sola en el
-  viewer: ~1-3 min para un video de 5 min).
+  viewer). Detrás, sin que se note: se comprime por hardware (~4.5x más chico,
+  ~2.6s por cada 17s de video) y se sube. **El tiempo de espera es la SUBIDA,
+  no el VPS** (el pipeline entero tarda ~20-90s): con ~0.5 Mbps de subida, un
+  video de 5 min pasa de ~70 min a ~14. Si algún día el internet mejora, esto
+  baja a menos de un minuto.
 - Otros modos en el menú ⏺: **Grabar ventana** (una app específica, sin
   burbuja) y **Grabar solo cámara** (talking head).
 - **Historial**: hub → Historial (o menú ⏺, últimas 8, clic = copiar link).
@@ -117,6 +121,8 @@ de videollamadas). Lo nuevo sale como `videos.saasfactory.so/v/{id}`.
 | Validación completa | `./scripts/validate.sh` (5 checks, GREEN esperado) |
 | App no graba pantalla | System Settings → Privacidad → Grabación de pantalla → SFCast ON (y relanzar app) |
 | Disco Mac <10GB | ScreenCaptureKit puede cortar grabaciones (-3821). Liberar disco |
+| Video tarda mucho en aparecer | Es la SUBIDA, casi nunca el VPS. Comprobar: `tail -20 /var/log/sfcast-pipeline.log` en el VPS (el pipeline tarda ~20-90s desde que LLEGA el archivo). El techo real es el upstream de Daniel (~0.5 Mbps medido) |
+| Se ve borroso / quiero más calidad | Subir `videoBitrateKbps` en `~/Library/Application Support/SFCast/settings.json` (default 1200, ancla a 1080p — escala solo con la resolución). `compressBeforeUpload: false` desactiva la compresión y sube el original de 7 Mbps |
 
 ## Primer uso real de Daniel (los clics one-time)
 

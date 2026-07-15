@@ -13,7 +13,7 @@ struct Uploader {
         var stoppedAt: String
         var durationSeconds: Double
         var segments: [String]
-        var appVersion = "1.5.0"
+        var appVersion = "1.6.0"
     }
 
     /// Publica la página "Procesando…" instantánea en /v/<id>/ ANTES del upload.
@@ -106,8 +106,10 @@ struct Uploader {
                 try await run("/usr/bin/ssh",
                               ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
                                settings.sshHost, "mkdir -p '\(remoteDir)'"])
+                // -a, NO -az: el payload es HEVC (ya comprimido) — gzip no gana
+                // un byte y quema CPU en los dos lados del túnel.
                 try await run("/usr/bin/rsync",
-                              ["-az", "--partial",
+                              ["-a", "--partial",
                                "-e", "/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=15",
                                sessionDir.path + "/",
                                "\(settings.sshHost):\(remoteDir)/"])

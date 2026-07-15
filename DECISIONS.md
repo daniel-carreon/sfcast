@@ -226,3 +226,55 @@ animación y encima se tarda unos segundos".
    sin este modo no hay forma de revisar su diseño con un screenshot. Es el
    ÚNICO modo donde el pill se deja capturable. Hover verificado midiendo el
    frame real: 112 → 188 → 112.
+
+## v1.6 — Comprimir antes de subir (15 jul 2026)
+
+Daniel preguntó "¿hay forma de acelerar la velocidad del procesamiento?". Se
+midió antes de tocar nada, y la pregunta apuntaba al lugar equivocado:
+
+| Etapa | Medido (video de 17s del 15 jul) |
+|---|---|
+| Subida Mac → VPS | **~15 min** |
+| Pipeline del VPS entero | **89s** (de los cuales 73 eran cargar el modelo) |
+
+1. **El cuello era la SUBIDA, no el pipeline.** SCRecordingOutput escribe a
+   **7 Mbps** (15 MB por 17 segundos = 52 MB por minuto grabado) y su API NO
+   expone bitrate: `SCRecordingOutputConfiguration` solo tiene outputURL,
+   outputFileType y videoCodecType. El upstream de Daniel se midió en **≤0.33
+   Mbps contra Cloudflare** (endpoint neutral, para descartar al VPS) contra
+   3.6 Mbps de bajada, por Ethernet. 52 MB/min sobre 0.5 Mbps = ~14 min de
+   espera por minuto grabado.
+2. **Re-encode por hardware antes de subir** (`Transcoder.swift`): ffmpeg
+   `hevc_videotoolbox` deja el archivo **4.5x más chico en 2.6s** (medido sobre
+   el video real: 14.5 MB → 3.2 MB, y el frame 200 muestra los menús y la barra
+   lateral perfectamente legibles). Corre DESPUÉS de copiar el link y abrir el
+   navegador: no se siente, y el video aparece 4-5x antes.
+   **Por qué no capturar más chico de origen:** habría que re-arquitecturar a
+   SCStream + AVAssetWriter (`AVVideoAverageBitRateKey`) y perder el
+   SCRecordingOutput que nos da 0.6-1.6% de CPU. Un re-encode de 2.6s en
+   background es infinitamente más barato.
+3. **Best-effort y NO destructivo, siempre**: sin ffmpeg / ffmpeg falla /
+   rebasa el deadline / el resultado sale más grande o con otra duración ⇒ se
+   sube el ORIGINAL. Comprimir jamás puede costar un video. El temporal vive
+   FUERA de sessionDir (rsync sube el directorio entero) y el stderr va a un
+   ARCHIVO, no a un Pipe (ffmpeg llenaría los 64KB del buffer y se colgaría).
+4. **Bitrate escalado por PÍXELES** (hallazgo del review): el ancla de 1200k
+   está medida a 1080p, pero la captura no baja de resolución — en Retina/5K
+   son 3-6x más píxeles y el texto saldría borroso, justo el caso de uso.
+   Se escala manteniendo los bits/píxel verificados: un 3024x1964 sale a 3437k
+   solo. La cámara lleva ancla doble (el mundo real es menos compresible que
+   una pantalla quieta).
+5. **camOnly graba `.mov`, no `.mp4`** (hallazgo del review): filtrar solo
+   `.mp4` dejaba el modo cámara entero sin comprimir — y encima ya sin el `-z`
+   del rsync, o sea PEOR que v1.5. Se conserva la extensión del original: el
+   worker ya globea las dos y así meta.json no se entera.
+6. **`-a` en vez de `-az` en rsync**: el payload es HEVC, ya comprimido. gzip
+   no gana un byte y quema CPU en los dos lados.
+7. **Precarga de Whisper al arrancar el worker**: el modelo tarda **130s en
+   frío** y lo pagaba el PRIMER video después de cada restart (se ve en el log
+   del 15 jul: 14:19:22 → 14:20:35). Ahora carga en un hilo al arranque, con
+   candado (sin él, la precarga y el poller podían cargar DOS modelos en RAM).
+8. **`--compresstest <dir>`**: modo QA que corre el compresor sobre una COPIA
+   del directorio. Comprimir es lo único del flujo que toca el MP4 en sitio;
+   quería probar el camino real (compuertas, replace, temporal) contra videos
+   de verdad sin arriesgar una grabación.

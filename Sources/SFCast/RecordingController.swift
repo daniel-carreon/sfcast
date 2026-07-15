@@ -337,6 +337,14 @@ final class RecordingController {
             } catch {
                 Log.error("Placeholder no se pudo publicar (sigo con el upload): \(error.localizedDescription)")
             }
+            // COMPRIMIR ANTES DE SUBIR (v1.6). Va DESPUÉS del placeholder y del
+            // navegador a propósito: el link ya está copiado y la página ya está
+            // abierta, así que estos ~2s por cada 15s de video no se sienten —
+            // y a cambio el archivo sube ~5x más rápido, que es donde estaba TODA
+            // la espera real (89s de pipeline vs ~15 min de subida, medido 15 jul).
+            if uploaderSettings.compressBeforeUpload {
+                await Transcoder.compressSegments(in: dir, bitrateKbps: uploaderSettings.videoBitrateKbps)
+            }
             let meta = Uploader.Meta(
                 id: id, mode: modeRaw,
                 startedAt: ISO8601DateFormatter().string(from: began),

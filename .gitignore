@@ -5,3 +5,7 @@
 dist/
 *.app
 spike/spike
+
+# Python
+__pycache__/
+*.pyc

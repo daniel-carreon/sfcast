@@ -505,6 +505,75 @@ $('exportBtn').addEventListener('click', exportFixes);
 $('modalClose').addEventListener('click', () => { $('modal').hidden = true; });
 $('modal').addEventListener('pointerdown', (e) => { if (e.target === $('modal')) $('modal').hidden = true; });
 
+// ---------- panel ⌘Y (SFPublish) ----------
+// Espejo AI-first del pipeline post-edición: LEE publish.json (lo escriben los comandos sfpublish
+// que corre el agente) y lo pinta. CERO forms: si una etapa pide decisión humana, se decide
+// CONVERSANDO con Levy, no clickeando aquí.
+const PP_ICON = { done: '●', running: '◐', error: '●', partial: '◐', pending: '○' };
+let ppTimer = null;
+function togglePublishPanel() {
+  const panel = $('publishPanel');
+  if (panel.hidden) {
+    panel.hidden = false;
+    refreshPublish();
+    ppTimer = setInterval(refreshPublish, 2000); // poll: el agente escribe, el panel refleja
+  } else {
+    panel.hidden = true;
+    clearInterval(ppTimer);
+    ppTimer = null;
+  }
+}
+async function refreshPublish() {
+  try {
+    renderPublish(await (await fetch('/api/publish')).json());
+  } catch { /* server fuera: el panel conserva lo último pintado */ }
+}
+function ppAgo(iso) {
+  if (!iso) return '';
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 90) return 'hace un momento';
+  if (s < 3600) return `hace ${Math.round(s / 60)} min`;
+  if (s < 86400) return `hace ${Math.round(s / 3600)} h`;
+  return new Date(iso).toLocaleString('es-MX', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+function renderPublish(j) {
+  const box = $('ppStages');
+  const stages = j.stages || [];
+  const cmds = j.commands || {};
+  const proj = j.project || '<proyecto>';
+  if (!j.found) {
+    $('ppSlug').textContent = '';
+    box.innerHTML = '';
+    const d = document.createElement('div');
+    d.className = 'ppEmpty';
+    d.innerHTML = `sin <b>publish.json</b> en este proyecto.<br>Pídele a Levy que arranque la etapa 2, o corre:<br><code>node bin/sfpublish.js ${proj} init</code>`;
+    box.appendChild(d);
+    return;
+  }
+  const pub = j.publish;
+  $('ppSlug').textContent = `${pub.video?.slug || ''}${pub.video?.titulo ? ` · ${pub.video.titulo}` : ''}`;
+  box.innerHTML = '';
+  for (const s of stages) {
+    const st = pub.stages?.[s] || { status: 'pending', evidence: '', updated_at: null };
+    const card = document.createElement('div');
+    card.className = `ppStage ${st.status}`;
+    const cmd = (cmds[s] || '').replace('<proyecto>', proj);
+    card.innerHTML = `
+      <span class="ppDot">${PP_ICON[st.status] || '○'}</span>
+      <div class="ppBody">
+        <div class="ppRow"><span class="ppName">${s}</span><span class="ppTime">${ppAgo(st.updated_at)}</span></div>
+        <div class="ppEv">${st.evidence ? escapeHtml(st.evidence) : '<i>pendiente</i>'}</div>
+        <code class="ppCmd" title="el comando que corre el agente para esta etapa">${escapeHtml(cmd)}</code>
+      </div>`;
+    box.appendChild(card);
+  }
+}
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+$('ppClose').addEventListener('click', togglePublishPanel);
+$('publishPanel').addEventListener('pointerdown', (e) => { if (e.target === $('publishPanel')) togglePublishPanel(); });
+
 let toastTimer = null;
 function toast(msg) {
   const t = $('toast');
@@ -523,6 +592,7 @@ window.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
 
   if ((e.metaKey || e.ctrlKey) && k === 'z') { e.preventDefault(); undo(); return; }
+  if ((e.metaKey || e.ctrlKey) && k === 'y') { e.preventDefault(); togglePublishPanel(); return; }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
 
   switch (k) {
@@ -532,6 +602,7 @@ window.addEventListener('keydown', (e) => {
     case 'd': pushUndo(); if (trimRight(state, t, project.duration)) { refresh(); toast('recorte →'); } else undoStack.pop(); break;
     case 'm': openMarkerPopover(t); break;
     case 'e': exportFixes(); break;
+    case 'y': togglePublishPanel(); break;
     case ',': case '<': cycleSpeed(-1); break;
     case '.': case '>': cycleSpeed(1); break;
     case 'arrowleft': e.preventDefault(); base.currentTime = Math.max(0, t - frame * (e.shiftKey ? 10 : 1)); break;

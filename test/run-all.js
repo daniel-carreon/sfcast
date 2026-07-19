@@ -24,19 +24,20 @@ function sh(cmd, args, opts = {}) {
 
 // ── 1. sintaxis de todos los JS
 {
-  const files = ['bin/sfrender.js', 'bin/sfreview.js', 'bin/sfstudio-apply.js',
-    'lib/render.js', 'lib/static-server.js', 'web/app.js', 'web/model.js',
-    'test/model.test.js', 'test/server.test.js'];
+  const files = ['bin/sfrender.js', 'bin/sfreview.js', 'bin/sfstudio-apply.js', 'bin/sfpublish.js',
+    'lib/render.js', 'lib/static-server.js', 'lib/publish.js', 'lib/upload-youtube.js',
+    'web/app.js', 'web/model.js',
+    'test/model.test.js', 'test/server.test.js', 'test/publish.test.js'];
   let bad = files.filter((f) => sh('node', ['--check', path.join(ROOT, f)]).code !== 0);
   report(`sintaxis (node --check x${files.length})`, bad.length === 0, bad.join(', '));
 }
 
-// ── 2. unit tests: modelo de trims + server (traversal/CORS, regresión revisión 18 jul)
+// ── 2. unit tests: modelo de trims + server (traversal/CORS) + publish (gate/menciones/slots)
 {
-  const r = sh('node', ['--test', 'test/model.test.js', 'test/server.test.js']);
+  const r = sh('node', ['--test', 'test/model.test.js', 'test/server.test.js', 'test/publish.test.js']);
   const pass = /# pass (\d+)/.exec(r.out)?.[1];
   const fail = /# fail (\d+)/.exec(r.out)?.[1];
-  report(`modelo + server (node --test)`, r.code === 0 && fail === '0', `${pass} pass / ${fail} fail`);
+  report(`modelo + server + publish (node --test)`, r.code === 0 && fail === '0', `${pass} pass / ${fail} fail`);
 }
 
 // ── 3. humo sfrender: card-smoke 320x180 @0.5s = 15 frames exactos
@@ -96,10 +97,22 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     `exit=${rC.code}`);
 }
 
-// ── 6. humo sfreview con Playwright: proyecto 9:16, keys S/D, trim visible, export, 0 errores consola
+// ── 6. humo sfreview con Playwright: proyecto 9:16, keys S/D, trim visible, export, panel ⌘Y, 0 errores consola
 {
   const PORT = 3999;
   const projDir = path.join(ROOT, 'demo', 'project-916');
+  // publish.json de prueba: el panel ⌘Y debe pintarlo (espejo del pipeline post-edición)
+  const pubFixture = {
+    video: { slug: 'vid-humo', titulo: 'Video de humo' },
+    stages: {
+      metadata: { status: 'done', evidence: 'descripción 1000 chars · 3 títulos', updated_at: new Date().toISOString() },
+      link: { status: 'done', evidence: '/go/vid-humo ✓ 307 · cookies vivas', updated_at: new Date().toISOString() },
+      mentions: { status: 'running', evidence: 'buscando…', updated_at: new Date().toISOString() },
+      checklist: { status: 'error', evidence: 'gate cerrado', updated_at: new Date().toISOString() },
+    },
+    log: [], data: {},
+  };
+  await fsp.writeFile(path.join(projDir, 'publish.json'), JSON.stringify(pubFixture));
   const srv = spawn('node', [path.join(ROOT, 'bin', 'sfreview.js'), projDir, '--port', String(PORT)], { stdio: 'ignore' });
   let ok = false, detail = '';
   try {
@@ -144,14 +157,24 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     const fixesTxt = await fsp.readFile(path.join(projDir, 'fixes.json'), 'utf8');
     const fx = JSON.parse(fixesTxt);
     const fixesOk = fx.trims?.length === 1 && Math.abs(fx.trims[0].start - 0.5) < 0.05 && fx.markers?.length === 1;
+    // panel ⌘Y (SFPublish): togglea, pinta las etapas del publish.json de prueba, cierra
+    await page.click('#modalClose');
+    await page.keyboard.press('y');
+    await page.waitForSelector('#publishPanel:not([hidden])', { timeout: 5000 });
+    const nStages = await page.$$eval('.ppStage', (els) => els.length);
+    const doneEv = await page.$$eval('.ppStage.done .ppEv', (els) => els.map((e) => e.textContent).join(' | '));
+    const slugTxt = await page.$eval('#ppSlug', (el) => el.textContent);
+    await page.keyboard.press('y');
+    const panelHidden = await page.$eval('#publishPanel', (el) => el.hidden);
+    const panelOk = nStages >= 9 && /307/.test(doneEv) && /vid-humo/.test(slugTxt) && panelHidden;
     // waveform API: proyecto demo sin audio → peaks [] es la respuesta válida
     const wf = await fetch(`http://127.0.0.1:${PORT}/api/waveform`);
     const wj = await wf.json();
     const waveOk = wf.ok && typeof wj.rate === 'number' && Array.isArray(wj.peaks)
       && (await page.$('#waveCanvas')) !== null;
     await browser.close();
-    ok = fixesOk && waveOk && errors.length === 0 && /recorte/.test(trimTitle);
-    detail = `trim="${trimTitle}" fixes=${fixesOk} wave=${waveOk} consola=${errors.length} errores`;
+    ok = fixesOk && waveOk && panelOk && errors.length === 0 && /recorte/.test(trimTitle);
+    detail = `trim="${trimTitle}" fixes=${fixesOk} wave=${waveOk} panel=${panelOk} consola=${errors.length} errores`;
     if (errors.length) detail += ` :: ${errors.slice(0, 3).join(' | ')}`;
   } catch (e) {
     detail = e.message.split('\n')[0];
@@ -159,8 +182,9 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     srv.kill();
     await fsp.rm(path.join(projDir, 'fixes.json'), { force: true }); // no ensuciar el demo
     await fsp.rm(path.join(projDir, 'waveform.json'), { force: true });
+    await fsp.rm(path.join(projDir, 'publish.json'), { force: true });
   }
-  report('sfreview humo Playwright (S/D + marcador + export + waveform, 0 errores)', ok, detail);
+  report('sfreview humo Playwright (S/D + marcador + export + waveform + panel ⌘Y, 0 errores)', ok, detail);
 }
 
 await fsp.rm(tmp, { recursive: true, force: true });

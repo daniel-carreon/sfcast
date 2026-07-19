@@ -22,11 +22,12 @@ sistema (≥7; validado con 8.1) · Python 3 solo el adapter. Vanilla JS en la s
 ## Comandos
 
 ```bash
-npm test                                                  # EL comando de validación (6 checks, incluye humo Playwright)
+npm test                                                  # EL comando de validación (8 checks, incluye humos Playwright)
 node bin/sfrender.js <card-dir> -o out.mp4|out.webm|out.mov [--format mp4|webm|prores] [--fps N]
 python3 adapter/placed2timeline.py <proyecto>/design      # placed_events.json → sfreview_project/
-node bin/sfreview.js <project-dir> --port 3010            # la sala (background siempre)
+node bin/sfreview.js <project-dir> --port 3010            # la sala (background siempre; ⌘Y = panel publish)
 node bin/sfstudio-apply.js <fixes.json> <master.mp4> [--dry-run] [-o out.mp4]
+node bin/sfpublish.js <proyecto> <etapa>                  # etapa 2: init|metadata|link|mentions|checklist|schedule|post|upload|connect|status
 ```
 
 ## Invariantes (romperlos = romper la fábrica)
@@ -63,8 +64,34 @@ node bin/sfstudio-apply.js <fixes.json> <master.mp4> [--dry-run] [-o out.mp4]
 - `sfstudio-apply`: guard duración `fixes.duration` vs máster (>1s → aborta, `--force` salta),
   trims fuera de rango SIEMPRE reportados, máster sin audio soportado (graph solo-video).
 
+## SFPublish (etapa 2: máster aprobado → publicado, 19 jul 2026)
+
+- **AI-first radical:** el panel ⌘Y de la sala es ESPEJO de `publish.json` (una card por etapa:
+  estado + evidencia + comando), CERO forms — las etapas las corre el agente con `sfpublish`.
+  `publish.json` vive en la RAÍZ del proyecto; `/api/publish` de la sala busca en projectDir y
+  su padre (la sala corre sobre `sfreview_project/`).
+- **Lógica pura en `lib/publish.js`** (menciones, gate, slots, slugs, transcript) — todo con
+  unit test. El CLI (`bin/sfpublish.js`) solo orquesta red + disco.
+- **SYSTEM_PROMPT de metadata = VERBATIM del producto** (`saas-factory-community/.../youtube-
+  descriptions/route.ts`), mismo modelo (`google/gemini-3.1-flash-lite-preview`), misma regla de
+  slug (`vid-<ytid>` lowercase, constraint `slug_format`).
+- **BD del negocio SOLO lectura** salvo insert IDEMPOTENTE en `tracked_links` (mismo shape que el
+  admin API). Credenciales: `agent-server/.env` (business-os).
+- **Verificar el /go/ contra `www.`**: el apex `saasfactory.so` responde 308 de Vercel SIN cookies;
+  el route con cookies (`link_source`+`utm_params`) vive en `www.saasfactory.so` (gotcha pagado).
+- **Menciones: 0 falsos positivos > cobertura.** Racha textual ≥4 tokens del título (≥3 contenido,
+  ≥2 distintivos). "claude code" suelto jamás matchea; referencias sin título ("el video de 30
+  minutos") NO se detectan — limitación honesta, detección semántica = siguiente iteración.
+- **Upload por NAVEGADOR, no API** (tarjetas/end screens no existen en la Data API v3; apps sin
+  verificar quedan bloqueadas en privado). Perfil persistente `~/.sfstudio/browser-profile` (jamás
+  el Chrome personal). PROHIBIDO publicar público / tocar videos existentes; `--test` sube el
+  draft privado "[TEST SFPublish] borrar" y lo BORRA. Sin sesión → rama B honesta + `connect`.
+- `channel-defaults.json` = config repetible del canal (kids NO, idioma es, visibilidad private).
+
 ## Integración con la fábrica
 
 El manual del agente vive en la skill: `.claude/skills/edicion-de-video/references/sfstudio.md`
-(business-os). Etapa 6 del pipeline usa SFStudio por default; el fixture de aceptación fue el
-proyecto real `video-final-5-practica` (42 items, base 40 min).
+(etapa 1) + `references/publicacion.md` (etapa 2, SFPublish) en business-os. Etapa 6 del pipeline
+usa SFStudio por default; el fixture de aceptación fue el proyecto real `video-final-5-practica`
+(42 items, base 40 min) — también para SFPublish (transcript word-level de 66 min, 80 títulos del
+canal, tracked link real verificado).

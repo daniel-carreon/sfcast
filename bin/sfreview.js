@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { promises as fsp } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { startStatic, serveFile, insideRoot } from '../lib/static-server.js';
+import { STAGES, STAGE_COMMANDS } from '../lib/publish.js';
 
 const WEB = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'web');
 
@@ -119,6 +120,20 @@ try {
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         res.end('{}');
       }
+    },
+    // panel ⌘Y (SFPublish): la sala solo LEE publish.json — lo escriben los comandos sfpublish.
+    // El proyecto de la sala suele ser <proyecto>/sfreview_project → publish.json vive en el padre.
+    '/api/publish': async (req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      for (const dir of [projectDir, path.dirname(projectDir)]) {
+        try {
+          const p = path.join(dir, 'publish.json');
+          const pub = JSON.parse(await fsp.readFile(p, 'utf8'));
+          res.end(JSON.stringify({ found: true, publish: pub, path: p, project: dir, stages: STAGES, commands: STAGE_COMMANDS }));
+          return;
+        } catch { /* siguiente candidato */ }
+      }
+      res.end(JSON.stringify({ found: false, project: path.dirname(projectDir), stages: STAGES, commands: STAGE_COMMANDS }));
     },
     '/api/waveform': async (req, res) => {
       try {

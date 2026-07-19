@@ -82,7 +82,20 @@ body {
 
 #timelinePane { border-top: 1px solid var(--line); background: #0c0c10; flex-shrink: 0; }
 #timelineScroll { overflow-x: auto; overflow-y: hidden; }
-#timeline { position: relative; height: 178px; min-width: 100%; }
+/* alto = filas fijas (114px) + waveform + base, ambas redimensionables via drag */
+#timeline { position: relative; height: calc(114px + var(--waveH, 44px) + var(--baseH, 46px)); min-width: 100%; }
+
+#dragSidebar { width: 6px; cursor: col-resize; flex-shrink: 0; background: transparent; transition: background .15s; }
+#dragSidebar:hover, #dragSidebar.active { background: rgba(255,145,1,.35); }
+#dragTimeline { height: 6px; cursor: row-resize; background: transparent; transition: background .15s; }
+#dragTimeline:hover, #dragTimeline.active { background: rgba(255,145,1,.35); }
+
+#waveRow { position: relative; height: var(--waveH, 44px); border-top: 1px solid #14141a; background: #0b0b10; cursor: pointer; }
+#waveRow::before {
+  content: 'audio'; position: absolute; left: 4px; top: 4px; z-index: 5;
+  color: #55555f; font-size: 9px; text-transform: uppercase; letter-spacing: .1em;
+}
+#waveCanvas { position: sticky; left: 0; display: block; pointer-events: none; }
 #ruler { position: relative; height: 22px; border-bottom: 1px solid var(--line); cursor: pointer; }
 .tick { position: absolute; top: 0; height: 100%; border-left: 1px solid #26262e; color: var(--dim); font-size: 10px; padding: 3px 0 0 4px; white-space: nowrap; }
 #markerLane { position: relative; height: 14px; cursor: pointer; }
@@ -94,7 +107,7 @@ body {
   content: attr(data-label); position: sticky; left: 4px; top: 4px; z-index: 5;
   position: absolute; color: #55555f; font-size: 9px; text-transform: uppercase; letter-spacing: .1em;
 }
-.track.base { height: 46px; background: #0e0e13; }
+.track.base { height: var(--baseH, 46px); background: #0e0e13; }
 .clipItem {
   position: absolute; top: 4px; bottom: 4px; border-radius: 4px;
   background: linear-gradient(180deg, #2a2a33, #202028); border: 1px solid #34343f;

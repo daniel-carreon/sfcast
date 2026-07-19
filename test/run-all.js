@@ -144,17 +144,23 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     const fixesTxt = await fsp.readFile(path.join(projDir, 'fixes.json'), 'utf8');
     const fx = JSON.parse(fixesTxt);
     const fixesOk = fx.trims?.length === 1 && Math.abs(fx.trims[0].start - 0.5) < 0.05 && fx.markers?.length === 1;
+    // waveform API: proyecto demo sin audio → peaks [] es la respuesta válida
+    const wf = await fetch(`http://127.0.0.1:${PORT}/api/waveform`);
+    const wj = await wf.json();
+    const waveOk = wf.ok && typeof wj.rate === 'number' && Array.isArray(wj.peaks)
+      && (await page.$('#waveCanvas')) !== null;
     await browser.close();
-    ok = fixesOk && errors.length === 0 && /recorte/.test(trimTitle);
-    detail = `trim="${trimTitle}" fixes=${fixesOk} consola=${errors.length} errores`;
+    ok = fixesOk && waveOk && errors.length === 0 && /recorte/.test(trimTitle);
+    detail = `trim="${trimTitle}" fixes=${fixesOk} wave=${waveOk} consola=${errors.length} errores`;
     if (errors.length) detail += ` :: ${errors.slice(0, 3).join(' | ')}`;
   } catch (e) {
     detail = e.message.split('\n')[0];
   } finally {
     srv.kill();
     await fsp.rm(path.join(projDir, 'fixes.json'), { force: true }); // no ensuciar el demo
+    await fsp.rm(path.join(projDir, 'waveform.json'), { force: true });
   }
-  report('sfreview humo Playwright (S/D + marcador + export, 0 errores)', ok, detail);
+  report('sfreview humo Playwright (S/D + marcador + export + waveform, 0 errores)', ok, detail);
 }
 
 await fsp.rm(tmp, { recursive: true, force: true });

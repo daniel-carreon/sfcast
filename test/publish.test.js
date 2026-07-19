@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import {
   STAGES, newPublish, setStage, slugFromYoutubeId, slugFromProjectName,
   parseTranscript, findMentions, checklistGate, nextSlots, communityPost,
+  edlMapper, applyEdl, segmentTranscript,
 } from '../lib/publish.js';
 
 // helper: frase → words con timestamps sintéticos (1 palabra = 0.4s)
@@ -104,6 +105,40 @@ test('parseTranscript: formato word-level filtra spacing y calcula duración', (
   assert.equal(tr.words.length, 2);
   assert.equal(tr.text, 'Hola mundo');
   assert.equal(tr.duration, 2.2);
+});
+
+test('edl: raw → final mapea dentro de rangos y da null en lo cortado', () => {
+  // corte: [10,20) + [50,55) del raw → final dura 15s
+  const map = edlMapper([{ start: 10, end: 20 }, { start: 50, end: 55 }]);
+  assert.equal(map.finalDuration, 15);
+  assert.equal(map.toFinal(10), 0);
+  assert.equal(map.toFinal(15), 5);
+  assert.equal(map.toFinal(52), 12);   // 10 del primer rango + 2
+  assert.equal(map.toFinal(30), null); // material cortado
+  assert.equal(map.toFinal(55), null); // el end es exclusivo
+});
+
+test('edl: applyEdl filtra palabras cortadas y remapea tiempos (orden final)', () => {
+  const raw = [
+    { text: 'cortada', start: 5, end: 5.5 },
+    { text: 'hola', start: 11, end: 11.4 },
+    { text: 'mundo', start: 12, end: 12.4 },
+    { text: 'retake-cortado', start: 30, end: 30.5 },
+    { text: 'final', start: 51, end: 51.5 },
+  ];
+  const { words, duration } = applyEdl(raw, [{ start: 10, end: 20 }, { start: 50, end: 55 }]);
+  assert.deepEqual(words.map((w) => w.text), ['hola', 'mundo', 'final']);
+  assert.equal(words[0].start, 1);   // 11 - 10
+  assert.equal(words[2].start, 11);  // 10 + (51-50)
+  assert.equal(duration, 15);
+});
+
+test('segmentTranscript: corta por pausa y por longitud, con t del primer word', () => {
+  const w = (t, txt) => ({ text: txt, start: t, end: t + 0.3 });
+  const segs = segmentTranscript([w(0, 'a'), w(0.4, 'b'), w(3, 'c'), w(3.4, 'd')], { gap: 0.9 });
+  assert.equal(segs.length, 2);
+  assert.equal(segs[0].text, 'a b');
+  assert.equal(segs[1].t, 3);
 });
 
 test('schedule: desde miércoles, preferido es lunes y el más cercano es hoy 4PM', () => {

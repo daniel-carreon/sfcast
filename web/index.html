@@ -67,15 +67,36 @@
 </div>
 
 <div id="publishPanel" hidden>
-  <div id="publishCard">
-    <header id="ppHead">
-      <span id="ppBrand"><span class="sf">SF</span>PUBLISH</span>
-      <span id="ppSlug"></span>
-      <button id="ppClose" title="cerrar (Y)">✕</button>
-    </header>
-    <div id="ppStages"></div>
-    <footer id="ppFoot">espejo AI-first: aquí se <b>mira</b> el pipeline post-edición; las etapas las corre el agente · <b>Y</b> cierra</footer>
+  <header id="ppHead">
+    <span id="ppBrand"><span class="sf">SF</span>PUBLISH</span>
+    <span id="ppSlug"></span>
+    <div id="ppStepper" title="pipeline post-edición (hover = evidencia)"></div>
+    <button id="ppClose" title="cerrar (Y)">✕</button>
+  </header>
+  <div id="ppGrid">
+    <section class="ppCol">
+      <h3 class="ppH">Transcript <span id="ppTrMeta" class="ppHmeta"></span></h3>
+      <div id="ppTranscript" class="ppScroll"></div>
+    </section>
+    <section class="ppCol">
+      <div class="ppScroll" id="ppMetaCol">
+        <h3 class="ppH">Títulos</h3><div id="ppTitles"></div>
+        <h3 class="ppH">Descripción <span id="ppLinkState" class="ppHmeta"></span></h3><div id="ppDesc" class="ppText"></div>
+        <h3 class="ppH">Keywords</h3><div id="ppKeywords" class="ppChips"></div>
+        <h3 class="ppH">Post de comunidad</h3><div id="ppPost" class="ppText"></div>
+      </div>
+    </section>
+    <section class="ppCol">
+      <div class="ppScroll" id="ppLaunchCol">
+        <h3 class="ppH">Miniaturas · A/B</h3><div id="ppThumbs"></div>
+        <h3 class="ppH">Menciones → tarjetas</h3><div id="ppMentions"></div>
+        <h3 class="ppH">Horario</h3><div id="ppSchedule"></div>
+        <h3 class="ppH">Gate</h3><div id="ppGate"></div>
+        <h3 class="ppH">Upload</h3><div id="ppUpload"></div>
+      </div>
+    </section>
   </div>
+  <footer id="ppFoot">espejo AI-first: aquí se <b>mira</b> el lanzamiento; las etapas las corre el agente (las decisiones se toman conversando) · <b>Y</b> cierra · click en un <b>timestamp</b> = seek · <b>⇧click</b> = seek y ver el video</footer>
 </div>
 
 <div id="modal" hidden>

@@ -101,18 +101,38 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
 {
   const PORT = 3999;
   const projDir = path.join(ROOT, 'demo', 'project-916');
-  // publish.json de prueba: el panel ⌘Y debe pintarlo (espejo del pipeline post-edición)
+  // fixtures del dossier ⌘Y: publish.json + transcript word-level + 2 thumbs (se limpian al final)
   const pubFixture = {
-    video: { slug: 'vid-humo', titulo: 'Video de humo' },
+    video: { slug: 'vid-humo', titulo: 'Título elegido de humo' },
     stages: {
-      metadata: { status: 'done', evidence: 'descripción 1000 chars · 3 títulos', updated_at: new Date().toISOString() },
+      metadata: { status: 'done', evidence: 'metadata de humo', updated_at: new Date().toISOString() },
       link: { status: 'done', evidence: '/go/vid-humo ✓ 307 · cookies vivas', updated_at: new Date().toISOString() },
       mentions: { status: 'running', evidence: 'buscando…', updated_at: new Date().toISOString() },
       checklist: { status: 'error', evidence: 'gate cerrado', updated_at: new Date().toISOString() },
     },
-    log: [], data: {},
+    log: [],
+    data: {
+      metadata: {
+        description: 'CTA: https://saasfactory.so/go/vid-humo\n\n00:00 Intro\n01:00 Cierre',
+        titles: ['Título elegido de humo', 'Alternativa B', 'Alternativa C'],
+        keywords: ['humo', 'prueba'],
+      },
+      link: { url: 'https://saasfactory.so/go/vid-humo', verified: true, status: 307 },
+      mentions: [{ t: 1.2, video_id: 'XX', titulo: 'Video previo', frase_detectada: 'frase de humo' }],
+    },
   };
   await fsp.writeFile(path.join(projDir, 'publish.json'), JSON.stringify(pubFixture));
+  await fsp.mkdir(path.join(projDir, 'transcripts'), { recursive: true });
+  await fsp.writeFile(path.join(projDir, 'transcripts', 'humo.json'), JSON.stringify({
+    words: Array.from({ length: 30 }, (_, i) => ({ type: 'word', text: `palabra${i}`, start: i * 0.5, end: i * 0.5 + 0.4 })),
+  }));
+  await fsp.mkdir(path.join(projDir, 'thumbs'), { recursive: true });
+  // el tercer nombre trae comilla doble: regresión de inyección de atributos (revisión 19 jul)
+  for (const [name, color] of [['thumb-a.png', 'orange'], ['thumb-b.png', 'purple'],
+    ['thumb-x" onerror="injected.png', 'gray']]) {
+    sh('ffmpeg', ['-nostdin', '-y', '-loglevel', 'error', '-f', 'lavfi', '-i', `color=c=${color}:s=64x36`, '-frames:v', '1',
+      path.join(projDir, 'thumbs', name)]);
+  }
   const srv = spawn('node', [path.join(ROOT, 'bin', 'sfreview.js'), projDir, '--port', String(PORT)], { stdio: 'ignore' });
   let ok = false, detail = '';
   try {
@@ -157,16 +177,26 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     const fixesTxt = await fsp.readFile(path.join(projDir, 'fixes.json'), 'utf8');
     const fx = JSON.parse(fixesTxt);
     const fixesOk = fx.trims?.length === 1 && Math.abs(fx.trims[0].start - 0.5) < 0.05 && fx.markers?.length === 1;
-    // panel ⌘Y (SFPublish): togglea, pinta las etapas del publish.json de prueba, cierra
+    // dossier ⌘Y: togglea, pinta stepper + títulos (elegido) + descripción con /go/ + transcript
+    // segmentado + galería de thumbs + menciones, y cierra
     await page.click('#modalClose');
     await page.keyboard.press('y');
     await page.waitForSelector('#publishPanel:not([hidden])', { timeout: 5000 });
-    const nStages = await page.$$eval('.ppStage', (els) => els.length);
-    const doneEv = await page.$$eval('.ppStage.done .ppEv', (els) => els.map((e) => e.textContent).join(' | '));
-    const slugTxt = await page.$eval('#ppSlug', (el) => el.textContent);
+    await page.waitForSelector('.ppSeg', { timeout: 8000 });
+    await page.waitForSelector('.ppThumb img', { timeout: 8000 });
+    const nSteps = await page.$$eval('.ppStep', (els) => els.length);
+    const nTitles = await page.$$eval('.ppTitle', (els) => els.length);
+    const chosenTx = await page.$eval('.ppTitle.chosen .ppTitleTx', (el) => el.textContent).catch(() => '');
+    const goHl = await page.$$eval('.ppGo', (els) => els.length);
+    const nSegs = await page.$$eval('.ppSeg', (els) => els.length);
+    const nThumbs = await page.$$eval('.ppThumb img', (els) => els.length);
+    const nMents = await page.$$eval('.ppMention', (els) => els.length);
+    // regresión: el filename con comilla NO debe inyectar atributos en el <img>
+    const injected = await page.$$eval('.ppThumb img', (els) => els.some((el) => el.hasAttribute('onerror')));
     await page.keyboard.press('y');
     const panelHidden = await page.$eval('#publishPanel', (el) => el.hidden);
-    const panelOk = nStages >= 9 && /307/.test(doneEv) && /vid-humo/.test(slugTxt) && panelHidden;
+    const panelOk = nSteps >= 9 && nTitles === 3 && /elegido de humo/i.test(chosenTx) && goHl >= 1
+      && nSegs >= 2 && nThumbs === 3 && !injected && nMents === 1 && panelHidden;
     // waveform API: proyecto demo sin audio → peaks [] es la respuesta válida
     const wf = await fetch(`http://127.0.0.1:${PORT}/api/waveform`);
     const wj = await wf.json();
@@ -183,8 +213,10 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     await fsp.rm(path.join(projDir, 'fixes.json'), { force: true }); // no ensuciar el demo
     await fsp.rm(path.join(projDir, 'waveform.json'), { force: true });
     await fsp.rm(path.join(projDir, 'publish.json'), { force: true });
+    await fsp.rm(path.join(projDir, 'transcripts'), { recursive: true, force: true });
+    await fsp.rm(path.join(projDir, 'thumbs'), { recursive: true, force: true });
   }
-  report('sfreview humo Playwright (S/D + marcador + export + waveform + panel ⌘Y, 0 errores)', ok, detail);
+  report('sfreview humo Playwright (S/D + marcador + export + waveform + dossier ⌘Y, 0 errores)', ok, detail);
 }
 
 await fsp.rm(tmp, { recursive: true, force: true });

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { promises as fsp } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { startStatic, serveFile, insideRoot } from '../lib/static-server.js';
-import { STAGES, STAGE_COMMANDS } from '../lib/publish.js';
+import { STAGES, STAGE_COMMANDS, parseTranscript, segmentTranscript, applyEdl } from '../lib/publish.js';
 
 const WEB = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'web');
 
@@ -48,6 +48,39 @@ async function readBody(req) {
 }
 
 const fixesPath = path.join(projectDir, 'fixes.json');
+// /api/transcript: cache por PROMESA (mismo patrón que wavePromise — sin race entre requests).
+// Solo el éxito con corte final queda cacheado para siempre; found:false o cut:'raw' se
+// recomputan en el siguiente request (el transcript/EDL pueden aparecer DESPUÉS de abrir la sala).
+let transcriptPromise = null;
+let thumbsDir = null; // /api/thumbs fija el dir real; /thumbs/ sirve desde ahí
+async function computeTranscript() {
+  for (const dir of [projectDir, path.dirname(projectDir)]) {
+    for (const sub of ['edit/transcripts', 'transcripts', 'edit']) {
+      try {
+        const d = path.join(dir, sub);
+        for (const f of (await fsp.readdir(d)).filter((x) => x.endsWith('.json'))) {
+          try {
+            let tr = parseTranscript(await fsp.readFile(path.join(d, f), 'utf8'));
+            if (tr.words.length <= 10) continue;
+            let cut = 'raw';
+            for (const edlName of ['edl_breathed.json', 'edl.json']) {
+              try {
+                const edl = JSON.parse(await fsp.readFile(path.join(dir, 'edit', edlName), 'utf8'));
+                if (Array.isArray(edl.ranges) && edl.ranges.length) {
+                  tr = { ...applyEdl(tr.words, edl.ranges), text: '' };
+                  cut = 'final';
+                  break;
+                }
+              } catch { /* sin edl */ }
+            }
+            return { found: true, file: f, cut, words: tr.words.length, duration: tr.duration, segments: segmentTranscript(tr.words) };
+          } catch { /* no es transcript */ }
+        }
+      } catch { /* dir no existe */ }
+    }
+  }
+  return { found: false, segments: [] };
+}
 
 // ── waveform del base: peaks min/max a 50/s, computado UNA vez con ffmpeg y cacheado en el proyecto
 const wavePath = path.join(projectDir, 'waveform.json');
@@ -120,6 +153,47 @@ try {
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         res.end('{}');
       }
+    },
+    // dossier ⌘Y: transcript segmentado con timestamps (word-level de la sala o del proyecto
+    // raíz — edit/transcripts es el canónico — remapeado al corte final si hay EDL)
+    '/api/transcript': async (req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      try {
+        transcriptPromise = transcriptPromise || computeTranscript();
+        const data = await transcriptPromise;
+        // solo el estado terminal (corte final encontrado) queda cacheado; lo demás puede mejorar
+        // (el transcript o el EDL pueden aparecer DESPUÉS de abrir la sala) → recomputar
+        if (!(data.found && data.cut === 'final')) transcriptPromise = null;
+        res.end(JSON.stringify(data));
+      } catch (e) {
+        transcriptPromise = null;
+        res.end(JSON.stringify({ found: false, segments: [], error: e.message }));
+      }
+    },
+    // dossier ⌘Y: miniaturas candidatas para A/B (viven en <proyecto raíz>/thumbs/)
+    '/api/thumbs': async (req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      for (const dir of [path.join(projectDir, 'thumbs'), path.join(path.dirname(projectDir), 'thumbs')]) {
+        try {
+          const files = (await fsp.readdir(dir)).filter((f) => /\.(png|jpe?g|webp)$/i.test(f)).sort();
+          if (files.length) {
+            thumbsDir = dir;
+            res.end(JSON.stringify({ found: true, files }));
+            return;
+          }
+        } catch { /* sin thumbs aún */ }
+      }
+      res.end(JSON.stringify({ found: false, files: [] }));
+    },
+    '/thumbs': async (req, res) => {
+      const rel = decodeURIComponent(req.url.replace(/^\/thumbs\/?/, '').split('?')[0]);
+      const dir = thumbsDir || path.join(path.dirname(projectDir), 'thumbs');
+      const fp = path.normalize(path.join(dir, rel));
+      if (!insideRoot(dir, fp)) {
+        res.writeHead(403); res.end('403');
+        return;
+      }
+      await serveFile(req, res, fp);
     },
     // panel ⌘Y (SFPublish): la sala solo LEE publish.json — lo escriben los comandos sfpublish.
     // El proyecto de la sala suele ser <proyecto>/sfreview_project → publish.json vive en el padre.

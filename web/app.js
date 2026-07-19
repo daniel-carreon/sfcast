@@ -505,18 +505,19 @@ $('exportBtn').addEventListener('click', exportFixes);
 $('modalClose').addEventListener('click', () => { $('modal').hidden = true; });
 $('modal').addEventListener('pointerdown', (e) => { if (e.target === $('modal')) $('modal').hidden = true; });
 
-// ---------- panel ⌘Y (SFPublish) ----------
-// Espejo AI-first del pipeline post-edición: LEE publish.json (lo escriben los comandos sfpublish
-// que corre el agente) y lo pinta. CERO forms: si una etapa pide decisión humana, se decide
-// CONVERSANDO con Levy, no clickeando aquí.
-const PP_ICON = { done: '●', running: '◐', error: '●', partial: '◐', pending: '○' };
+// ---------- panel ⌘Y: el DOSSIER del lanzamiento (SFPublish) ----------
+// Pantalla completa. Espejo AI-first del TRABAJO, no solo del estado: transcript con timestamps,
+// descripción/títulos/keywords, miniaturas A/B, menciones, horario y upload. Lo escriben los
+// comandos sfpublish (los corre el agente); las decisiones se toman CONVERSANDO. CERO forms.
 let ppTimer = null;
+let ppTranscriptOk = false; // solo el ÉXITO se cachea; un "sin transcript" se reintenta al reabrir
 function togglePublishPanel() {
   const panel = $('publishPanel');
   if (panel.hidden) {
     panel.hidden = false;
     refreshPublish();
-    ppTimer = setInterval(refreshPublish, 2000); // poll: el agente escribe, el panel refleja
+    loadTranscript();
+    ppTimer = setInterval(refreshPublish, 2000); // el agente escribe, el dossier refleja
   } else {
     panel.hidden = true;
     clearInterval(ppTimer);
@@ -526,7 +527,21 @@ function togglePublishPanel() {
 async function refreshPublish() {
   try {
     renderPublish(await (await fetch('/api/publish')).json());
+    loadThumbs(); // la galería también refleja en vivo (el agente genera candidatas mientras miras)
   } catch { /* server fuera: el panel conserva lo último pintado */ }
+}
+async function loadTranscript() {
+  if (ppTranscriptOk) return; // el corte final no cambia; los fallos SÍ se reintentan
+  try {
+    const tr = await (await fetch('/api/transcript')).json();
+    ppTranscriptOk = !!tr.found;
+    renderTranscript(tr);
+  } catch { renderTranscript({ found: false }); }
+}
+async function loadThumbs() {
+  try {
+    renderThumbs(await (await fetch('/api/thumbs')).json());
+  } catch { /* mantiene lo pintado */ }
 }
 function ppAgo(iso) {
   if (!iso) return '';
@@ -536,43 +551,154 @@ function ppAgo(iso) {
   if (s < 86400) return `hace ${Math.round(s / 3600)} h`;
   return new Date(iso).toLocaleString('es-MX', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 }
-function renderPublish(j) {
-  const box = $('ppStages');
-  const stages = j.stages || [];
-  const cmds = j.commands || {};
-  const proj = j.project || '<proyecto>';
-  if (!j.found) {
-    $('ppSlug').textContent = '';
-    box.innerHTML = '';
+function escapeHtml(s) {
+  // comillas incluidas: hay usos en contexto de ATRIBUTO (alt de thumbs) — sin esto, un filename
+  // con comilla inyecta atributos arbitrarios (hallazgo de la revisión adversarial 19 jul)
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// --- transcript: párrafos con timestamp clickeable (seek del video de la sala, que vive detrás)
+function renderTranscript(tr) {
+  const box = $('ppTranscript');
+  box.innerHTML = '';
+  if (!tr.found || !tr.segments?.length) {
+    box.innerHTML = '<div class="ppEmptyBlock">sin transcript word-level en el proyecto.<br>Pídele a Levy que lo transcriba (MLX Whisper → <code>edit/transcripts/*.json</code>) — al reabrir el dossier aparece.</div>';
+    $('ppTrMeta').textContent = '';
+    return;
+  }
+  const drift = Math.round(Math.abs(tr.duration - project.duration));
+  $('ppTrMeta').textContent = `${tr.words.toLocaleString('es-MX')} palabras · ${Math.round(tr.duration / 60)} min · ` +
+    (tr.cut === 'final'
+      ? `CORTE FINAL${drift > 5 ? ` (deriva ≈${drift}s vs máster: hubo fix passes post-EDL)` : ''}`
+      : '⚠ RAW (sin EDL: los tiempos pueden no coincidir con el corte)');
+  const frag = document.createDocumentFragment();
+  for (const s of tr.segments) {
     const d = document.createElement('div');
-    d.className = 'ppEmpty';
-    d.innerHTML = `sin <b>publish.json</b> en este proyecto.<br>Pídele a Levy que arranque la etapa 2, o corre:<br><code>node bin/sfpublish.js ${proj} init</code>`;
+    d.className = 'ppSeg';
+    d.innerHTML = `<span class="ppSegT" data-t="${s.t}">${fmt(s.t)}</span><span class="ppSegTx">${escapeHtml(s.text)}</span>`;
+    frag.appendChild(d);
+  }
+  box.appendChild(frag);
+}
+$('ppTranscript').addEventListener('click', (e) => {
+  const t = e.target.closest('.ppSegT')?.dataset.t;
+  if (t !== undefined) {
+    base.currentTime = Math.min(project.duration, +t);
+    // ⇧click = "ver este momento": seek + cerrar el dossier (el video vive detrás, a pantalla llena)
+    if (e.shiftKey) togglePublishPanel();
+    else toast(`video → ${fmt(+t)} · ⇧click para verlo`);
+  }
+});
+
+// --- miniaturas candidatas (A/B): <proyecto>/thumbs/*.png|jpg — las genera el agente
+function renderThumbs(j) {
+  const box = $('ppThumbs');
+  box.innerHTML = '';
+  if (!j.found || !j.files?.length) {
+    box.innerHTML = '<div class="ppEmptyBlock">sin candidatas aún.<br>Pídele a Levy 2-3 miniaturas (skill <b>youtube-thumbnails</b>) → van a <code>&lt;proyecto&gt;/thumbs/</code> y aparecen aquí para el A/B de YouTube.</div>';
+    return;
+  }
+  for (const f of j.files) {
+    const d = document.createElement('figure');
+    d.className = 'ppThumb';
+    d.innerHTML = `<img src="/thumbs/${encodeURIComponent(f)}" alt="${escapeHtml(f)}" loading="lazy"><figcaption>${escapeHtml(f)}</figcaption>`;
     box.appendChild(d);
+  }
+}
+
+// --- el resto del dossier (se repinta con cada poll; el transcript NO se toca)
+function renderPublish(j) {
+  const stages = j.stages || [];
+  const proj = j.project || '<proyecto>';
+  const stepper = $('ppStepper');
+  if (!j.found) {
+    $('ppSlug').textContent = 'sin publish.json';
+    stepper.innerHTML = '';
+    $('ppTitles').innerHTML = `<div class="ppEmptyBlock">este proyecto aún no arranca la etapa 2.<br>Pídele a Levy que la arranque, o:<br><code>node bin/sfpublish.js ${escapeHtml(proj)} init</code></div>`;
+    for (const id of ['ppDesc', 'ppKeywords', 'ppPost', 'ppMentions', 'ppSchedule', 'ppGate', 'ppUpload']) $(id).innerHTML = '';
+    $('ppLinkState').textContent = '';
     return;
   }
   const pub = j.publish;
-  $('ppSlug').textContent = `${pub.video?.slug || ''}${pub.video?.titulo ? ` · ${pub.video.titulo}` : ''}`;
-  box.innerHTML = '';
+  const md = pub.data?.metadata || {};
+  $('ppSlug').textContent = pub.video?.slug || '';
+
+  // stepper de etapas (hover = evidencia + hace cuánto)
+  stepper.innerHTML = '';
   for (const s of stages) {
-    const st = pub.stages?.[s] || { status: 'pending', evidence: '', updated_at: null };
-    const card = document.createElement('div');
-    card.className = `ppStage ${st.status}`;
-    const cmd = (cmds[s] || '').replace('<proyecto>', proj);
-    card.innerHTML = `
-      <span class="ppDot">${PP_ICON[st.status] || '○'}</span>
-      <div class="ppBody">
-        <div class="ppRow"><span class="ppName">${s}</span><span class="ppTime">${ppAgo(st.updated_at)}</span></div>
-        <div class="ppEv">${st.evidence ? escapeHtml(st.evidence) : '<i>pendiente</i>'}</div>
-        <code class="ppCmd" title="el comando que corre el agente para esta etapa">${escapeHtml(cmd)}</code>
-      </div>`;
-    box.appendChild(card);
+    const st = pub.stages?.[s] || { status: 'pending' };
+    const chip = document.createElement('span');
+    chip.className = `ppStep ${st.status}`;
+    chip.textContent = s;
+    chip.title = `${st.status}${st.evidence ? ` — ${st.evidence}` : ''}${st.updated_at ? ` (${ppAgo(st.updated_at)})` : ''}`;
+    stepper.appendChild(chip);
   }
+
+  // títulos: el elegido (video.titulo) lleva badge
+  const tbox = $('ppTitles');
+  tbox.innerHTML = '';
+  const titles = md.titles || [];
+  if (!titles.length) tbox.innerHTML = '<div class="ppEmptyBlock">sin títulos aún — corre la etapa <b>metadata</b>.</div>';
+  for (const t of titles) {
+    const el = document.createElement('div');
+    const chosen = t === pub.video?.titulo;
+    el.className = 'ppTitle' + (chosen ? ' chosen' : '');
+    el.innerHTML = `<span class="ppTitleTx">${escapeHtml(t)}</span><span class="ppTitleMeta">${chosen ? 'ELEGIDO · ' : ''}${t.length}/60</span>`;
+    tbox.appendChild(el);
+  }
+
+  // descripción completa, con el /go/ resaltado; estado del link junto al header
+  const desc = md.description || '';
+  $('ppDesc').innerHTML = desc
+    ? escapeHtml(desc).replace(/(https?:\/\/\S*\/go\/[a-z0-9-]+)/g, '<span class="ppGo">$1</span>')
+    : '<div class="ppEmptyBlock">sin descripción aún.</div>';
+  const link = pub.data?.link;
+  $('ppLinkState').textContent = link ? (link.verified ? `/go/ verificado ✓ ${link.status} + cookies` : `/go/ SIN verificar (${link.status})`) : '';
+  $('ppLinkState').className = 'ppHmeta ' + (link?.verified ? 'ok' : link ? 'bad' : '');
+
+  // keywords + post
+  $('ppKeywords').innerHTML = (md.keywords || []).map((k) => `<span class="ppChip">${escapeHtml(k)}</span>`).join('') ||
+    '<div class="ppEmptyBlock">sin keywords aún.</div>';
+  $('ppPost').innerHTML = pub.data?.post ? escapeHtml(pub.data.post) : '<div class="ppEmptyBlock">sin post aún — etapa <b>post</b>.</div>';
+
+  // menciones → tarjetas (t clickeable, mismo seek que el transcript)
+  const ment = pub.data?.mentions;
+  const mbox = $('ppMentions');
+  if (!ment) mbox.innerHTML = '<div class="ppEmptyBlock">sin correr aún — etapa <b>mentions</b>.</div>';
+  else if (!ment.length) {
+    mbox.innerHTML = `<div class="ppEmptyBlock">0 menciones textuales (0 falsos positivos &gt; cobertura).${pub.data?.endScreen ? `<br>end screen sugerida: <b>${escapeHtml(pub.data.endScreen.titulo)}</b>` : ''}</div>`;
+  } else {
+    mbox.innerHTML = ment.map((m) => `<div class="ppMention"><span class="ppSegT" data-t="${m.t}">${fmt(m.t)}</span>` +
+      `<span class="ppMentionTx"><b>${escapeHtml(m.titulo)}</b><br><i>"${escapeHtml(m.frase_detectada)}"</i></span></div>`).join('') +
+      (pub.data?.endScreen ? `<div class="ppEmptyBlock">end screen: <b>${escapeHtml(pub.data.endScreen.titulo)}</b></div>` : '');
+  }
+
+  // horario sugerido
+  const sch = pub.data?.schedule;
+  $('ppSchedule').innerHTML = sch?.candidates
+    ? sch.candidates.map((c) => `<div class="ppSlot${c.lunes ? ' lunes' : ''}">${c.lunes ? '★' : '·'} ${escapeHtml(c.local)}${c.lunes ? ' — LUNES' : ''}</div>`).join('')
+    : '<div class="ppEmptyBlock">sin correr aún — etapa <b>schedule</b>.</div>';
+
+  // gate + upload (estado vivo con evidencia)
+  const gate = pub.stages?.checklist;
+  $('ppGate').innerHTML = gate?.updated_at
+    ? `<div class="ppState ${gate.status}">${escapeHtml(gate.evidence || gate.status)}</div>`
+    : '<div class="ppEmptyBlock">sin correr aún — etapa <b>checklist</b>.</div>';
+  const up = pub.stages?.upload;
+  $('ppUpload').innerHTML = up?.updated_at
+    ? `<div class="ppState ${up.status}">${escapeHtml(up.evidence || up.status)}</div>`
+    : '<div class="ppEmptyBlock">todavía nada — etapa <b>upload</b> (siempre queda en PRIVADO).</div>';
 }
-function escapeHtml(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
+$('ppMentions').addEventListener('click', (e) => {
+  const t = e.target.closest('.ppSegT')?.dataset.t;
+  if (t !== undefined) {
+    base.currentTime = Math.min(project.duration, +t);
+    if (e.shiftKey) togglePublishPanel();
+    else toast(`video → ${fmt(+t)} · ⇧click para verlo`);
+  }
+});
 $('ppClose').addEventListener('click', togglePublishPanel);
-$('publishPanel').addEventListener('pointerdown', (e) => { if (e.target === $('publishPanel')) togglePublishPanel(); });
 
 let toastTimer = null;
 function toast(msg) {

@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import {
   STAGES, newPublish, setStage, loadPublish, savePublish,
   slugFromYoutubeId, slugFromProjectName, parseTranscript, findMentions,
-  checklistGate, nextSlots, communityPost,
+  checklistGate, nextSlots, communityPost, applyEdl,
 } from '../lib/publish.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -22,7 +22,11 @@ function usage(code = 1) {
   process.stderr.write(`uso: sfpublish <proyecto-dir> <etapa> [opciones]
 etapas:
   init        crea publish.json (esqueleto de etapas)
-  metadata    transcript → descripción/títulos/keywords (system prompt del producto) + link /go/ verificado
+  metadata    descripción/títulos/keywords + link /go/ verificado.
+              DEFAULT del flujo: el AGENTE la escribe leyendo el transcript y la entrega con
+              --from <json> ({description,titles,keywords,summary}). Sin --from usa la
+              Description Machine del producto (Gemini via OpenRouter) — camino automático/cron.
+  thumbs      escanea <proyecto>/thumbs/*.png|jpg (candidatas A/B) y marca la etapa
   mentions    transcript ↔ youtube_videos → plan de tarjetas + end screen
   checklist   gate de publicación (exit≠0 si falla algo duro)
   schedule    sugiere slot según peak hours del canal
@@ -34,6 +38,8 @@ opciones:
   --youtube-url <url>   URL de YouTube ya existente (slug vid-<id> como el producto)
   --slug <slug>         fuerza el slug del tracked link
   --transcript <path>   transcript word-level JSON (default: autodetecta edit/transcripts/*.json)
+  --from <path>         (metadata) JSON escrito por el agente — se salta la generación con Gemini
+  --title <string>      (metadata) fija el título ELEGIDO (la decisión de Daniel, dictada al agente)
   --test                (upload) prueba E2E con demo/out/card-916.mp4, draft privado + BORRADO
   --env <path>          .env alterno (default: ~/Developer/business-os/agent-server/.env)
 `);
@@ -51,6 +57,8 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--slug') flags.slug = argv[++i];
   else if (a === '--transcript') flags.transcript = argv[++i];
   else if (a === '--env') flags.env = argv[++i];
+  else if (a === '--from') flags.from = argv[++i];
+  else if (a === '--title') flags.title = argv[++i];
   else if (a === '--file') flags.file = argv[++i];
   else if (a === '--test') flags.test = true;
   else if (a.startsWith('-')) usage();
@@ -133,6 +141,26 @@ async function findTranscript(dir) {
   }
   throw new Error(`no encontré transcript word-level en ${dir} (edit/transcripts/*.json). ` +
     'Genera uno con MLX Whisper (~/.whisper-mlx-venv) o pásalo con --transcript.');
+}
+
+// transcript del proyecto, remapeado al CORTE FINAL si hay EDL (los tiempos del raw mienten
+// contra el video publicado: capítulos y menciones deben vivir en tiempo final)
+async function loadTranscriptCut(dir) {
+  const tPath = await findTranscript(dir);
+  let tr = parseTranscript(await fsp.readFile(tPath, 'utf8'));
+  let cut = 'raw';
+  for (const edlName of ['edl_breathed.json', 'edl.json']) {
+    try {
+      const edl = JSON.parse(await fsp.readFile(path.join(dir, 'edit', edlName), 'utf8'));
+      if (Array.isArray(edl.ranges) && edl.ranges.length) {
+        const mapped = applyEdl(tr.words, edl.ranges);
+        tr = { words: mapped.words, duration: mapped.duration, text: mapped.words.map((w) => w.text).join(' ') };
+        cut = 'final';
+        break;
+      }
+    } catch { /* sin edl */ }
+  }
+  return { ...tr, path: tPath, cut };
 }
 
 async function getPub() {
@@ -252,27 +280,56 @@ async function run() {
 
     case 'metadata': {
       const env = await loadEnv();
-      setStage(pub, 'metadata', 'running', 'generando con el system prompt del producto…');
+      const slug = pub.video.slug;
+      const trackedLinkUrl = `https://saasfactory.so/go/${slug}`;
+
+      // 0) si viene --from (el DEFAULT del flujo: la escribe el AGENTE), VALIDAR ANTES de
+      //    cualquier efecto — un JSON malformado no debe dejar link creado ni etapa corrupta
+      let md = null, autor;
+      if (flags.from) {
+        md = JSON.parse(await fsp.readFile(path.resolve(flags.from), 'utf8'));
+        if (!md.description || !Array.isArray(md.titles) || !md.titles.length) {
+          throw new Error(`--from ${flags.from}: se espera {description, titles[≥1], keywords[], summary}`);
+        }
+        if (!Array.isArray(md.keywords)) {
+          throw new Error(`--from: keywords debe ser un ARRAY (llegó ${typeof md.keywords}) — ej. ["ia","saas"]`);
+        }
+        if (md.description.length > 5000) {
+          throw new Error(`--from: descripción ${md.description.length} chars — YouTube corta en 5000`);
+        }
+        if (!md.description.includes(trackedLinkUrl)) {
+          throw new Error(`--from: la descripción NO trae el tracked link ${trackedLinkUrl} — agrégalo al CTA`);
+        }
+        autor = 'escrita por el agente (transcript leído directo)';
+      }
+      setStage(pub, 'metadata', 'running', flags.from ? 'metadata del agente en validación…' : 'generando con el system prompt del producto…');
       await savePublish(projectDir, pub);
 
-      const tPath = await findTranscript(projectDir);
-      const tr = parseTranscript(await fsp.readFile(tPath, 'utf8'));
-      out(`transcript: ${tPath} (${tr.words.length} palabras, ${Math.round(tr.duration / 60)} min)`);
+      const tr = await loadTranscriptCut(projectDir);
+      out(`transcript: ${tr.path} (${tr.words.length} palabras, ${Math.round(tr.duration / 60)} min, corte ${tr.cut})`);
 
-      // 1) tracked link idempotente PRIMERO (el CTA de la descripción usa el link real)
-      const slug = pub.video.slug;
+      // 1) tracked link idempotente (el CTA de la descripción usa el link real)
       const campaign = flags.youtubeUrl ? ytId(flags.youtubeUrl) : path.basename(projectDir);
       const linkTitle = `YT: ${(pub.video.titulo || path.basename(projectDir)).substring(0, 80)}`;
       const link = await ensureTrackedLink(env, slug, linkTitle, campaign);
-      const trackedLinkUrl = `https://saasfactory.so/go/${slug}`;
       out(`tracked link: ${trackedLinkUrl} (${link.created ? 'CREADO' : 'ya existía — reusado'})`);
 
-      // 2) metadata con IA (SYSTEM_PROMPT verbatim del producto)
-      const md = await generateMetadata(env, tr.text, trackedLinkUrl, pub.video.titulo || null);
+      // 2) sin --from: Description Machine del producto (Gemini) — camino automático/cron
+      if (!md) {
+        md = await generateMetadata(env, tr.text, trackedLinkUrl, pub.video.titulo || null);
+        autor = 'Description Machine (Gemini, paridad producto)';
+      }
       pub.data.metadata = md;
-      if (!pub.video.titulo && md.titles?.[0]) pub.video.titulo = md.titles[0];
+      // título elegido: JAMÁS pisar en silencio una elección previa (revisión adversarial 19 jul).
+      // --title = decisión explícita (Daniel dicta conversando) · sin título previo = 1ª opción ·
+      // título previo huérfano de la lista nueva = se CONSERVA con aviso.
+      if (flags.title) pub.video.titulo = flags.title;
+      else if (!pub.video.titulo) pub.video.titulo = md.titles[0];
+      else if (!md.titles.includes(pub.video.titulo)) {
+        out(`⚠ el título elegido "${pub.video.titulo}" no está en la lista nueva — se CONSERVA (usa --title para cambiarlo)`);
+      }
       setStage(pub, 'metadata', 'done',
-        `descripción ${md.description?.length || 0} chars · ${md.titles?.length || 0} títulos · ${md.keywords?.length || 0} keywords`);
+        `descripción ${md.description?.length || 0} chars · ${md.titles?.length || 0} títulos · ${(md.keywords || []).length} keywords · ${autor}`);
 
       // 3) verificación EN VIVO del /go/ (redirect + Set-Cookie de atribución)
       const v = verifyGoLink(slug);
@@ -317,8 +374,7 @@ async function run() {
       const env = await loadEnv();
       setStage(pub, 'mentions', 'running', 'buscando menciones en el transcript…');
       await savePublish(projectDir, pub);
-      const tPath = await findTranscript(projectDir);
-      const tr = parseTranscript(await fsp.readFile(tPath, 'utf8'));
+      const tr = await loadTranscriptCut(projectDir);
       const videos = await sbGet(env, 'youtube_videos?select=video_id,title&order=published_at.desc&limit=200');
       const own = flags.youtubeUrl ? ytId(flags.youtubeUrl) : null;
       const found = findMentions(tr.words, videos.filter((v) => v.video_id !== own));
@@ -337,6 +393,19 @@ async function run() {
         out(`0 menciones contra ${videos.length} títulos del canal (umbral: racha ≥4 tokens, ≥3 contenido, ≥2 distintivos).`);
       }
       if (pub.data.endScreen) out(`end screen sugerida: ${pub.data.endScreen.titulo} (${pub.data.endScreen.motivo})`);
+      break;
+    }
+
+    case 'thumbs': {
+      // candidatas A/B: las genera el agente (skill youtube-thumbnails) en <proyecto>/thumbs/
+      const dir = path.join(projectDir, 'thumbs');
+      let files = [];
+      try { files = (await fsp.readdir(dir)).filter((f) => /\.(png|jpe?g|webp)$/i.test(f)).sort(); } catch { /* sin dir */ }
+      pub.data.thumbs = files;
+      setStage(pub, 'thumbnail', files.length ? 'done' : 'pending',
+        files.length ? `${files.length} candidata(s) en thumbs/ — A/B en YouTube (Test & compare admite 3)` : 'sin candidatas en thumbs/ aún');
+      await savePublish(projectDir, pub);
+      out(files.length ? `✓ ${files.length} candidata(s): ${files.join(', ')}` : `sin candidatas: genera 2-3 en ${dir}`);
       break;
     }
 

@@ -1,0 +1,13 @@
+{
+ "name": "demo-916",
+ "width": 1080,
+ "height": 1920,
+ "fps": 30,
+ "duration": 4,
+ "base": { "src": "assets/base.mp4" },
+ "audio": { "src": "assets/base.mp4" },
+ "items": [
+  { "id": "logo_google", "type": "video", "src": "assets/logo-google-R.webm",
+    "start": 1.0, "dur": 2.2, "track": 2, "fit": "contain", "muted": true, "alpha": true }
+ ]
+}

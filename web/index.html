@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SFStudio — Sala de Revisión</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <div id="brand"><span class="sf">SF</span>STUDIO <span id="projname"></span></div>
+  <div id="speeds" role="group" aria-label="velocidad"></div>
+  <button id="exportBtn" title="Exportar fixes.json (E)">Exportar fixes</button>
+</header>
+
+<main id="main">
+  <div id="stageWrap">
+    <div id="stage">
+      <video id="base" playsinline preload="auto"></video>
+      <div id="overlays"></div>
+    </div>
+  </div>
+  <aside id="sidebar">
+    <h2>Marcadores</h2>
+    <ol id="markerList"></ol>
+    <div id="trimSummary"></div>
+  </aside>
+</main>
+
+<section id="transport">
+  <button id="playBtn" title="Play/Pausa (Espacio)">▶</button>
+  <span id="timecode">0:00.0 / 0:00.0</span>
+  <span id="speedBadge">1x</span>
+  <div id="zoomCtl">
+    <button id="zoomOut" title="alejar">−</button>
+    <button id="zoomFit" title="ajustar todo">fit</button>
+    <button id="zoomIn" title="acercar">+</button>
+  </div>
+</section>
+
+<section id="timelinePane">
+  <div id="timelineScroll">
+    <div id="timeline">
+      <div id="ruler"></div>
+      <div id="markerLane"></div>
+      <div class="track" id="track3" data-label="caps"></div>
+      <div class="track" id="track2" data-label="alpha"></div>
+      <div class="track" id="track1" data-label="clips"></div>
+      <div class="track base" id="track0" data-label="base"></div>
+      <div id="playhead"></div>
+    </div>
+  </div>
+</section>
+
+<footer id="help">
+  <b>S</b> split &nbsp;·&nbsp; <b>A</b> recorte ← &nbsp;·&nbsp; <b>D</b> recorte → &nbsp;·&nbsp; <b>⌘Z</b> deshacer
+  &nbsp;·&nbsp; <b>M</b> marcador &nbsp;·&nbsp; <b>E</b> exportar &nbsp;·&nbsp; <b>&lt; &gt;</b> velocidad
+  &nbsp;·&nbsp; <b>Espacio</b> play &nbsp;·&nbsp; <b>←/→</b> 1 frame (⇧ ×10)
+</footer>
+
+<div id="popover" hidden>
+  <input id="popInput" type="text" placeholder="nota del marcador…" autocomplete="off">
+</div>
+
+<div id="modal" hidden>
+  <div id="modalCard">
+    <h3 id="modalTitle">fixes.json</h3>
+    <pre id="modalBody"></pre>
+    <div class="modalRow"><span id="modalPath"></span><button id="modalClose">Cerrar</button></div>
+  </div>
+</div>
+
+<div id="toast" hidden></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

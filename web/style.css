@@ -230,14 +230,16 @@ body {
 .ppHmeta.ok { color: #3fbf5a; }
 .ppHmeta.bad { color: var(--danger); }
 
-/* botones de copiar: lo que el dossier muestra, se lleva */
+/* botones de copiar (ícono Lucide `copy`, palomita `check` al copiar): lo que el dossier muestra, se lleva */
 .ppCopy {
   background: none; border: 1px solid var(--line); border-radius: 5px; cursor: pointer;
-  color: var(--dim); font-size: 9.5px; font-weight: 700; letter-spacing: .05em;
-  padding: 2px 8px; margin-left: 8px; flex-shrink: 0; text-transform: none;
+  color: var(--dim); padding: 3px 5px; margin-left: 8px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
 }
+.ppCopy svg { width: 12px; height: 12px; display: block; }
 .ppCopy:hover { color: var(--sf); border-color: var(--sf); }
-.ppTitleCopy { margin-left: 8px; padding: 2px 6px; opacity: 0; transition: opacity .12s; }
+.ppCopy.ok { color: #3fbf5a; border-color: #234a2c; }
+.ppTitleCopy { margin-left: 8px; opacity: 0; transition: opacity .12s; }
 .ppTitle:hover .ppTitleCopy { opacity: 1; }
 
 /* transcript: párrafos con timestamp clickeable */

@@ -546,26 +546,36 @@ for (const b of document.querySelectorAll('.ppRailBtn')) {
 applyPpView();
 
 // --- copiar: el dossier es espejo, pero lo que muestra se LLEVA (a YouTube, a Skool, a donde sea)
-async function ppCopy(text, what) {
+// Iconos: Lucide (lucide.dev, ISC) — SVG inline oficial de `copy` y `check`; cero dependencias.
+const ICON_COPY = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
+const ICON_CHECK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+for (const b of document.querySelectorAll('.ppCopy')) b.innerHTML = ICON_COPY;
+
+async function ppCopy(text, what, btn = null) {
   if (!text) { toast(`nada que copiar aún en ${what}`); return; }
   try {
     await navigator.clipboard.writeText(text);
     toast(`${what} copiado ✓`);
+    if (btn) {
+      btn.innerHTML = ICON_CHECK;
+      btn.classList.add('ok');
+      setTimeout(() => { btn.innerHTML = ICON_COPY; btn.classList.remove('ok'); }, 1400);
+    }
   } catch { toast('no pude copiar (permiso del navegador)'); }
 }
-$('copyTranscript').addEventListener('click', () =>
-  ppCopy(ppLastTr?.segments?.map((s) => s.text).join('\n\n'), 'transcript'));
-$('copyTitles').addEventListener('click', () =>
-  ppCopy((ppLastPub?.data?.metadata?.titles || []).join('\n'), 'títulos'));
-$('copyDesc').addEventListener('click', () =>
-  ppCopy(ppLastPub?.data?.metadata?.description, 'descripción'));
-$('copyKeywords').addEventListener('click', () =>
-  ppCopy((ppLastPub?.data?.metadata?.keywords || []).join(', '), 'keywords'));
-$('copyPost').addEventListener('click', () =>
-  ppCopy(ppLastPub?.data?.post, 'post'));
+$('copyTranscript').addEventListener('click', (e) =>
+  ppCopy(ppLastTr?.segments?.map((s) => s.text).join('\n\n'), 'transcript', e.currentTarget));
+$('copyTitles').addEventListener('click', (e) =>
+  ppCopy((ppLastPub?.data?.metadata?.titles || []).join('\n'), 'títulos', e.currentTarget));
+$('copyDesc').addEventListener('click', (e) =>
+  ppCopy(ppLastPub?.data?.metadata?.description, 'descripción', e.currentTarget));
+$('copyKeywords').addEventListener('click', (e) =>
+  ppCopy((ppLastPub?.data?.metadata?.keywords || []).join(', '), 'keywords', e.currentTarget));
+$('copyPost').addEventListener('click', (e) =>
+  ppCopy(ppLastPub?.data?.post, 'post', e.currentTarget));
 $('ppTitles').addEventListener('click', (e) => {
   const btn = e.target.closest('.ppTitleCopy');
-  if (btn) ppCopy(ppLastPub?.data?.metadata?.titles?.[+btn.dataset.idx], 'título');
+  if (btn) ppCopy(ppLastPub?.data?.metadata?.titles?.[+btn.dataset.idx], 'título', btn);
 });
 function togglePublishPanel() {
   const panel = $('publishPanel');
@@ -703,7 +713,7 @@ function renderPublish(j) {
     const chosen = t === pub.video?.titulo;
     el.className = 'ppTitle' + (chosen ? ' chosen' : '');
     el.innerHTML = `<span class="ppTitleTx">${escapeHtml(t)}</span><span class="ppTitleMeta">${chosen ? 'ELEGIDO · ' : ''}${t.length}/60</span>` +
-      `<button class="ppCopy ppTitleCopy" data-idx="${i}" title="copiar este título">⧉</button>`;
+      `<button class="ppCopy ppTitleCopy" data-idx="${i}" title="copiar este título">${ICON_COPY}</button>`;
     tbox.appendChild(el);
   });
 

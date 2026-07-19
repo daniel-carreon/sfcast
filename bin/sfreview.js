@@ -47,7 +47,9 @@ async function readBody(req) {
 
 const fixesPath = path.join(projectDir, 'fixes.json');
 
-const srv = await startStatic(WEB, {
+let srv;
+try {
+  srv = await startStatic(WEB, {
   port,
   routes: {
     '/api/project': async (req, res) => {
@@ -88,7 +90,15 @@ const srv = await startStatic(WEB, {
       await serveFile(req, res, fp);
     },
   },
-});
+  });
+} catch (e) {
+  if (e.code === 'EADDRINUSE') {
+    process.stderr.write(`sfreview ERROR: el puerto ${port} ya está ocupado (¿otra sala corriendo?). ` +
+      `Mata el proceso previo o usa --port <otro>.\n`);
+    process.exit(1);
+  }
+  throw e;
+}
 
 process.stdout.write(`sfreview: ${timeline.name || path.basename(projectDir)}\n`);
 process.stdout.write(`  proyecto: ${projectDir}\n`);

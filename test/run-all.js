@@ -25,17 +25,18 @@ function sh(cmd, args, opts = {}) {
 // ── 1. sintaxis de todos los JS
 {
   const files = ['bin/sfrender.js', 'bin/sfreview.js', 'bin/sfstudio-apply.js',
-    'lib/render.js', 'lib/static-server.js', 'web/app.js', 'web/model.js', 'test/model.test.js'];
+    'lib/render.js', 'lib/static-server.js', 'web/app.js', 'web/model.js',
+    'test/model.test.js', 'test/server.test.js'];
   let bad = files.filter((f) => sh('node', ['--check', path.join(ROOT, f)]).code !== 0);
-  report('sintaxis (node --check x8)', bad.length === 0, bad.join(', '));
+  report(`sintaxis (node --check x${files.length})`, bad.length === 0, bad.join(', '));
 }
 
-// ── 2. unit tests del modelo
+// ── 2. unit tests: modelo de trims + server (traversal/CORS, regresión revisión 18 jul)
 {
-  const r = sh('node', ['--test', 'test/model.test.js']);
+  const r = sh('node', ['--test', 'test/model.test.js', 'test/server.test.js']);
   const pass = /# pass (\d+)/.exec(r.out)?.[1];
   const fail = /# fail (\d+)/.exec(r.out)?.[1];
-  report(`modelo de trims (node --test)`, r.code === 0 && fail === '0', `${pass} pass / ${fail} fail`);
+  report(`modelo + server (node --test)`, r.code === 0 && fail === '0', `${pass} pass / ${fail} fail`);
 }
 
 // ── 3. humo sfrender: card-smoke 320x180 @0.5s = 15 frames exactos
@@ -63,23 +64,36 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
   report('sfrender humo alpha (card-smoke → webm)', r.code === 0 && alpha === '1', `alpha_mode=${alpha}`);
 }
 
-// ── 5. humo sfstudio-apply REAL: recorte 0.1-0.2 sobre el humo → ~0.4s (audio no existe: usa base 916 con video-only NO — el smoke no tiene audio; generamos audio silencioso)
+// ── 5. humo sfstudio-apply REAL — 3 casos (revisión 18 jul: el caso sin-audio se ESQUIVABA, ahora se cubre)
 {
-  // el smoke render no trae pista de audio → añadimos una silenciosa para probar el path completo v+a
+  const probeDur = (f) => parseFloat(sh('ffprobe', ['-v', 'error', '-show_entries', 'format=duration',
+    '-of', 'default=nk=1:nw=1', f]).out.trim());
+  const fixes = path.join(tmp, 'fixes.json');
+  await fsp.writeFile(fixes, JSON.stringify({ video: 'smoke.mp4', trims: [{ start: 0.1, end: 0.2 }], markers: [] }));
+
+  // (a) máster SIN pista de audio (el smoke render sale video-only) → debe funcionar con graph solo-video
+  const outNoA = path.join(tmp, 'smoke-fixed-noaudio.mp4');
+  const rA = sh('node', ['bin/sfstudio-apply.js', fixes, smokeOut, '-o', outNoA]);
+  const durA = rA.code === 0 ? probeDur(outNoA) : null;
+  report('sfstudio-apply REAL sin audio', rA.code === 0 && durA !== null && Math.abs(durA - 0.4) < 0.15,
+    `dur=${durA}s (esperado ~0.4)`);
+
+  // (b) máster CON audio → path v+a completo
   const withAudio = path.join(tmp, 'smoke-a.mp4');
   sh('ffmpeg', ['-nostdin', '-y', '-loglevel', 'error', '-i', smokeOut, '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
     '-shortest', '-c:v', 'copy', '-c:a', 'aac', withAudio]);
-  const fixes = path.join(tmp, 'fixes.json');
-  await fsp.writeFile(fixes, JSON.stringify({ video: 'smoke-a.mp4', trims: [{ start: 0.1, end: 0.2 }], markers: [] }));
   const outFixed = path.join(tmp, 'smoke-fixed.mp4');
-  const r = sh('node', ['bin/sfstudio-apply.js', fixes, withAudio, '-o', outFixed]);
-  let dur = null;
-  if (r.code === 0) {
-    dur = parseFloat(sh('ffprobe', ['-v', 'error', '-show_entries', 'format=duration',
-      '-of', 'default=nk=1:nw=1', outFixed]).out.trim());
-  }
-  const ok = r.code === 0 && dur !== null && Math.abs(dur - 0.4) < 0.15;
-  report('sfstudio-apply REAL (trim 0.1s→0.2s)', ok, `dur=${dur}s (esperado ~0.4)`);
+  const rB = sh('node', ['bin/sfstudio-apply.js', fixes, withAudio, '-o', outFixed]);
+  const durB = rB.code === 0 ? probeDur(outFixed) : null;
+  report('sfstudio-apply REAL con audio', rB.code === 0 && durB !== null && Math.abs(durB - 0.4) < 0.15,
+    `dur=${durB}s (esperado ~0.4)`);
+
+  // (c) guard de duración: fixes exportado sobre un timeline de 99s vs máster de 0.5s → abortar con mensaje
+  const fixesBad = path.join(tmp, 'fixes-bad.json');
+  await fsp.writeFile(fixesBad, JSON.stringify({ video: 'x.mp4', duration: 99, trims: [{ start: 50, end: 51 }], markers: [] }));
+  const rC = sh('node', ['bin/sfstudio-apply.js', fixesBad, withAudio, '-o', path.join(tmp, 'nope.mp4')]);
+  report('sfstudio-apply guard proxy↔máster', rC.code !== 0 && /máster equivocado|se exportó sobre/.test(rC.out),
+    `exit=${rC.code}`);
 }
 
 // ── 6. humo sfreview con Playwright: proyecto 9:16, keys S/D, trim visible, export, 0 errores consola

@@ -4,7 +4,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promises as fsp } from 'node:fs';
-import { startStatic, serveFile } from '../lib/static-server.js';
+import { startStatic, serveFile, insideRoot } from '../lib/static-server.js';
 
 const WEB = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'web');
 
@@ -83,7 +83,7 @@ try {
     '/media': async (req, res) => {
       const rel = decodeURIComponent(req.url.replace(/^\/media\/?/, '').split('?')[0]);
       const fp = path.normalize(path.join(projectDir, rel));
-      if (!fp.startsWith(path.normalize(projectDir))) {
+      if (!insideRoot(projectDir, fp)) { // frontera con separador (no startsWith desnudo)
         res.writeHead(403); res.end('403');
         return;
       }

@@ -57,6 +57,11 @@ node bin/sfstudio-apply.js <fixes.json> <master.mp4> [--dry-run] [-o out.mp4]
 - CSS `display:flex` le gana al atributo `hidden` → `[hidden]{display:none!important}`.
 - Cerrar un input flotante sin `blur()` deja el foco en el elemento oculto y mata el teclado global.
 - Base sin `+faststart` no seekea en browser; GOP corto (`-g 30`) para scrub fino.
+- `startsWith` desnudo para confinar rutas = traversal por hermano-prefijo (`root` vs
+  `root-evil` + `%2e%2e` crudo): usar `insideRoot()` (frontera con `path.sep`). Sin header
+  CORS `*` en el server local. Regresión cubierta en test/server.test.js.
+- `sfstudio-apply`: guard duración `fixes.duration` vs máster (>1s → aborta, `--force` salta),
+  trims fuera de rango SIEMPRE reportados, máster sin audio soportado (graph solo-video).
 
 ## Integración con la fábrica
 

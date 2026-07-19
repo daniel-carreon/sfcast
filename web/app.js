@@ -58,9 +58,11 @@ window.addEventListener('resize', () => { if (project) { layoutStage(); fitTimel
 // ---------- overlays (mount/unmount por ventana de tiempo: cada webm-alpha cuesta 2 decoders) ----------
 const WINDOW = 3;
 function syncOverlays(t, playing) {
-  for (const it of project.items) {
+  for (let idx = 0; idx < project.items.length; idx++) {
+    const it = project.items[idx];
     const inWindow = t >= it.start - WINDOW && t < it.start + it.dur + WINDOW;
-    let m = mounted.get(it.id);
+    // clave = índice del array, NO it.id: los ids de negocio pueden repetirse y colisionarían
+    let m = mounted.get(idx);
     if (inWindow && !m) {
       const el = it.type === 'video' ? document.createElement('video') : document.createElement('img');
       el.className = 'ov';
@@ -76,11 +78,11 @@ function syncOverlays(t, playing) {
       el.style.display = 'none';
       $('overlays').appendChild(el);
       m = { el, item: it };
-      mounted.set(it.id, m);
+      mounted.set(idx, m);
     } else if (!inWindow && m) {
       if (m.el.tagName === 'VIDEO') { try { m.el.pause(); } catch { /* ok */ } m.el.removeAttribute('src'); m.el.load(); }
       m.el.remove();
-      mounted.delete(it.id);
+      mounted.delete(idx);
       continue;
     }
     if (!m) continue;
@@ -312,7 +314,9 @@ function setZoom(px, anchorT = null) {
   const scroll = $('timelineScroll');
   const anchor = anchorT ?? (base.currentTime || 0);
   const before = anchor * pxPerSec - scroll.scrollLeft;
-  pxPerSec = Math.max(fitPx, Math.min(120, px));
+  // techo que ESCALA con fitPx: un techo fijo menor que fitPx dejaba el zoom inerte en proyectos cortos
+  const maxPx = Math.max(120, fitPx * 8);
+  pxPerSec = Math.max(fitPx, Math.min(maxPx, px));
   renderTimeline();
   scroll.scrollLeft = Math.max(0, anchor * pxPerSec - before);
 }

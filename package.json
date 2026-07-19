@@ -1,0 +1,22 @@
+{
+  "name": "sfstudio",
+  "version": "0.1.0",
+  "description": "Plataforma de video de la casa SaaS Factory: sfrender (cards HTML/GSAP → video) + sfreview (Sala de Revisión) + sfstudio-apply (fixes.json → máster ffmpeg)",
+  "type": "module",
+  "license": "UNLICENSED",
+  "private": true,
+  "bin": {
+    "sfrender": "bin/sfrender.js",
+    "sfreview": "bin/sfreview.js",
+    "sfstudio-apply": "bin/sfstudio-apply.js"
+  },
+  "scripts": {
+    "test": "node test/run-all.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "^1.61.1"
+  }
+}

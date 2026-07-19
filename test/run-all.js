@@ -146,7 +146,8 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     }
     const { chromium } = await import('playwright');
     const browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
+    const bctx = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
+    const page = await bctx.newPage();
     const errors = [];
     page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
     page.on('pageerror', (e) => errors.push(String(e)));
@@ -193,10 +194,23 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     const nMents = await page.$$eval('.ppMention', (els) => els.length);
     // regresión: el filename con comilla NO debe inyectar atributos en el <img>
     const injected = await page.$$eval('.ppThumb img', (els) => els.some((el) => el.hasAttribute('onerror')));
+    // rail: apagar Transcript → columna oculta y grid a 2 tracks; prender → vuelve
+    await page.click('.ppRailBtn[data-col="tr"]'); // tr apagada → 2 columnas
+    const trHidden = await page.$eval('.ppCol[data-col="tr"]', (el) => el.style.display === 'none');
+    const gridCols2 = await page.$eval('#ppGrid', (el) => el.style.gridTemplateColumns.split(' ').length === 2);
+    await page.click('.ppRailBtn[data-col="launch"]'); // launch apagada → queda SOLO meta
+    const soloOk = await page.$eval('.ppCol[data-col="meta"]', (el) => el.classList.contains('solo'));
+    await page.click('.ppRailBtn[data-col="tr"]');
+    await page.click('.ppRailBtn[data-col="launch"]'); // restaurar las 3
+    // copiar: la descripción del fixture debe llegar al clipboard
+    await page.click('#copyDesc');
+    const clip = await page.evaluate(() => navigator.clipboard.readText()).catch(() => '');
+    const copyOk = /\/go\/vid-humo/.test(clip);
     await page.keyboard.press('y');
     const panelHidden = await page.$eval('#publishPanel', (el) => el.hidden);
     const panelOk = nSteps >= 9 && nTitles === 3 && /elegido de humo/i.test(chosenTx) && goHl >= 1
-      && nSegs >= 2 && nThumbs === 3 && !injected && nMents === 1 && panelHidden;
+      && nSegs >= 2 && nThumbs === 3 && !injected && nMents === 1 && trHidden && gridCols2 && soloOk
+      && copyOk && panelHidden;
     // waveform API: proyecto demo sin audio → peaks [] es la respuesta válida
     const wf = await fetch(`http://127.0.0.1:${PORT}/api/waveform`);
     const wj = await wf.json();
@@ -204,7 +218,7 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
       && (await page.$('#waveCanvas')) !== null;
     await browser.close();
     ok = fixesOk && waveOk && panelOk && errors.length === 0 && /recorte/.test(trimTitle);
-    detail = `trim="${trimTitle}" fixes=${fixesOk} wave=${waveOk} panel=${panelOk} consola=${errors.length} errores`;
+    detail = `trim="${trimTitle}" fixes=${fixesOk} wave=${waveOk} panel=${panelOk} (rail+copy incl) consola=${errors.length} errores`;
     if (errors.length) detail += ` :: ${errors.slice(0, 3).join(' | ')}`;
   } catch (e) {
     detail = e.message.split('\n')[0];

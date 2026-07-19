@@ -73,28 +73,35 @@
     <div id="ppStepper" title="pipeline post-edición (hover = evidencia)"></div>
     <button id="ppClose" title="cerrar (Y)">✕</button>
   </header>
-  <div id="ppGrid">
-    <section class="ppCol">
-      <h3 class="ppH">Transcript <span id="ppTrMeta" class="ppHmeta"></span></h3>
-      <div id="ppTranscript" class="ppScroll"></div>
-    </section>
-    <section class="ppCol">
-      <div class="ppScroll" id="ppMetaCol">
-        <h3 class="ppH">Títulos</h3><div id="ppTitles"></div>
-        <h3 class="ppH">Descripción <span id="ppLinkState" class="ppHmeta"></span></h3><div id="ppDesc" class="ppText"></div>
-        <h3 class="ppH">Keywords</h3><div id="ppKeywords" class="ppChips"></div>
-        <h3 class="ppH">Post de comunidad</h3><div id="ppPost" class="ppText"></div>
-      </div>
-    </section>
-    <section class="ppCol">
-      <div class="ppScroll" id="ppLaunchCol">
-        <h3 class="ppH">Miniaturas · A/B</h3><div id="ppThumbs"></div>
-        <h3 class="ppH">Menciones → tarjetas</h3><div id="ppMentions"></div>
-        <h3 class="ppH">Horario</h3><div id="ppSchedule"></div>
-        <h3 class="ppH">Gate</h3><div id="ppGate"></div>
-        <h3 class="ppH">Upload</h3><div id="ppUpload"></div>
-      </div>
-    </section>
+  <div id="ppBody">
+    <nav id="ppRail" aria-label="secciones del dossier">
+      <button class="ppRailBtn" data-col="tr" title="prender/apagar Transcript"><span class="ppLed"></span>Transcript</button>
+      <button class="ppRailBtn" data-col="meta" title="prender/apagar Metadata"><span class="ppLed"></span>Metadata</button>
+      <button class="ppRailBtn" data-col="launch" title="prender/apagar Lanzamiento"><span class="ppLed"></span>Lanzamiento</button>
+    </nav>
+    <div id="ppGrid">
+      <section class="ppCol" data-col="tr">
+        <h3 class="ppH">Transcript <span id="ppTrMeta" class="ppHmeta"></span><button class="ppCopy" id="copyTranscript" title="copiar el transcript completo">⧉ copiar</button></h3>
+        <div id="ppTranscript" class="ppScroll"></div>
+      </section>
+      <section class="ppCol" data-col="meta">
+        <div class="ppScroll" id="ppMetaCol">
+          <h3 class="ppH">Títulos <span class="ppHmeta"></span><button class="ppCopy" id="copyTitles" title="copiar los 3 títulos">⧉ copiar</button></h3><div id="ppTitles"></div>
+          <h3 class="ppH">Descripción <span id="ppLinkState" class="ppHmeta"></span><button class="ppCopy" id="copyDesc" title="copiar la descripción (lista para YouTube)">⧉ copiar</button></h3><div id="ppDesc" class="ppText"></div>
+          <h3 class="ppH">Keywords <span class="ppHmeta"></span><button class="ppCopy" id="copyKeywords" title="copiar keywords separadas por coma">⧉ copiar</button></h3><div id="ppKeywords" class="ppChips"></div>
+          <h3 class="ppH">Post de comunidad <span class="ppHmeta"></span><button class="ppCopy" id="copyPost" title="copiar el post">⧉ copiar</button></h3><div id="ppPost" class="ppText"></div>
+        </div>
+      </section>
+      <section class="ppCol" data-col="launch">
+        <div class="ppScroll" id="ppLaunchCol">
+          <h3 class="ppH">Miniaturas · A/B</h3><div id="ppThumbs"></div>
+          <h3 class="ppH">Menciones → tarjetas</h3><div id="ppMentions"></div>
+          <h3 class="ppH">Horario</h3><div id="ppSchedule"></div>
+          <h3 class="ppH">Gate</h3><div id="ppGate"></div>
+          <h3 class="ppH">Upload</h3><div id="ppUpload"></div>
+        </div>
+      </section>
+    </div>
   </div>
   <footer id="ppFoot">espejo AI-first: aquí se <b>mira</b> el lanzamiento; las etapas las corre el agente (las decisiones se toman conversando) · <b>Y</b> cierra · click en un <b>timestamp</b> = seek · <b>⇧click</b> = seek y ver el video</footer>
 </div>

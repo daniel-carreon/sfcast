@@ -511,6 +511,62 @@ $('modal').addEventListener('pointerdown', (e) => { if (e.target === $('modal'))
 // comandos sfpublish (los corre el agente); las decisiones se toman CONVERSANDO. CERO forms.
 let ppTimer = null;
 let ppTranscriptOk = false; // solo el ÉXITO se cachea; un "sin transcript" se reintenta al reabrir
+let ppLastPub = null;       // último publish.json pintado (fuente de los botones de copiar)
+let ppLastTr = null;        // último transcript pintado
+
+// --- rail de secciones: prender/apagar columnas, layout responsivo 1-2-3, persistido
+const PP_COLS = ['tr', 'meta', 'launch'];
+const PP_W = { tr: 1.05, meta: 1.1, launch: 0.95 };
+let ppView = (() => {
+  try { return { tr: true, meta: true, launch: true, ...JSON.parse(localStorage.getItem('sf.pp.view') || '{}') }; }
+  catch { return { tr: true, meta: true, launch: true }; }
+})();
+function applyPpView() {
+  const on = PP_COLS.filter((c) => ppView[c]);
+  for (const col of document.querySelectorAll('#ppGrid .ppCol')) {
+    const visible = !!ppView[col.dataset.col];
+    col.style.display = visible ? '' : 'none';
+    col.classList.toggle('solo', visible && on.length === 1);
+  }
+  $('ppGrid').style.gridTemplateColumns = on.map((c) => PP_W[c] + 'fr').join(' ');
+  for (const b of document.querySelectorAll('.ppRailBtn')) b.classList.toggle('on', !!ppView[b.dataset.col]);
+  localStorage.setItem('sf.pp.view', JSON.stringify(ppView));
+}
+for (const b of document.querySelectorAll('.ppRailBtn')) {
+  b.addEventListener('click', () => {
+    const c = b.dataset.col;
+    if (ppView[c] && PP_COLS.filter((x) => ppView[x]).length === 1) {
+      toast('al menos una sección prendida');
+      return;
+    }
+    ppView[c] = !ppView[c];
+    applyPpView();
+  });
+}
+applyPpView();
+
+// --- copiar: el dossier es espejo, pero lo que muestra se LLEVA (a YouTube, a Skool, a donde sea)
+async function ppCopy(text, what) {
+  if (!text) { toast(`nada que copiar aún en ${what}`); return; }
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(`${what} copiado ✓`);
+  } catch { toast('no pude copiar (permiso del navegador)'); }
+}
+$('copyTranscript').addEventListener('click', () =>
+  ppCopy(ppLastTr?.segments?.map((s) => s.text).join('\n\n'), 'transcript'));
+$('copyTitles').addEventListener('click', () =>
+  ppCopy((ppLastPub?.data?.metadata?.titles || []).join('\n'), 'títulos'));
+$('copyDesc').addEventListener('click', () =>
+  ppCopy(ppLastPub?.data?.metadata?.description, 'descripción'));
+$('copyKeywords').addEventListener('click', () =>
+  ppCopy((ppLastPub?.data?.metadata?.keywords || []).join(', '), 'keywords'));
+$('copyPost').addEventListener('click', () =>
+  ppCopy(ppLastPub?.data?.post, 'post'));
+$('ppTitles').addEventListener('click', (e) => {
+  const btn = e.target.closest('.ppTitleCopy');
+  if (btn) ppCopy(ppLastPub?.data?.metadata?.titles?.[+btn.dataset.idx], 'título');
+});
 function togglePublishPanel() {
   const panel = $('publishPanel');
   if (panel.hidden) {
@@ -560,6 +616,7 @@ function escapeHtml(s) {
 
 // --- transcript: párrafos con timestamp clickeable (seek del video de la sala, que vive detrás)
 function renderTranscript(tr) {
+  ppLastTr = tr;
   const box = $('ppTranscript');
   box.innerHTML = '';
   if (!tr.found || !tr.segments?.length) {
@@ -621,6 +678,7 @@ function renderPublish(j) {
     return;
   }
   const pub = j.publish;
+  ppLastPub = pub;
   const md = pub.data?.metadata || {};
   $('ppSlug').textContent = pub.video?.slug || '';
 
@@ -640,13 +698,14 @@ function renderPublish(j) {
   tbox.innerHTML = '';
   const titles = md.titles || [];
   if (!titles.length) tbox.innerHTML = '<div class="ppEmptyBlock">sin títulos aún — corre la etapa <b>metadata</b>.</div>';
-  for (const t of titles) {
+  titles.forEach((t, i) => {
     const el = document.createElement('div');
     const chosen = t === pub.video?.titulo;
     el.className = 'ppTitle' + (chosen ? ' chosen' : '');
-    el.innerHTML = `<span class="ppTitleTx">${escapeHtml(t)}</span><span class="ppTitleMeta">${chosen ? 'ELEGIDO · ' : ''}${t.length}/60</span>`;
+    el.innerHTML = `<span class="ppTitleTx">${escapeHtml(t)}</span><span class="ppTitleMeta">${chosen ? 'ELEGIDO · ' : ''}${t.length}/60</span>` +
+      `<button class="ppCopy ppTitleCopy" data-idx="${i}" title="copiar este título">⧉</button>`;
     tbox.appendChild(el);
-  }
+  });
 
   // descripción completa, con el /go/ resaltado; estado del link junto al header
   const desc = md.description || '';

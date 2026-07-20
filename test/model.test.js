@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   newState, mergeRanges, boundaries, addSplit, trimLeft, trimRight,
   skipTarget, totalTrimmed, toFixes, fromFixes,
+  editItem, effItem, resolveItems, clampItem, pruneItemEdits,
 } from '../web/model.js';
 
 const DUR = 100;
@@ -81,4 +82,79 @@ test('guardas: no split en 0/fin, no trims microscopicos', () => {
   assert.equal(addSplit(s, 100, DUR), false);
   assert.equal(trimLeft(s, 0.01, DUR), false);
   assert.equal(trimRight(s, 99.99, DUR), false);
+});
+
+// ---------- ediciones de items (mover / trim / eliminar overlays) ----------
+const ITEMS = [
+  { id: 'cap-5x', type: 'image', src: 'a.png', start: 4, dur: 2, track: 3, fit: 'stretch' },
+  { id: 'logo-anthropic', type: 'video', src: 'b.webm', start: 3, dur: 2.4, track: 2, fit: 'contain', alpha: true },
+];
+
+test('editItem + effItem: mover un item cambia solo su placement', () => {
+  const s = newState();
+  editItem(s, 0, 'cap-5x', { start: 6.5 });
+  const it = effItem(s, 0, ITEMS[0]);
+  assert.equal(it.start, 6.5);
+  assert.equal(it.dur, 2);            // sin tocar
+  assert.equal(ITEMS[0].start, 4);    // el base queda intacto
+});
+
+test('effItem: removed devuelve null y resolveItems lo excluye', () => {
+  const s = newState();
+  editItem(s, 0, 'cap-5x', { removed: true });
+  assert.equal(effItem(s, 0, ITEMS[0]), null);
+  const res = resolveItems(s, ITEMS);
+  assert.equal(res.length, 1);
+  assert.equal(res[0]._idx, 1);
+});
+
+test('clampItem: respeta MIN_DUR, límites del proyecto y duración del media', () => {
+  // no se sale del proyecto
+  const c1 = clampItem(ITEMS[0], { start: 99.5 }, DUR);
+  assert.ok(c1.start + (c1.dur ?? ITEMS[0].dur) <= DUR + 1e-4);
+  // dur mínima
+  assert.ok(clampItem(ITEMS[0], { dur: 0.01 }, DUR).dur >= 0.1);
+  // offset nunca negativo
+  assert.equal(clampItem(ITEMS[1], { offset: -3 }, DUR).offset, 0);
+  // un video no puede durar más que su media restante (srcDur 2.4, offset 1 → máx 1.4)
+  const c2 = clampItem(ITEMS[1], { offset: 1, dur: 5 }, DUR, 2.4);
+  assert.ok(Math.abs(c2.dur - 1.4) < 1e-3);
+});
+
+test('trim izquierdo de video: start avanza y offset compensa (in-point)', () => {
+  const s = newState();
+  // simular el gesto: +0.5s por la izquierda → start 3.5, dur 1.9, offset 0.5
+  editItem(s, 1, 'logo-anthropic', { start: 3.5, dur: 1.9, offset: 0.5 });
+  const it = effItem(s, 1, ITEMS[1]);
+  assert.equal(it.start, 3.5);
+  assert.equal(it.dur, 1.9);
+  assert.equal(it.offset, 0.5);
+});
+
+test('round-trip item_edits en fixes.json', () => {
+  const s = newState();
+  editItem(s, 0, 'cap-5x', { start: 7, dur: 1.5 });
+  editItem(s, 1, 'logo-anthropic', { removed: true });
+  const fx = toFixes(s, 'assets/base.mp4');
+  assert.equal(fx.item_edits.length, 2);
+  assert.deepEqual(fx.item_edits[0], { index: 0, id: 'cap-5x', start: 7, dur: 1.5 });
+  assert.deepEqual(fx.item_edits[1], { index: 1, id: 'logo-anthropic', removed: true });
+  const s2 = fromFixes(fx);
+  assert.equal(effItem(s2, 0, ITEMS[0]).start, 7);
+  assert.equal(effItem(s2, 1, ITEMS[1]), null);
+});
+
+test('fixes.json sin item_edits (sesiones viejas) sigue funcionando', () => {
+  const s = fromFixes({ trims: [{ start: 1, end: 2 }] });
+  assert.deepEqual(s.items, {});
+  assert.equal(resolveItems(s, ITEMS).length, 2);
+});
+
+test('pruneItemEdits tira ediciones stale (id distinto o índice fuera de rango)', () => {
+  const s = newState();
+  editItem(s, 0, 'cap-5x', { start: 9 });          // válida
+  editItem(s, 1, 'OTRO-id', { start: 9 });          // id no coincide → stale
+  editItem(s, 7, 'fantasma', { removed: true });    // índice fuera → stale
+  pruneItemEdits(s, ITEMS);
+  assert.deepEqual(Object.keys(s.items), ['0']);
 });

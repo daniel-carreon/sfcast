@@ -62,6 +62,15 @@ body {
 #markerList .mdel:hover { color: var(--danger); }
 #trimSummary { margin-top: 14px; color: var(--dim); font-size: 12px; }
 #trimSummary b { color: var(--danger); }
+#trimSummary .iedit { color: var(--sf); }
+#itemInfo {
+  margin-top: 12px; padding: 8px 10px; border: 1px solid #6b4a12; border-radius: 7px;
+  background: #16120a; font-size: 12px;
+}
+#itemInfo .iiId { color: var(--sf); font-weight: 700; word-break: break-all; }
+#itemInfo .iiMeta { color: var(--text); font-variant-numeric: tabular-nums; margin-top: 2px; }
+#itemInfo .iiHint { color: #6a6a78; font-size: 10.5px; margin-top: 6px; line-height: 1.5; }
+#itemInfo .iiHint b { color: var(--dim); }
 
 #transport {
   display: flex; align-items: center; gap: 14px;
@@ -112,10 +121,28 @@ body {
   position: absolute; top: 4px; bottom: 4px; border-radius: 4px;
   background: linear-gradient(180deg, #2a2a33, #202028); border: 1px solid #34343f;
   color: #cfcfda; font-size: 9px; overflow: hidden; white-space: nowrap; padding: 2px 4px;
+  cursor: grab; touch-action: none;
 }
+.clipItem:hover { filter: brightness(1.25); }
+.clipItem.dragging { cursor: grabbing; filter: brightness(1.35); z-index: 7; }
+.clipItem.sel { outline: 1.5px solid var(--sf); box-shadow: 0 0 8px rgba(255,145,1,.55); z-index: 6; }
+.clipItem.edited::after {
+  content: ''; position: absolute; right: 2px; top: 2px; width: 5px; height: 5px;
+  border-radius: 50%; background: var(--sf);
+}
+.clipItem .hd {
+  position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; z-index: 2;
+}
+.clipItem .hd.l { left: 0; border-radius: 4px 0 0 4px; }
+.clipItem .hd.r { right: 0; border-radius: 0 4px 4px 0; }
+.clipItem .hd:hover, .clipItem.sel .hd { background: rgba(255,145,1,.4); }
 .clipItem.t1 { border-color: #6b4a12; background: linear-gradient(180deg, #3a2c10, #2a2010); color: #ffc873; }
 .clipItem.t2 { border-color: #4a2a78; background: linear-gradient(180deg, #2c1a4a, #201338); color: #cfa9ff; }
 .clipItem.t3 { border-color: #2e2e3a; }
+.rangeSel {
+  position: absolute; top: 0; bottom: 0; z-index: 15; pointer-events: none;
+  background: rgba(255,77,77,.16); border-left: 1px dashed var(--danger); border-right: 1px dashed var(--danger);
+}
 .baseSeg {
   position: absolute; top: 6px; bottom: 6px; border-radius: 4px;
   background: linear-gradient(180deg, #1d2b1d, #16211a); border: 1px solid #2c4a2e;

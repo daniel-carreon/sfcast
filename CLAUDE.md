@@ -39,15 +39,24 @@ node bin/sfpublish.js <proyecto> <etapa>                  # etapa 2: init|metada
 2. **timeline.json**: `{name,width,height,fps,duration,base{src},audio{src},items[{id,type,src,
    start,dur,track,fit,muted,alpha}]}` · tracks 1=clips(cover) 2=alpha(contain) 3=caps(stretch).
    Cero hardcode de aspecto: TODO sale de estos campos (16:9 y 9:16 probados).
-3. **fixes.json**: `{video, exported_at, trims[{start,end}], markers[{t,nota}], splits[]}` — es el
-   contrato del loop AI-first (sala → fábrica). `sfstudio-apply` y la sala lo comparten.
+3. **fixes.json**: `{video, exported_at, trims[{start,end}], markers[{t,nota}], splits[],
+   item_edits?[{index,id,start?,dur?,offset?,removed?}]}` — es el contrato del loop AI-first
+   (sala → fábrica). `sfstudio-apply` consume SOLO los trims del base; los `item_edits`
+   (mover/trim/eliminar overlays hechos A MANO en la sala, 20 jul 2026) los consume la FÁBRICA:
+   re-colocar los overlays con esos valores antes de imprimir el máster. `offset` = in-point del
+   media (aparece cuando se recorta el borde izquierdo de un overlay de video). `index` = posición
+   en `items[]` del timeline.json que estaba abierto; `id` es sanity-check (la sala poda ediciones
+   stale si el timeline se regeneró).
 4. **WebM alpha**: `libvpx-vp9 -pix_fmt yuva420p -auto-alt-ref 0`, UNA pasada continua (el alpha
    driftea en chunks). VP9 no tiene HW encode en Apple Silicon: paralelizar POR CARD.
 5. **Determinismo sfrender**: seek de la timeline pausada + screenshot plano (beginFrame ya no
    existe en Chromium ≥147) + `--force-color-profile=srgb` + fonts.ready + warmup.
 6. **La sala no re-renderiza nada**: trims saltados en vivo con rVFC (no timeupdate), overlays
    montados por ventana ±3s, server con Range + no-cache. Target Chrome (Safari no decodifica
-   WebM alpha).
+   WebM alpha). La edición manual de items (arrastrar/trim de bordes/Supr/⌥-rango) tampoco
+   re-renderiza: muta el estado efectivo que el player refleja en vivo y viaja como `item_edits`.
+   ⚠️ Gotcha pagado: seleccionar un item re-renderiza el timeline → el div arrastrado queda
+   DETACHED; `startItemDrag` re-consulta el div por `data-idx` después del render.
 
 ## Gotchas pagados (no re-pagar)
 

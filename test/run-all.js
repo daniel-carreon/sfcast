@@ -166,6 +166,47 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     await page.keyboard.press('d');
     await page.waitForSelector('.trimRange', { timeout: 5000 });
     const trimTitle = await page.$eval('.trimRange', (el) => el.title);
+    // ── edición manual de items: drag (mover) + trim de borde + Supr + ⌘Z ──
+    const box0 = await page.$eval('#track2 .clipItem', (el) => {
+      const r = el.getBoundingClientRect();
+      return { x: r.x, y: r.y, w: r.width, h: r.height };
+    });
+    // drag del cuerpo +60px → mueve el item y lo selecciona
+    await page.mouse.move(box0.x + box0.w / 2, box0.y + box0.h / 2);
+    await page.mouse.down();
+    await page.mouse.move(box0.x + box0.w / 2 + 60, box0.y + box0.h / 2, { steps: 6 });
+    await page.mouse.up();
+    const movedOk = await page.$eval('#track2 .clipItem', (el) => el.classList.contains('edited') && el.classList.contains('sel'));
+    const infoOk = await page.$eval('#itemInfo', (el) => !el.hidden && /logo_google/.test(el.textContent));
+    // trim del borde derecho -40px → encoge dur
+    const box1 = await page.$eval('#track2 .clipItem', (el) => {
+      const r = el.getBoundingClientRect();
+      return { x: r.x, y: r.y, w: r.width, h: r.height };
+    });
+    await page.mouse.move(box1.x + box1.w - 3, box1.y + box1.h / 2);
+    await page.mouse.down();
+    await page.mouse.move(box1.x + box1.w - 43, box1.y + box1.h / 2, { steps: 5 });
+    await page.mouse.up();
+    const box2 = await page.$eval('#track2 .clipItem', (el) => el.getBoundingClientRect().width);
+    const trimItemOk = box2 < box1.w - 20;
+    // Supr borra el item seleccionado; ⌘Z lo revive (con sus ediciones previas intactas)
+    await page.keyboard.press('Delete');
+    const goneOk = (await page.$$('#track2 .clipItem')).length === 0;
+    await page.keyboard.press('Meta+z');
+    const backOk = (await page.$$('#track2 .clipItem')).length === 1;
+    // ⌥-arrastre sobre el ruler = recorte de rango del base (lejos del trim S/D previo)
+    const ruler = await page.$eval('#ruler', (el) => {
+      const r = el.getBoundingClientRect();
+      return { x: r.x, y: r.y, w: r.width, h: r.height };
+    });
+    await page.keyboard.down('Alt');
+    await page.mouse.move(ruler.x + ruler.w * 0.62, ruler.y + ruler.h / 2);
+    await page.mouse.down();
+    await page.mouse.move(ruler.x + ruler.w * 0.75, ruler.y + ruler.h / 2, { steps: 5 });
+    await page.mouse.up();
+    await page.keyboard.up('Alt');
+    const nRanges = (await page.$$('.trimRange')).length;
+    const itemsOk = movedOk && infoOk && trimItemOk && goneOk && backOk && nRanges === 2;
     // marcador vía popover
     await page.keyboard.press('m');
     await page.waitForSelector('#popover:not([hidden])', { timeout: 5000 });
@@ -177,7 +218,9 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     await new Promise((r) => setTimeout(r, 400));
     const fixesTxt = await fsp.readFile(path.join(projDir, 'fixes.json'), 'utf8');
     const fx = JSON.parse(fixesTxt);
-    const fixesOk = fx.trims?.length === 1 && Math.abs(fx.trims[0].start - 0.5) < 0.05 && fx.markers?.length === 1;
+    const fixesOk = fx.trims?.length === 2 && Math.abs(fx.trims[0].start - 0.5) < 0.05 && fx.markers?.length === 1
+      && fx.item_edits?.length === 1 && fx.item_edits[0].id === 'logo_google'
+      && typeof fx.item_edits[0].start === 'number' && typeof fx.item_edits[0].dur === 'number';
     // dossier ⌘Y: togglea, pinta stepper + títulos (elegido) + descripción con /go/ + transcript
     // segmentado + galería de thumbs + menciones, y cierra
     await page.click('#modalClose');
@@ -217,8 +260,8 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     const waveOk = wf.ok && typeof wj.rate === 'number' && Array.isArray(wj.peaks)
       && (await page.$('#waveCanvas')) !== null;
     await browser.close();
-    ok = fixesOk && waveOk && panelOk && errors.length === 0 && /recorte/.test(trimTitle);
-    detail = `trim="${trimTitle}" fixes=${fixesOk} wave=${waveOk} panel=${panelOk} (rail+copy incl) consola=${errors.length} errores`;
+    ok = fixesOk && waveOk && panelOk && itemsOk && errors.length === 0 && /recorte/.test(trimTitle);
+    detail = `trim="${trimTitle}" fixes=${fixesOk} wave=${waveOk} panel=${panelOk} items=${itemsOk} (drag/trim/supr/⌥rango) consola=${errors.length} errores`;
     if (errors.length) detail += ` :: ${errors.slice(0, 3).join(' | ')}`;
   } catch (e) {
     detail = e.message.split('\n')[0];
@@ -230,7 +273,7 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     await fsp.rm(path.join(projDir, 'transcripts'), { recursive: true, force: true });
     await fsp.rm(path.join(projDir, 'thumbs'), { recursive: true, force: true });
   }
-  report('sfreview humo Playwright (S/D + marcador + export + waveform + dossier ⌘Y, 0 errores)', ok, detail);
+  report('sfreview humo Playwright (S/D + items drag/trim/supr/⌥rango + marcador + export + waveform + dossier ⌘Y, 0 errores)', ok, detail);
 }
 
 await fsp.rm(tmp, { recursive: true, force: true });

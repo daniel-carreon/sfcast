@@ -1,9 +1,11 @@
-// Modelo puro de la Sala de Revisión: splits, trims no destructivos, marcadores.
+// Modelo puro de la Sala de Revisión: splits, trims no destructivos, marcadores,
+// y ediciones de items (mover / trim de bordes / eliminar overlays del timeline).
 // SIN DOM — importable por node --test y por el browser (ESM).
 const EPS = 1e-4;
+const MIN_ITEM_DUR = 0.1;
 
 export function newState() {
-  return { splits: [], trims: [], markers: [] };
+  return { splits: [], trims: [], markers: [], items: {} };
 }
 
 export function cloneState(s) {
@@ -93,14 +95,90 @@ export function totalTrimmed(trims) {
   return mergeRanges(trims).reduce((acc, r) => acc + (r.end - r.start), 0);
 }
 
-/** fixes.json (contrato con sfstudio-apply). */
+// ---------- ediciones de items (overlays del timeline: mover / trim / eliminar) ----------
+// state.items = { [index]: {id, start?, dur?, offset?, removed?} } — SOLO los que cambiaron.
+// `offset` = in-point del media (segundos dentro del webm/mp4 del overlay); solo aplica a video.
+
+/** Registra/mezcla una edición del item `idx`. `id` es sanity-check para restaurar sesiones. */
+export function editItem(state, idx, id, patch) {
+  const prev = state.items[idx] || { id };
+  const next = { ...prev, id };
+  for (const k of ['start', 'dur', 'offset']) {
+    if (patch[k] !== undefined) next[k] = round3(patch[k]);
+  }
+  if (patch.removed !== undefined) next.removed = !!patch.removed;
+  state.items[idx] = next;
+}
+
+/** Item efectivo (base + edición). Devuelve null si está eliminado. */
+export function effItem(state, idx, baseItem) {
+  if (!baseItem) return null;
+  const ed = state.items[idx];
+  if (!ed) return baseItem;
+  if (ed.removed) return null;
+  const out = { ...baseItem };
+  for (const k of ['start', 'dur', 'offset']) if (ed[k] !== undefined) out[k] = ed[k];
+  return out;
+}
+
+/** Lista efectiva [{...item, _idx}] excluyendo eliminados. */
+export function resolveItems(state, baseItems) {
+  const out = [];
+  for (let i = 0; i < baseItems.length; i++) {
+    const it = effItem(state, i, baseItems[i]);
+    if (it) out.push({ ...it, _idx: i });
+  }
+  return out;
+}
+
+/** Clampa una edición de placement contra los límites del proyecto y del media. */
+export function clampItem(baseItem, edit, duration, srcDur = null) {
+  const out = { ...edit };
+  if (out.dur !== undefined) out.dur = Math.max(MIN_ITEM_DUR, out.dur);
+  if (out.offset !== undefined) out.offset = Math.max(0, out.offset);
+  if (out.start !== undefined) {
+    const dur = out.dur ?? baseItem.dur;
+    out.start = Math.max(0, Math.min(out.start, duration - MIN_ITEM_DUR));
+    if (out.start + dur > duration) out.dur = round3(duration - out.start);
+  }
+  if (srcDur && baseItem.type === 'video') {
+    const off = out.offset ?? baseItem.offset ?? 0;
+    const dur = out.dur ?? baseItem.dur;
+    if (off + dur > srcDur + EPS) out.dur = round3(Math.max(MIN_ITEM_DUR, srcDur - off));
+  }
+  for (const k of ['start', 'dur', 'offset']) if (out[k] !== undefined) out[k] = round3(out[k]);
+  return out;
+}
+
+/** Poda ediciones stale al restaurar sesión (timeline regenerado: index/id ya no coinciden). */
+export function pruneItemEdits(state, baseItems) {
+  for (const key of Object.keys(state.items)) {
+    const idx = +key;
+    const base = baseItems[idx];
+    const ed = state.items[key];
+    if (!base || (ed.id != null && base.id != null && ed.id !== base.id)) delete state.items[key];
+  }
+}
+
+/** fixes.json (contrato con sfstudio-apply + la fábrica). */
 export function toFixes(state, videoSrc, extra = {}) {
+  const itemEdits = Object.keys(state.items)
+    .map(Number)
+    .sort((a, b) => a - b)
+    .map((idx) => {
+      const ed = state.items[idx];
+      const out = { index: idx, id: ed.id };
+      for (const k of ['start', 'dur', 'offset']) if (ed[k] !== undefined) out[k] = ed[k];
+      if (ed.removed) out.removed = true;
+      return out;
+    });
   return {
     video: videoSrc,
     exported_at: new Date().toISOString(),
     trims: mergeRanges(state.trims).map((r) => ({ start: round3(r.start), end: round3(r.end) })),
     markers: state.markers.map((m) => ({ t: round3(m.t), nota: m.nota })),
     splits: [...state.splits],
+    ...(itemEdits.length ? { item_edits: itemEdits } : {}),
     ...extra,
   };
 }
@@ -110,6 +188,15 @@ export function fromFixes(fixes) {
   if (Array.isArray(fixes?.trims)) s.trims = mergeRanges(fixes.trims.map((r) => ({ start: +r.start, end: +r.end })));
   if (Array.isArray(fixes?.markers)) s.markers = fixes.markers.map((m) => ({ t: +m.t, nota: String(m.nota ?? '') }));
   if (Array.isArray(fixes?.splits)) s.splits = fixes.splits.map(Number).sort((a, b) => a - b);
+  if (Array.isArray(fixes?.item_edits)) {
+    for (const e of fixes.item_edits) {
+      if (!Number.isInteger(e?.index) || e.index < 0) continue;
+      const ed = { id: e.id };
+      for (const k of ['start', 'dur', 'offset']) if (typeof e[k] === 'number') ed[k] = round3(e[k]);
+      if (e.removed) ed.removed = true;
+      s.items[e.index] = ed;
+    }
+  }
   return s;
 }
 

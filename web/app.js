@@ -1,8 +1,10 @@
-// SFStudio — Sala de Revisión. AI-first: la sala es para VER, RECORTAR fino (S/A/D) y ANOTAR;
-// los recortes/notas vuelven a la fábrica como fixes.json. Nada se re-renderiza aquí.
+// SFStudio — Sala de Revisión. AI-first: la sala es para VER, RECORTAR fino (S/A/D), ANOTAR,
+// y ahora también EDITAR overlays a mano (arrastrar/trim de bordes/eliminar items);
+// todo vuelve a la fábrica como fixes.json (trims + item_edits). Nada se re-renderiza aquí.
 import {
   newState, cloneState, mergeRanges, addSplit, trimLeft, trimRight,
   skipTarget, totalTrimmed, toFixes, fromFixes,
+  editItem, effItem, resolveItems, clampItem, pruneItemEdits,
 } from './model.js';
 
 const $ = (id) => document.getElementById(id);
@@ -14,8 +16,9 @@ let state = newState();
 const undoStack = [];
 let pxPerSec = 1;       // zoom del timeline
 let fitPx = 1;
-let mounted = new Map(); // id → {el, item}
+let mounted = new Map(); // idx → {el, item}
 let speed = 1;
+let selIdx = null;       // item seleccionado (índice en project.items)
 
 // ---------- carga ----------
 async function boot() {
@@ -31,7 +34,10 @@ async function boot() {
     const r = await fetch('/api/fixes');
     if (r.ok) {
       const fx = await r.json();
-      if (fx && (fx.trims || fx.markers)) state = fromFixes(fx);
+      if (fx && (fx.trims || fx.markers || fx.item_edits)) {
+        state = fromFixes(fx);
+        pruneItemEdits(state, project.items); // timeline regenerado → ediciones stale fuera
+      }
     }
   } catch { /* sin sesión previa */ }
 
@@ -112,10 +118,19 @@ window.addEventListener('resize', () => { if (project) { layoutStage(); fitTimel
 const WINDOW = 3;
 function syncOverlays(t, playing) {
   for (let idx = 0; idx < project.items.length; idx++) {
-    const it = project.items[idx];
+    // valores EFECTIVOS (base + ediciones manuales): mover/trim/eliminar se reflejan en vivo
+    const it = effItem(state, idx, project.items[idx]);
+    let m = mounted.get(idx);
+    if (!it) { // eliminado → desmontar si estaba
+      if (m) {
+        if (m.el.tagName === 'VIDEO') { try { m.el.pause(); } catch { /* ok */ } m.el.removeAttribute('src'); m.el.load(); }
+        m.el.remove();
+        mounted.delete(idx);
+      }
+      continue;
+    }
     const inWindow = t >= it.start - WINDOW && t < it.start + it.dur + WINDOW;
     // clave = índice del array, NO it.id: los ids de negocio pueden repetirse y colisionarían
-    let m = mounted.get(idx);
     if (inWindow && !m) {
       const el = it.type === 'video' ? document.createElement('video') : document.createElement('img');
       el.className = 'ov';
@@ -139,7 +154,7 @@ function syncOverlays(t, playing) {
       continue;
     }
     if (!m) continue;
-    const local = t - it.start;
+    const local = t - it.start + (it.offset || 0); // offset = in-point del media (trim izq. de video)
     const active = t >= it.start && t < it.start + it.dur;
     m.el.style.display = active ? '' : 'none';
     if (m.el.tagName === 'VIDEO') {
@@ -230,17 +245,22 @@ function renderTimeline() {
     lane.appendChild(p);
   });
 
-  // items por track
+  // items por track (efectivos; editables: arrastrar = mover, bordes = trim, click = seleccionar)
+  const effItems = resolveItems(state, project.items);
   for (const tr of [1, 2, 3]) {
     const el = $('track' + tr);
     el.innerHTML = '';
-    for (const it of project.items.filter((i) => (i.track || 1) === tr)) {
+    for (const it of effItems.filter((i) => (i.track || 1) === tr)) {
       const d = document.createElement('div');
-      d.className = `clipItem t${tr}`;
+      d.className = `clipItem t${tr}` + (it._idx === selIdx ? ' sel' : '') + (state.items[it._idx] ? ' edited' : '');
       d.style.left = `${X(it.start)}px`;
       d.style.width = `${Math.max(2, (it.dur * pxPerSec) - 1)}px`;
-      d.title = `${it.id} · ${it.start}s +${it.dur}s`;
+      d.title = `${it.id} · ${it.start}s +${it.dur}s — arrastra para mover · bordes = trim · Supr borra`;
+      d.dataset.idx = it._idx;
       if (it.dur * pxPerSec > 34) d.textContent = it.id;
+      const hl = document.createElement('div'); hl.className = 'hd l';
+      const hr = document.createElement('div'); hr.className = 'hd r';
+      d.append(hl, hr);
       el.appendChild(d);
     }
   }
@@ -279,10 +299,29 @@ function renderTimeline() {
   }
 
   const cut = totalTrimmed(state.trims);
-  $('trimSummary').innerHTML = state.trims.length
+  const nEdits = Object.keys(state.items).length;
+  $('trimSummary').innerHTML = (state.trims.length
     ? `<b>${cut.toFixed(1)}s</b> recortados en ${mergeRanges(state.trims).length} rango(s) · dur final ${fmt(project.duration - cut)}`
-    : 'sin recortes';
+    : 'sin recortes') + (nEdits ? ` · <span class="iedit">${nEdits} asset(s) editado(s)</span>` : '');
+  renderItemInfo();
   queueWave();
+}
+
+// ---------- inspector del item seleccionado ----------
+const TRACK_NAMES = { 1: 'clips', 2: 'alpha', 3: 'caps' };
+function renderItemInfo() {
+  const box = $('itemInfo');
+  const it = selIdx !== null ? effItem(state, selIdx, project.items[selIdx]) : null;
+  if (!it) {
+    box.innerHTML = '';
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const off = it.offset ? ` · in ${it.offset.toFixed(2)}s` : '';
+  box.innerHTML = `<div class="iiId">${it.id}</div>` +
+    `<div class="iiMeta">${TRACK_NAMES[it.track || 1]} · ${fmt(it.start)} → ${fmt(it.start + it.dur)} (${it.dur.toFixed(2)}s)${off}</div>` +
+    `<div class="iiHint">arrastra = mover · bordes = trim · ←/→ 1 frame (⇧×10) · <b>Supr</b> borra · <b>Esc</b> deselecciona</div>`;
 }
 
 function renderMarkers() {
@@ -310,15 +349,170 @@ function pushUndo() {
 }
 function undo() {
   const prev = undoStack.pop();
-  if (prev) { state = prev; refresh(); toast('deshecho'); }
+  if (prev) {
+    state = prev;
+    if (selIdx !== null && !effItem(state, selIdx, project.items[selIdx])) selIdx = null;
+    refresh();
+    toast('deshecho');
+  }
+}
+
+function removeSelectedItem() {
+  if (selIdx === null) return;
+  const baseIt = project.items[selIdx];
+  if (!baseIt) return;
+  pushUndo();
+  editItem(state, selIdx, baseIt.id, { removed: true });
+  toast(`${baseIt.id} eliminado · ⌘Z deshace`);
+  selIdx = null;
+  refresh();
+}
+
+function nudgeSelectedItem(dt) {
+  if (selIdx === null) return false;
+  const baseIt = project.items[selIdx];
+  const it = effItem(state, selIdx, baseIt);
+  if (!it) return false;
+  pushUndo();
+  editItem(state, selIdx, baseIt.id, clampItem(baseIt, { start: it.start + dt }, project.duration));
+  refresh();
+  return true;
 }
 
 // ---------- interacción ----------
-function seekFromEvent(e) {
+function timeFromEvent(e) {
   const rect = $('timeline').getBoundingClientRect();
-  const t = Math.max(0, Math.min(project.duration, (e.clientX - rect.left) / pxPerSec));
-  base.currentTime = t;
+  return Math.max(0, Math.min(project.duration, (e.clientX - rect.left) / pxPerSec));
 }
+function seekFromEvent(e) {
+  base.currentTime = timeFromEvent(e);
+}
+
+// snap de bordes: playhead, 0, fin del proyecto y bordes de los demás items (⌥ lo desactiva)
+function snapCandidates(exceptIdx) {
+  const c = [0, project.duration, base.currentTime || 0];
+  for (const it of resolveItems(state, project.items)) {
+    if (it._idx === exceptIdx) continue;
+    c.push(it.start, it.start + it.dur);
+  }
+  return c;
+}
+function snapTo(t, cands, alt) {
+  if (alt) return t;
+  const thr = 8 / pxPerSec; // 8px de imán
+  let best = t, dist = thr;
+  for (const c of cands) {
+    const d = Math.abs(t - c);
+    if (d < dist) { best = c; dist = d; }
+  }
+  return best;
+}
+
+function selectItem(idx) {
+  selIdx = idx;
+  renderTimeline();
+}
+
+// drag de un item: mover (cuerpo) o trim (bordes .hd). Actualiza SOLO el div durante el drag
+// (recrear el DOM mataría el gesto); render completo al soltar. El stage refleja en vivo via rAF.
+function startItemDrag(e, div, idx) {
+  e.preventDefault();
+  e.stopPropagation();
+  const baseIt = project.items[idx];
+  const it0 = effItem(state, idx, baseIt);
+  if (!it0) return;
+  const mode = e.target.classList.contains('hd') ? (e.target.classList.contains('l') ? 'l' : 'r') : 'move';
+  selectItem(idx); // re-renderiza el timeline → el div original queda detached: re-consultarlo
+  div = $('track' + (baseIt.track || 1)).querySelector(`.clipItem[data-idx="${idx}"]`) || div;
+  const x0 = e.clientX;
+  const undo0 = cloneState(state);
+  const srcEl = mounted.get(idx)?.el;
+  const srcDur = (srcEl?.tagName === 'VIDEO' && Number.isFinite(srcEl.duration)) ? srcEl.duration : null;
+  const cands = snapCandidates(idx);
+  let changed = false;
+  div.classList.add('dragging');
+
+  const move = (ev) => {
+    const dx = (ev.clientX - x0) / pxPerSec;
+    if (Math.abs(ev.clientX - x0) < 2 && !changed) return;
+    let patch = null;
+    if (mode === 'move') {
+      let ns = it0.start + dx;
+      ns = snapTo(ns, cands, ev.altKey);
+      const nsEnd = snapTo(ns + it0.dur, cands, ev.altKey);
+      if (nsEnd !== ns + it0.dur) ns = nsEnd - it0.dur; // imán también por el borde derecho
+      patch = clampItem(baseIt, { start: ns }, project.duration, srcDur);
+    } else if (mode === 'l') {
+      let ns = snapTo(it0.start + dx, cands, ev.altKey);
+      const end = it0.start + it0.dur;
+      const minStart = baseIt.type === 'video' ? it0.start - (it0.offset || 0) : 0; // el media no existe antes de su 0
+      ns = Math.max(minStart, Math.min(ns, end - 0.1));
+      const delta = ns - it0.start;
+      patch = clampItem(baseIt, {
+        start: ns,
+        dur: it0.dur - delta,
+        ...(baseIt.type === 'video' ? { offset: (it0.offset || 0) + delta } : {}),
+      }, project.duration, srcDur);
+    } else {
+      let ne = snapTo(it0.start + it0.dur + dx, cands, ev.altKey);
+      ne = Math.max(it0.start + 0.1, Math.min(ne, project.duration));
+      patch = clampItem(baseIt, { dur: ne - it0.start }, project.duration, srcDur);
+    }
+    editItem(state, idx, baseIt.id, patch);
+    changed = true;
+    const eff = effItem(state, idx, baseIt);
+    div.style.left = `${eff.start * pxPerSec}px`;
+    div.style.width = `${Math.max(2, eff.dur * pxPerSec - 1)}px`;
+    renderItemInfo();
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    div.classList.remove('dragging');
+    if (changed) {
+      undoStack.push(undo0);
+      if (undoStack.length > 100) undoStack.shift();
+      const eff = effItem(state, idx, baseIt);
+      refresh();
+      toast(`${baseIt.id} ${mode === 'move' ? '→' : 'trim'} ${fmt(eff.start)} (+${eff.dur.toFixed(2)}s)`);
+    }
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+}
+
+// ⌥-arrastre sobre el timeline = seleccionar un RANGO y recortarlo del base (el gesto del silencio)
+function startRangeTrim(e) {
+  e.preventDefault();
+  const t0 = timeFromEvent(e);
+  const sel = document.createElement('div');
+  sel.className = 'rangeSel';
+  $('timeline').appendChild(sel);
+  let t1 = t0;
+  const paint = () => {
+    const a = Math.min(t0, t1), b = Math.max(t0, t1);
+    sel.style.left = `${a * pxPerSec}px`;
+    sel.style.width = `${Math.max(1, (b - a) * pxPerSec)}px`;
+  };
+  paint();
+  const move = (ev) => { t1 = timeFromEvent(ev); paint(); };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    sel.remove();
+    const a = Math.min(t0, t1), b = Math.max(t0, t1);
+    if (b - a >= 0.05) {
+      pushUndo();
+      state.trims.push({ start: Math.round(a * 1000) / 1000, end: Math.round(b * 1000) / 1000 });
+      state.trims = mergeRanges(state.trims);
+      refresh();
+      toast(`recorte ${fmt(a)} → ${fmt(b)} (${(b - a).toFixed(1)}s) · ⌘Z deshace`);
+    }
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+}
+
 for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2', 'track3']) {
   $(id).addEventListener('pointerdown', (e) => {
     if (e.target.classList.contains('mpin')) {
@@ -326,6 +520,10 @@ for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2'
       if (mk) base.currentTime = mk.t;
       return;
     }
+    const clip = e.target.closest('.clipItem');
+    if (clip) { startItemDrag(e, clip, +clip.dataset.idx); return; }
+    if (e.altKey) { startRangeTrim(e); return; }
+    if (selIdx !== null) { selIdx = null; renderTimeline(); } // click en vacío deselecciona
     seekFromEvent(e);
     const move = (ev) => seekFromEvent(ev);
     const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
@@ -800,8 +998,17 @@ window.addEventListener('keydown', (e) => {
     case 'y': togglePublishPanel(); break;
     case ',': case '<': cycleSpeed(-1); break;
     case '.': case '>': cycleSpeed(1); break;
-    case 'arrowleft': e.preventDefault(); base.currentTime = Math.max(0, t - frame * (e.shiftKey ? 10 : 1)); break;
-    case 'arrowright': e.preventDefault(); base.currentTime = Math.min(project.duration, t + frame * (e.shiftKey ? 10 : 1)); break;
+    case 'backspace': case 'delete': if (selIdx !== null) { e.preventDefault(); removeSelectedItem(); } break;
+    case 'escape': if (selIdx !== null) { selIdx = null; renderTimeline(); } break;
+    // con un item seleccionado, las flechas lo MUEVEN frame a frame; sin selección, seek normal
+    case 'arrowleft':
+      e.preventDefault();
+      if (!nudgeSelectedItem(-frame * (e.shiftKey ? 10 : 1))) base.currentTime = Math.max(0, t - frame * (e.shiftKey ? 10 : 1));
+      break;
+    case 'arrowright':
+      e.preventDefault();
+      if (!nudgeSelectedItem(frame * (e.shiftKey ? 10 : 1))) base.currentTime = Math.min(project.duration, t + frame * (e.shiftKey ? 10 : 1));
+      break;
     default: break;
   }
 });

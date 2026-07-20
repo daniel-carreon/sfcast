@@ -5,7 +5,9 @@ const EPS = 1e-4;
 const MIN_ITEM_DUR = 0.1;
 
 export function newState() {
-  return { splits: [], trims: [], markers: [], items: {} };
+  // items = ediciones por índice del timeline base · adds = piezas NUEVAS (nacen al partir un
+  // asset con S), clonan el media de un item base (`from`) con su propio placement.
+  return { splits: [], trims: [], markers: [], items: {}, adds: [] };
 }
 
 export function cloneState(s) {
@@ -158,6 +160,123 @@ export function pruneItemEdits(state, baseItems) {
     const ed = state.items[key];
     if (!base || (ed.id != null && base.id != null && ed.id !== base.id)) delete state.items[key];
   }
+  state.adds = (state.adds || []).filter((a) => {
+    const base = baseItems[a.from];
+    return base && (a.id == null || base.id == null || a.id === base.id);
+  });
+}
+
+// ---------- direccionamiento unificado: base items (key numérico) + adds (key 'aN') ----------
+
+/** Lista efectiva COMPLETA [{...item, _key}] — base editados (sin removed) + piezas añadidas. */
+export function effAll(state, baseItems) {
+  const out = resolveItems(state, baseItems).map((it) => ({ ...it, _key: it._idx }));
+  (state.adds || []).forEach((a, i) => {
+    const tpl = baseItems[a.from];
+    if (!tpl) return;
+    out.push({
+      ...tpl, id: a.id ?? tpl.id, start: a.start, dur: a.dur,
+      ...(a.offset !== undefined ? { offset: a.offset } : {}),
+      _key: 'a' + i, _from: a.from,
+    });
+  });
+  return out;
+}
+
+/** Item efectivo por key ('aN' o índice numérico). null si no existe / removed. */
+export function effByKey(state, baseItems, key) {
+  if (typeof key === 'string' && key.startsWith('a')) {
+    return effAll(state, baseItems).find((it) => it._key === key) || null;
+  }
+  const it = effItem(state, +key, baseItems[+key]);
+  return it ? { ...it, _key: +key } : null;
+}
+
+/** Item base plantilla del key (para clamp por tipo/media). */
+export function baseOfKey(state, baseItems, key) {
+  if (typeof key === 'string' && key.startsWith('a')) {
+    const a = (state.adds || [])[+key.slice(1)];
+    return a ? baseItems[a.from] : null;
+  }
+  return baseItems[+key] || null;
+}
+
+/** Aplica un patch de placement al item `key` (base → items{}, add → in place). */
+export function patchByKey(state, baseItems, key, patch) {
+  if (typeof key === 'string' && key.startsWith('a')) {
+    const a = state.adds[+key.slice(1)];
+    if (!a) return false;
+    for (const k of ['start', 'dur', 'offset']) if (patch[k] !== undefined) a[k] = round3(patch[k]);
+    return true;
+  }
+  const base = baseItems[+key];
+  if (!base) return false;
+  editItem(state, +key, base.id, patch);
+  return true;
+}
+
+/** Elimina el item `key` (base → flag removed, add → sale de la lista). */
+export function removeByKey(state, baseItems, key) {
+  if (typeof key === 'string' && key.startsWith('a')) {
+    const i = +key.slice(1);
+    if (!state.adds[i]) return false;
+    state.adds.splice(i, 1);
+    return true;
+  }
+  const base = baseItems[+key];
+  if (!base) return false;
+  editItem(state, +key, base.id, { removed: true });
+  return true;
+}
+
+/** S sobre un item: lo parte en dos en `t`. La pieza derecha nace como add (offset compensado). */
+export function splitItemAt(state, baseItems, key, t) {
+  const it = effByKey(state, baseItems, key);
+  if (!it) return false;
+  const end = it.start + it.dur;
+  if (t < it.start + 0.05 || t > end - 0.05) return false; // playhead fuera (o al ras) del asset
+  const from = typeof key === 'string' ? state.adds[+key.slice(1)].from : +key;
+  const isVideo = (baseItems[from] || {}).type === 'video';
+  patchByKey(state, baseItems, key, { dur: t - it.start });
+  state.adds.push({
+    from, id: it.id, start: round3(t), dur: round3(end - t),
+    ...(isVideo ? { offset: round3((it.offset || 0) + (t - it.start)) } : {}),
+  });
+  return true;
+}
+
+/** A/D sobre un item: recorta su borde hasta el playhead (A = izquierdo, D = derecho). */
+export function trimItemTo(state, baseItems, key, t, side) {
+  const it = effByKey(state, baseItems, key);
+  if (!it) return false;
+  const end = it.start + it.dur;
+  if (t < it.start + 0.05 || t > end - 0.05) return false;
+  const isVideo = (baseOfKey(state, baseItems, key) || {}).type === 'video';
+  if (side === 'l') {
+    return patchByKey(state, baseItems, key, {
+      start: t, dur: end - t,
+      ...(isVideo ? { offset: (it.offset || 0) + (t - it.start) } : {}),
+    });
+  }
+  return patchByKey(state, baseItems, key, { dur: t - it.start });
+}
+
+/** Vinculación: al recortar un rango del base, elimina los overlays que caen COMPLETOS adentro. */
+export function removeItemsInsideRange(state, baseItems, start, end) {
+  let n = 0;
+  // adds primero (de atrás hacia adelante: splice no invalida índices previos)
+  for (let i = (state.adds || []).length - 1; i >= 0; i--) {
+    const a = state.adds[i];
+    if (a.start >= start - EPS && a.start + a.dur <= end + EPS) { state.adds.splice(i, 1); n++; }
+  }
+  for (let idx = 0; idx < baseItems.length; idx++) {
+    const it = effItem(state, idx, baseItems[idx]);
+    if (it && it.start >= start - EPS && it.start + it.dur <= end + EPS) {
+      editItem(state, idx, baseItems[idx].id, { removed: true });
+      n++;
+    }
+  }
+  return n;
 }
 
 /** fixes.json (contrato con sfstudio-apply + la fábrica). */
@@ -172,6 +291,11 @@ export function toFixes(state, videoSrc, extra = {}) {
       if (ed.removed) out.removed = true;
       return out;
     });
+  const itemAdds = (state.adds || []).map((a) => {
+    const out = { from: a.from, id: a.id, start: a.start, dur: a.dur };
+    if (a.offset !== undefined) out.offset = a.offset;
+    return out;
+  });
   return {
     video: videoSrc,
     exported_at: new Date().toISOString(),
@@ -179,6 +303,7 @@ export function toFixes(state, videoSrc, extra = {}) {
     markers: state.markers.map((m) => ({ t: round3(m.t), nota: m.nota })),
     splits: [...state.splits],
     ...(itemEdits.length ? { item_edits: itemEdits } : {}),
+    ...(itemAdds.length ? { item_adds: itemAdds } : {}),
     ...extra,
   };
 }
@@ -195,6 +320,14 @@ export function fromFixes(fixes) {
       for (const k of ['start', 'dur', 'offset']) if (typeof e[k] === 'number') ed[k] = round3(e[k]);
       if (e.removed) ed.removed = true;
       s.items[e.index] = ed;
+    }
+  }
+  if (Array.isArray(fixes?.item_adds)) {
+    for (const a of fixes.item_adds) {
+      if (!Number.isInteger(a?.from) || a.from < 0 || typeof a.start !== 'number' || typeof a.dur !== 'number') continue;
+      const add = { from: a.from, id: a.id, start: round3(a.start), dur: round3(a.dur) };
+      if (typeof a.offset === 'number') add.offset = round3(a.offset);
+      s.adds.push(add);
     }
   }
   return s;

@@ -40,13 +40,14 @@ node bin/sfpublish.js <proyecto> <etapa>                  # etapa 2: init|metada
    start,dur,track,fit,muted,alpha}]}` · tracks 1=clips(cover) 2=alpha(contain) 3=caps(stretch).
    Cero hardcode de aspecto: TODO sale de estos campos (16:9 y 9:16 probados).
 3. **fixes.json**: `{video, exported_at, trims[{start,end}], markers[{t,nota}], splits[],
-   item_edits?[{index,id,start?,dur?,offset?,removed?}]}` — es el contrato del loop AI-first
-   (sala → fábrica). `sfstudio-apply` consume SOLO los trims del base; los `item_edits`
-   (mover/trim/eliminar overlays hechos A MANO en la sala, 20 jul 2026) los consume la FÁBRICA:
-   re-colocar los overlays con esos valores antes de imprimir el máster. `offset` = in-point del
-   media (aparece cuando se recorta el borde izquierdo de un overlay de video). `index` = posición
-   en `items[]` del timeline.json que estaba abierto; `id` es sanity-check (la sala poda ediciones
-   stale si el timeline se regeneró).
+   item_edits?[{index,id,start?,dur?,offset?,removed?}], item_adds?[{from,id,start,dur,offset?}]}`
+   — es el contrato del loop AI-first (sala → fábrica). `sfstudio-apply` consume SOLO los trims
+   del base; `item_edits` (mover/trim/eliminar overlays A MANO en la sala) e `item_adds` (piezas
+   nuevas nacidas de partir un asset con S; `from` = índice del item base cuyo media clonan) los
+   consume la FÁBRICA: re-colocar los overlays con esos valores antes de imprimir el máster.
+   `offset` = in-point del media (trim del borde izquierdo de un overlay de video, o pieza derecha
+   de un split). `index`/`from` apuntan a `items[]` del timeline.json abierto; `id` es sanity-check
+   (la sala poda ediciones stale si el timeline se regeneró).
 4. **WebM alpha**: `libvpx-vp9 -pix_fmt yuva420p -auto-alt-ref 0`, UNA pasada continua (el alpha
    driftea en chunks). VP9 no tiene HW encode en Apple Silicon: paralelizar POR CARD.
 5. **Determinismo sfrender**: seek de la timeline pausada + screenshot plano (beginFrame ya no

@@ -4,6 +4,7 @@ import {
   newState, mergeRanges, boundaries, addSplit, trimLeft, trimRight,
   skipTarget, totalTrimmed, toFixes, fromFixes,
   editItem, effItem, resolveItems, clampItem, pruneItemEdits,
+  effAll, effByKey, patchByKey, removeByKey, splitItemAt, trimItemTo, removeItemsInsideRange,
 } from '../web/model.js';
 
 const DUR = 100;
@@ -155,6 +156,74 @@ test('pruneItemEdits tira ediciones stale (id distinto o índice fuera de rango)
   editItem(s, 0, 'cap-5x', { start: 9 });          // válida
   editItem(s, 1, 'OTRO-id', { start: 9 });          // id no coincide → stale
   editItem(s, 7, 'fantasma', { removed: true });    // índice fuera → stale
+  s.adds.push({ from: 1, id: 'logo-anthropic', start: 8, dur: 1 });  // válida
+  s.adds.push({ from: 9, id: 'nadie', start: 8, dur: 1 });           // from fuera → stale
   pruneItemEdits(s, ITEMS);
   assert.deepEqual(Object.keys(s.items), ['0']);
+  assert.equal(s.adds.length, 1);
+});
+
+// ---------- splits de items, trims al playhead, vinculación ----------
+
+test('splitItemAt: parte un asset en dos; la pieza derecha nace como add con offset compensado', () => {
+  const s = newState();
+  assert.ok(splitItemAt(s, ITEMS, 1, 4.0)); // video [3, 5.4] → [3,4] + add [4, 5.4]
+  const all = effAll(s, ITEMS);
+  assert.equal(all.length, 3);
+  const left = effByKey(s, ITEMS, 1);
+  assert.equal(left.dur, 1);
+  const right = all.find((i) => i._key === 'a0');
+  assert.equal(right.start, 4);
+  assert.ok(Math.abs(right.dur - 1.4) < 1e-3);
+  assert.equal(right.offset, 1); // in-point compensado: el video sigue donde iba
+  // la pieza añadida también se puede partir, mover y borrar
+  assert.ok(splitItemAt(s, ITEMS, 'a0', 4.5));
+  assert.equal(effAll(s, ITEMS).length, 4);
+  assert.ok(patchByKey(s, ITEMS, 'a1', { start: 9 }));
+  assert.ok(removeByKey(s, ITEMS, 'a1'));
+  assert.equal(effAll(s, ITEMS).length, 3);
+});
+
+test('splitItemAt: rechaza playhead fuera (o al ras) del asset', () => {
+  const s = newState();
+  assert.equal(splitItemAt(s, ITEMS, 0, 3.9), false);  // antes del start (4)
+  assert.equal(splitItemAt(s, ITEMS, 0, 4.01), false); // al ras del borde
+  assert.equal(splitItemAt(s, ITEMS, 0, 6.5), false);  // después del end (6)
+});
+
+test('trimItemTo: A/D recortan el borde del asset hasta el playhead', () => {
+  const s = newState();
+  assert.ok(trimItemTo(s, ITEMS, 1, 3.5, 'l')); // video [3, 5.4] → [3.5, 5.4] con offset 0.5
+  let it = effByKey(s, ITEMS, 1);
+  assert.equal(it.start, 3.5);
+  assert.equal(it.offset, 0.5);
+  assert.ok(trimItemTo(s, ITEMS, 1, 5.0, 'r')); // → [3.5, 5.0]
+  it = effByKey(s, ITEMS, 1);
+  assert.equal(it.dur, 1.5);
+  assert.equal(trimItemTo(s, ITEMS, 1, 9, 'r'), false); // fuera del asset
+});
+
+test('removeItemsInsideRange (vinculación): solo lo que cae COMPLETO adentro', () => {
+  const s = newState();
+  s.adds.push({ from: 0, id: 'cap-5x', start: 10, dur: 1 });
+  // rango [9.5, 12]: el add [10,11] cae completo · base [4,6] y [3,5.4] no
+  const n = removeItemsInsideRange(s, ITEMS, 9.5, 12);
+  assert.equal(n, 1);
+  assert.equal(s.adds.length, 0);
+  assert.equal(effAll(s, ITEMS).length, 2);
+  // rango que traga el cap [4,6] completo
+  assert.equal(removeItemsInsideRange(s, ITEMS, 3.9, 6.1), 1);
+  assert.equal(effByKey(s, ITEMS, 0), null);
+});
+
+test('round-trip item_adds en fixes.json', () => {
+  const s = newState();
+  splitItemAt(s, ITEMS, 1, 4.0);
+  const fx = toFixes(s, 'assets/base.mp4');
+  assert.equal(fx.item_adds.length, 1);
+  assert.equal(fx.item_adds[0].from, 1);
+  assert.equal(fx.item_adds[0].offset, 1);
+  const s2 = fromFixes(fx);
+  assert.equal(s2.adds.length, 1);
+  assert.equal(effAll(s2, ITEMS).length, 3);
 });

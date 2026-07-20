@@ -189,11 +189,29 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     await page.mouse.up();
     const box2 = await page.$eval('#track2 .clipItem', (el) => el.getBoundingClientRect().width);
     const trimItemOk = box2 < box1.w - 20;
-    // Supr borra el item seleccionado; ⌘Z lo revive (con sus ediciones previas intactas)
+    // Supr borra el item seleccionado; ⌘Z lo revive; ⌘⇧Z rehace el borrado; ⌘Z restaura de nuevo
     await page.keyboard.press('Delete');
     const goneOk = (await page.$$('#track2 .clipItem')).length === 0;
     await page.keyboard.press('Meta+z');
     const backOk = (await page.$$('#track2 .clipItem')).length === 1;
+    await page.keyboard.press('Meta+Shift+z');
+    const redoOk = (await page.$$('#track2 .clipItem')).length === 0;
+    await page.keyboard.press('Meta+z');
+    const back2Ok = (await page.$$('#track2 .clipItem')).length === 1;
+    // ↑ navega al bloque (lo selecciona) y S con selección parte el asset en dos
+    await page.evaluate(() => new Promise((res) => {
+      const v = document.getElementById('base');
+      v.currentTime = 2.0; v.onseeked = res; setTimeout(res, 2000);
+    }));
+    await page.keyboard.press('ArrowUp');
+    const navSelOk = await page.$eval('#track2 .clipItem', (el) => el.classList.contains('sel'));
+    await page.evaluate(() => new Promise((res) => {
+      const v = document.getElementById('base');
+      v.currentTime = 2.0; v.onseeked = res; setTimeout(res, 2000);
+    }));
+    await page.keyboard.press('s');
+    const splitOk = (await page.$$('#track2 .clipItem')).length === 2;
+    await page.keyboard.press('Escape');
     // ⌥-arrastre sobre el ruler = recorte de rango del base (lejos del trim S/D previo)
     const ruler = await page.$eval('#ruler', (el) => {
       const r = el.getBoundingClientRect();
@@ -206,7 +224,8 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     await page.mouse.up();
     await page.keyboard.up('Alt');
     const nRanges = (await page.$$('.trimRange')).length;
-    const itemsOk = movedOk && infoOk && trimItemOk && goneOk && backOk && nRanges === 2;
+    const itemsOk = movedOk && infoOk && trimItemOk && goneOk && backOk && redoOk && back2Ok
+      && navSelOk && splitOk && nRanges === 2;
     // marcador vía popover
     await page.keyboard.press('m');
     await page.waitForSelector('#popover:not([hidden])', { timeout: 5000 });
@@ -220,7 +239,9 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     const fx = JSON.parse(fixesTxt);
     const fixesOk = fx.trims?.length === 2 && Math.abs(fx.trims[0].start - 0.5) < 0.05 && fx.markers?.length === 1
       && fx.item_edits?.length === 1 && fx.item_edits[0].id === 'logo_google'
-      && typeof fx.item_edits[0].start === 'number' && typeof fx.item_edits[0].dur === 'number';
+      && typeof fx.item_edits[0].start === 'number' && typeof fx.item_edits[0].dur === 'number'
+      && fx.item_adds?.length === 1 && fx.item_adds[0].from === 0
+      && typeof fx.item_adds[0].offset === 'number';
     // dossier ⌘Y: togglea, pinta stepper + títulos (elegido) + descripción con /go/ + transcript
     // segmentado + galería de thumbs + menciones, y cierra
     await page.click('#modalClose');

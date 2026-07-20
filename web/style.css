@@ -82,7 +82,15 @@ body {
 }
 #timecode { font-variant-numeric: tabular-nums; color: var(--text); font-size: 13px; }
 #speedBadge { color: var(--sf); font-weight: 800; font-size: 13px; min-width: 44px; }
-#zoomCtl { margin-left: auto; display: flex; gap: 4px; }
+#modesCtl { margin-left: auto; display: flex; gap: 4px; }
+#modesCtl button {
+  background: #17171d; border: 1px solid var(--line); border-radius: 6px;
+  padding: 3px 9px; cursor: pointer; font-size: 13px; filter: grayscale(1) opacity(.55);
+  transition: filter .15s, border-color .15s;
+}
+#modesCtl button:hover { filter: grayscale(.4) opacity(.85); }
+#modesCtl button.active { filter: none; border-color: var(--sf); box-shadow: 0 0 6px rgba(255,145,1,.35); }
+#zoomCtl { display: flex; gap: 4px; }
 #zoomCtl button {
   background: #17171d; color: var(--dim); border: 1px solid var(--line);
   border-radius: 6px; padding: 3px 10px; cursor: pointer; font-weight: 700;

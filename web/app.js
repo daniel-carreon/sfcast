@@ -3,7 +3,7 @@
 // todo vuelve a la fábrica como fixes.json (trims + item_edits). Nada se re-renderiza aquí.
 import {
   newState, cloneState, mergeRanges, addSplit, trimLeft, trimRight,
-  prevBoundary, nextBoundary,
+  prevBoundary, nextBoundary, setTrimRange,
   skipTarget, totalTrimmed, toFixes, fromFixes,
   editItem, effItem, resolveItems, clampItem, pruneItemEdits,
   effAll, effByKey, baseOfKey, patchByKey, removeByKey,
@@ -294,14 +294,18 @@ function renderTimeline() {
     d.style.width = `${Math.max(1, (b - a) * pxPerSec - 1)}px`;
     bt.appendChild(d);
   }
-  for (const r of merged) {
+  merged.forEach((r, i) => {
     const d = document.createElement('div');
     d.className = 'trimRange';
     d.style.left = `${X(r.start)}px`;
     d.style.width = `${Math.max(2, (r.end - r.start) * pxPerSec - 1)}px`;
-    d.title = `recorte ${r.start}s → ${r.end}s (⌘Z deshace)`;
+    d.title = `recorte ${r.start}s → ${r.end}s — arrastra para mover · bordes = ajustar · doble-click restaura`;
+    d.dataset.tidx = i;
+    const hl = document.createElement('div'); hl.className = 'hd l';
+    const hr = document.createElement('div'); hr.className = 'hd r';
+    d.append(hl, hr);
     bt.appendChild(d);
-  }
+  });
   for (const s of state.splits) {
     const d = document.createElement('div');
     d.className = 'splitLine';
@@ -454,16 +458,33 @@ function snapCandidates(exceptKey) {
   }
   return c;
 }
-function snapTo(t, cands, altKey) {
+function snapInfo(t, cands, altKey) {
   const active = magnetOn !== !!altKey; // ⌥ invierte el modo
-  if (!active) return t;
+  if (!active) return { t, hit: null };
   const thr = 8 / pxPerSec; // 8px de imán
-  let best = t, dist = thr;
+  let best = t, dist = thr, hit = null;
   for (const c of cands) {
     const d = Math.abs(t - c);
-    if (d < dist) { best = c; dist = d; }
+    if (d < dist) { best = c; dist = d; hit = c; }
   }
-  return best;
+  return { t: best, hit };
+}
+function snapTo(t, cands, altKey) { return snapInfo(t, cands, altKey).t; }
+
+// línea guía del imán: contorno vertical detrás del gesto cuando un borde se alinea (estilo CapCut)
+function showSnapGuide(t) {
+  let g = $('snapGuide');
+  if (!g) {
+    g = document.createElement('div');
+    g.id = 'snapGuide';
+    $('timeline').appendChild(g);
+  }
+  g.style.left = `${t * pxPerSec}px`;
+  g.hidden = false;
+}
+function hideSnapGuide() {
+  const g = $('snapGuide');
+  if (g) g.hidden = true;
 }
 
 function selectByKey(key) {
@@ -500,14 +521,18 @@ function startItemDrag(e, div, key) {
     const dx = (ev.clientX - x0) / pxPerSec;
     if (Math.abs(ev.clientX - x0) < 2 && !changed) return;
     let patch = null;
+    let hit = null;
     if (mode === 'move') {
-      let ns = it0.start + dx;
-      ns = snapTo(ns, cands, ev.altKey);
-      const nsEnd = snapTo(ns + it0.dur, cands, ev.altKey);
-      if (nsEnd !== ns + it0.dur) ns = nsEnd - it0.dur; // imán también por el borde derecho
+      const s1 = snapInfo(it0.start + dx, cands, ev.altKey);
+      let ns = s1.t;
+      hit = s1.hit;
+      const s2 = snapInfo(ns + it0.dur, cands, ev.altKey);
+      if (s2.hit !== null && s1.hit === null) { ns = s2.t - it0.dur; hit = s2.hit; } // imán por el borde derecho
       patch = clampItem(baseIt, { start: ns }, project.duration, srcDur);
     } else if (mode === 'l') {
-      let ns = snapTo(it0.start + dx, cands, ev.altKey);
+      const s1 = snapInfo(it0.start + dx, cands, ev.altKey);
+      hit = s1.hit;
+      let ns = s1.t;
       const end = it0.start + it0.dur;
       const minStart = baseIt.type === 'video' ? it0.start - (it0.offset || 0) : 0; // el media no existe antes de su 0
       ns = Math.max(minStart, Math.min(ns, end - 0.1));
@@ -518,8 +543,9 @@ function startItemDrag(e, div, key) {
         ...(baseIt.type === 'video' ? { offset: (it0.offset || 0) + delta } : {}),
       }, project.duration, srcDur);
     } else {
-      let ne = snapTo(it0.start + it0.dur + dx, cands, ev.altKey);
-      ne = Math.max(it0.start + 0.1, Math.min(ne, project.duration));
+      const s1 = snapInfo(it0.start + it0.dur + dx, cands, ev.altKey);
+      hit = s1.hit;
+      let ne = Math.max(it0.start + 0.1, Math.min(s1.t, project.duration));
       patch = clampItem(baseIt, { dur: ne - it0.start }, project.duration, srcDur);
     }
     patchByKey(state, project.items, key, patch);
@@ -527,12 +553,14 @@ function startItemDrag(e, div, key) {
     const eff = effByKey(state, project.items, key);
     div.style.left = `${eff.start * pxPerSec}px`;
     div.style.width = `${Math.max(2, eff.dur * pxPerSec - 1)}px`;
+    if (hit !== null) showSnapGuide(hit); else hideSnapGuide();
     renderItemInfo();
   };
   const up = () => {
     window.removeEventListener('pointermove', move);
     window.removeEventListener('pointerup', up);
     div.classList.remove('dragging');
+    hideSnapGuide();
     if (changed) {
       undoStack.push(undo0);
       if (undoStack.length > 100) undoStack.shift();
@@ -540,6 +568,76 @@ function startItemDrag(e, div, key) {
       const eff = effByKey(state, project.items, key);
       refresh();
       toast(`${it0.id} ${mode === 'move' ? '→' : 'trim'} ${fmt(eff.start)} (+${eff.dur.toFixed(2)}s)`);
+    }
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+}
+
+// drag de un RECORTE del base: mover el rango completo (por si el punto exacto salió mal) o
+// ajustar sus bordes. Doble-click lo elimina (restaura el contenido). Fusión al soltar, no en medio.
+function trimSnapCandidates(exceptIdx) {
+  const c = [0, project.duration, base.currentTime || 0];
+  for (const it of effAll(state, project.items)) c.push(it.start, it.start + it.dur);
+  state.trims.forEach((r, i) => { if (i !== exceptIdx) c.push(r.start, r.end); });
+  return c;
+}
+function startTrimDrag(e, div, tidx) {
+  e.preventDefault();
+  const r0 = state.trims[tidx];
+  if (!r0) return;
+  const mode = e.target.classList.contains('hd') ? (e.target.classList.contains('l') ? 'l' : 'r') : 'move';
+  const x0 = e.clientX;
+  const undo0 = cloneState(state);
+  const cands = trimSnapCandidates(tidx);
+  const len = r0.end - r0.start;
+  let changed = false;
+  div.classList.add('dragging');
+
+  const move = (ev) => {
+    const dx = (ev.clientX - x0) / pxPerSec;
+    if (Math.abs(ev.clientX - x0) < 2 && !changed) return;
+    let hit = null;
+    let did = false;
+    if (mode === 'move') {
+      const s1 = snapInfo(r0.start + dx, cands, ev.altKey);
+      let ns = s1.t;
+      hit = s1.hit;
+      const s2 = snapInfo(ns + len, cands, ev.altKey);
+      if (s2.hit !== null && s1.hit === null) { ns = s2.t - len; hit = s2.hit; }
+      ns = Math.max(0, Math.min(ns, project.duration - len));
+      did = setTrimRange(state, tidx, ns, ns + len, project.duration);
+    } else if (mode === 'l') {
+      const s1 = snapInfo(r0.start + dx, cands, ev.altKey);
+      hit = s1.hit;
+      did = setTrimRange(state, tidx, Math.min(s1.t, r0.end - 0.05), r0.end, project.duration);
+    } else {
+      const s1 = snapInfo(r0.end + dx, cands, ev.altKey);
+      hit = s1.hit;
+      did = setTrimRange(state, tidx, r0.start, Math.max(s1.t, r0.start + 0.05), project.duration);
+    }
+    if (!did) return;
+    changed = true;
+    const r = state.trims[tidx];
+    div.style.left = `${r.start * pxPerSec}px`;
+    div.style.width = `${Math.max(2, (r.end - r.start) * pxPerSec - 1)}px`;
+    div.title = `recorte ${r.start}s → ${r.end}s`;
+    if (hit !== null) showSnapGuide(hit); else hideSnapGuide();
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    div.classList.remove('dragging');
+    hideSnapGuide();
+    if (changed) {
+      const r = state.trims[tidx];
+      const a = r.start, b = r.end;
+      state.trims = mergeRanges(state.trims);
+      undoStack.push(undo0);
+      if (undoStack.length > 100) undoStack.shift();
+      redoStack.length = 0;
+      refresh();
+      toast(`recorte ${mode === 'move' ? 'movido' : 'ajustado'} → ${fmt(a)}–${fmt(b)} · ⌘Z deshace`);
     }
   };
   window.addEventListener('pointermove', move);
@@ -593,6 +691,8 @@ for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2'
       startItemDrag(e, clip, k.startsWith('a') ? k : +k);
       return;
     }
+    const tr = e.target.closest('.trimRange');
+    if (tr) { startTrimDrag(e, tr, +tr.dataset.tidx); return; }
     if (e.altKey) { startRangeTrim(e); return; }
     if (selKey !== null) { selKey = null; renderTimeline(); } // click en vacío deselecciona
     seekFromEvent(e);
@@ -602,6 +702,16 @@ for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2'
     window.addEventListener('pointerup', up);
   });
 }
+
+// doble-click en un recorte = eliminarlo (restaura el contenido cortado)
+$('track0').addEventListener('dblclick', (e) => {
+  const tr = e.target.closest('.trimRange');
+  if (!tr) return;
+  pushUndo();
+  state.trims.splice(+tr.dataset.tidx, 1);
+  refresh();
+  toast('recorte eliminado: contenido restaurado · ⌘Z deshace');
+});
 
 $('playBtn').addEventListener('click', togglePlay);
 function togglePlay() {

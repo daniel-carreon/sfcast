@@ -159,9 +159,20 @@ body {
   position: absolute; top: 6px; bottom: 6px; border-radius: 4px; z-index: 3;
   background: repeating-linear-gradient(45deg, rgba(255,77,77,.28) 0 6px, rgba(255,77,77,.08) 6px 12px);
   border: 1px solid var(--danger); overflow: hidden;
+  cursor: grab; touch-action: none;
 }
+.trimRange:hover { filter: brightness(1.25); }
+.trimRange.dragging { cursor: grabbing; filter: brightness(1.4); z-index: 5; }
+.trimRange .hd { position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; z-index: 2; }
+.trimRange .hd.l { left: 0; border-radius: 4px 0 0 4px; }
+.trimRange .hd.r { right: 0; border-radius: 0 4px 4px 0; }
+.trimRange .hd:hover { background: rgba(255,77,77,.55); }
 .trimRange::after {
   content: ''; position: absolute; left: 0; right: 0; top: 50%; height: 2px; background: var(--danger);
+}
+#snapGuide {
+  position: absolute; top: 0; bottom: 0; width: 0; z-index: 18; pointer-events: none;
+  border-left: 1px dashed var(--sf); box-shadow: 0 0 6px rgba(255,145,1,.55);
 }
 .splitLine { position: absolute; top: 0; bottom: 0; width: 1px; background: #e8e8ee; opacity: .55; z-index: 4; }
 #playhead {

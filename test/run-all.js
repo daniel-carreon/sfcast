@@ -224,8 +224,19 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     await page.mouse.up();
     await page.keyboard.up('Alt');
     const nRanges = (await page.$$('.trimRange')).length;
+    // arrastrar el recorte recién creado: el rango completo se mueve (por si el punto exacto salió mal)
+    const tr0 = await page.$eval('.trimRange[data-tidx="1"]', (el) => {
+      const r = el.getBoundingClientRect();
+      return { x: r.x, y: r.y, w: r.width, h: r.height };
+    });
+    await page.mouse.move(tr0.x + tr0.w / 2, tr0.y + tr0.h / 2);
+    await page.mouse.down();
+    await page.mouse.move(tr0.x + tr0.w / 2 + 20, tr0.y + tr0.h / 2, { steps: 4 });
+    await page.mouse.up();
+    const tr0b = await page.$eval('.trimRange[data-tidx="1"]', (el) => el.getBoundingClientRect().x);
+    const trimDragOk = tr0b > tr0.x + 10 && (await page.$$('.trimRange')).length === 2;
     const itemsOk = movedOk && infoOk && trimItemOk && goneOk && backOk && redoOk && back2Ok
-      && navSelOk && splitOk && nRanges === 2;
+      && navSelOk && splitOk && nRanges === 2 && trimDragOk;
     // marcador vía popover
     await page.keyboard.press('m');
     await page.waitForSelector('#popover:not([hidden])', { timeout: 5000 });

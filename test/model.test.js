@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   newState, mergeRanges, boundaries, addSplit, trimLeft, trimRight,
-  skipTarget, totalTrimmed, toFixes, fromFixes,
+  skipTarget, totalTrimmed, toFixes, fromFixes, setTrimRange,
   editItem, effItem, resolveItems, clampItem, pruneItemEdits,
   effAll, effByKey, patchByKey, removeByKey, splitItemAt, trimItemTo, removeItemsInsideRange,
 } from '../web/model.js';
@@ -83,6 +83,25 @@ test('guardas: no split en 0/fin, no trims microscopicos', () => {
   assert.equal(addSplit(s, 100, DUR), false);
   assert.equal(trimLeft(s, 0.01, DUR), false);
   assert.equal(trimRight(s, 99.99, DUR), false);
+});
+
+test('setTrimRange: mueve/redimensiona un recorte con clamps y sin fusionar en medio', () => {
+  const s = newState();
+  trimRight(s, 95, DUR);            // [95, 100]
+  trimLeft(s, 3, DUR);              // [0, 3] — queda ordenado: [0,3], [95,100]
+  // mover el primero completo +2s
+  assert.ok(setTrimRange(s, 0, 2, 5, DUR));
+  assert.deepEqual(s.trims[0], { start: 2, end: 5 });
+  // clamp a los límites del proyecto
+  assert.ok(setTrimRange(s, 1, 97, 130, DUR));
+  assert.deepEqual(s.trims[1], { start: 97, end: 100 });
+  // rechaza rangos microscópicos e índices fantasma
+  assert.equal(setTrimRange(s, 0, 4, 4.01, DUR), false);
+  assert.equal(setTrimRange(s, 9, 1, 2, DUR), false);
+  // el caller fusiona al soltar: mover uno encima del otro colapsa a un solo rango
+  assert.ok(setTrimRange(s, 0, 94, 98, DUR));
+  s.trims = mergeRanges(s.trims);
+  assert.deepEqual(s.trims, [{ start: 94, end: 100 }]);
 });
 
 // ---------- ediciones de items (mover / trim / eliminar overlays) ----------

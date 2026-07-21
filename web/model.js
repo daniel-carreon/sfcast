@@ -80,6 +80,17 @@ export function trimRight(state, t, duration) {
   return true;
 }
 
+/** Mueve/redimensiona UN rango de recorte del base (índice en la lista ya fusionada).
+ *  NO fusiona: el caller fusiona al soltar el gesto (fusionar en medio del drag cambia índices). */
+export function setTrimRange(state, idx, start, end, duration) {
+  if (!state.trims[idx]) return false;
+  const a = Math.max(0, Math.min(start, duration));
+  const b = Math.max(0, Math.min(end, duration));
+  if (b - a < 0.05) return false;
+  state.trims[idx] = { start: round3(a), end: round3(b) };
+  return true;
+}
+
 export function addMarker(state, t, nota) {
   state.markers.push({ t: round3(t), nota: String(nota || '') });
   state.markers.sort((a, b) => a.t - b.t);

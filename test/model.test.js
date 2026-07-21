@@ -306,3 +306,13 @@ test('arrastrar costura izquierda cruzando OTRO trim (fix blocker startSeamDrag)
   // borde izq del trim [50,60] arrastrado -40 OUT: el correcto es 5, NO 10 (la suma ingenua)
   assert.equal(outToRaw(segs0, rawToOut(segs0, 50) - 40), 5);
 });
+
+test('ripple: cortar w en el pivote adelanta todo lo de la derecha w seg (out); la izquierda no se mueve', () => {
+  const pivot = 30, w = 5;
+  const before = keptSegments([], DUR);
+  const after = keptSegments([{ start: pivot, end: pivot + w }], DUR);
+  assert.equal(rawToOut(before, 50), 50);
+  assert.equal(rawToOut(after, 50), 45);   // overlay a la derecha se pule w seg
+  assert.equal(rawToOut(after, 20), 20);   // a la izquierda del pivote, intacto
+  assert.equal(outDuration([{ start: pivot, end: pivot + w }], DUR), 95);
+});

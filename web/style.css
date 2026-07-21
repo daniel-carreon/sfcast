@@ -97,6 +97,8 @@ body {
 }
 #zoomCtl button:hover, #viewCtl button:hover { color: var(--text); }
 #viewBtn { color: var(--sf); border-color: #6b4a12; font-size: 12px; white-space: nowrap; }
+/* huecos en rojo ACTIVOS: el botón se tiñe de rojo para avisar que estás viendo el espacio recortado */
+#viewBtn.on { color: #ff6b6b; border-color: #7a2a2a; background: #1a1012; }
 
 #timelinePane { border-top: 1px solid var(--line); background: #0c0c10; flex-shrink: 0; }
 #timelineScroll { overflow-x: auto; overflow-y: hidden; }
@@ -156,6 +158,8 @@ body {
   position: absolute; top: 6px; bottom: 6px; border-radius: 4px;
   background: linear-gradient(180deg, #1d2b1d, #16211a); border: 1px solid #2c4a2e;
 }
+/* base incluida en la selección (Q/E): el lado elegido se resalta en oro (se arrastra como grupo → ripple) */
+.baseSeg.sel { outline: 1.5px solid var(--sf); border-color: var(--sf); box-shadow: 0 0 8px rgba(255,145,1,.5); z-index: 2; }
 .trimRange {
   position: absolute; top: 6px; bottom: 6px; border-radius: 4px; z-index: 3;
   background: repeating-linear-gradient(45deg, rgba(255,77,77,.28) 0 6px, rgba(255,77,77,.08) 6px 12px);

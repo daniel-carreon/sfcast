@@ -41,11 +41,15 @@ function tlOf(traw) { return viewMode === 'compact' ? rawToOut(segsCache, traw) 
 function tlToRaw(tl) { return viewMode === 'compact' ? outToRaw(segsCache, tl) : tl; }
 function XT(traw) { return tlOf(traw) * pxPerSec; }
 
-// ---------- selección (única + múltiple Q/E) ----------
+// ---------- selección (única + múltiple Q/E + la BASE) ----------
+// baseSelected = la pista principal (el video) entra en la selección: Q/E la incluyen y arrastrar
+// el grupo hace un RIPPLE (corta la base en el playhead y todo lo de ese lado se pule junto).
+let baseSelected = false;
 function isSel(key) { return key === selKey || multiSel.has(key); }
-function clearSel() { selKey = null; multiSel.clear(); }
+function clearSel() { selKey = null; multiSel.clear(); baseSelected = false; }
 function setSingleSel(key) {
   multiSel.clear();
+  baseSelected = false; // seleccionar un asset suelto saca a la base del grupo
   if (key !== null) multiSel.add(key);
   selKey = key;
 }
@@ -318,12 +322,17 @@ function renderTimeline() {
   const bt = $('track0');
   bt.innerHTML = '';
   const merged = mergeRanges(state.trims);
+  // ¿la base de este lado del playhead está seleccionada? (Q/E la incluyen para el ripple)
+  const phOut = tlOf(base.currentTime || 0);
+  const baseSegSel = (outStart, outEnd) => baseSelected &&
+    (rippleDir > 0 ? outStart >= phOut - 1e-3 : outEnd <= phOut + 1e-3);
   if (viewMode === 'compact') {
     for (const s of segsCache) {
       const d = document.createElement('div');
-      d.className = 'baseSeg';
+      const wOut = s.b - s.a;
+      d.className = 'baseSeg' + (baseSegSel(s.out, s.out + wOut) ? ' sel' : '');
       d.style.left = `${s.out * pxPerSec}px`;
-      d.style.width = `${Math.max(1, (s.b - s.a) * pxPerSec - 1)}px`;
+      d.style.width = `${Math.max(1, wOut * pxPerSec - 1)}px`;
       bt.appendChild(d);
     }
     merged.forEach((r, i) => {
@@ -348,7 +357,7 @@ function renderTimeline() {
     if (cursor < project.duration) segs.push([cursor, project.duration]);
     for (const [a, b] of segs) {
       const d = document.createElement('div');
-      d.className = 'baseSeg';
+      d.className = 'baseSeg' + (baseSegSel(a, b) ? ' sel' : ''); // en raw out==raw
       d.style.left = `${a * pxPerSec}px`;
       d.style.width = `${Math.max(1, (b - a) * pxPerSec - 1)}px`;
       bt.appendChild(d);
@@ -386,11 +395,16 @@ function renderTimeline() {
 const TRACK_NAMES = { 1: 'clips', 2: 'alpha', 3: 'caps' };
 function renderItemInfo() {
   const box = $('itemInfo');
-  // selección múltiple (Q/E): tarjeta de grupo, no de item
-  if (multiSel.size > 1) {
+  // selección múltiple (Q/E) y/o la base: tarjeta de grupo, no de item
+  if (multiSel.size > 1 || baseSelected) {
     box.hidden = false;
-    box.innerHTML = `<div class="iiId">${multiSel.size} assets seleccionados</div>` +
-      '<div class="iiHint"><b>arrastrar</b> mueve el grupo · <b>⌥←/→</b> 1 frame (⇧×10) · <b>Supr</b> borra todos · <b>Esc</b> deselecciona</div>';
+    const que = baseSelected
+      ? `${multiSel.size} asset(s) <b>+ la base</b>`
+      : `${multiSel.size} assets seleccionados`;
+    const hint = baseSelected
+      ? '<b>arrastrar</b> hace RIPPLE en el playhead (corta la base + todo lo de ese lado se pule junto) · <b>Supr</b> borra los assets · <b>Esc</b> deselecciona'
+      : '<b>arrastrar</b> mueve el grupo · <b>⌥←/→</b> 1 frame (⇧×10) · <b>Supr</b> borra todos · <b>Esc</b> deselecciona';
+    box.innerHTML = `<div class="iiId">${que}</div><div class="iiHint">${hint}</div>`;
     return;
   }
   const only = selKey !== null ? selKey : (multiSel.size === 1 ? [...multiSel][0] : null);
@@ -517,9 +531,9 @@ function nudgeSelectedItem(dt) {
   return true;
 }
 
-// Q/E: seleccionar TODOS los componentes a un lado del cursor (dir<0 = izquierda, dir>0 = derecha).
-// Criterio: E toma los que EMPIEZAN en/después del playhead; Q los que TERMINAN en/antes.
-// Un asset que cruza el playhead no cae en ninguno (se clickea directo).
+// Q/E: seleccionar TODO a un lado del cursor (dir<0 = izquierda, dir>0 = derecha), INCLUIDA LA BASE
+// (el video principal). Criterio para overlays: E toma los que EMPIEZAN en/después del playhead; Q
+// los que TERMINAN en/antes. La base SIEMPRE entra (es continua) → arrastrar el grupo hace ripple.
 function selectSide(dir) {
   const t = base.currentTime || 0;
   const items = effAll(state, project.items);
@@ -528,11 +542,13 @@ function selectSide(dir) {
     .map((it) => it._key);
   multiSel = new Set(keys);
   selKey = keys.length === 1 ? keys[0] : null;
+  baseSelected = true; // la base del lado elegido entra: el grupo se arrastra como un todo (ripple)
+  rippleDir = dir;     // recordar el lado para el ripple
   renderTimeline();
-  toast(keys.length
-    ? `${keys.length} asset(s) seleccionados a la ${dir > 0 ? 'derecha' : 'izquierda'} · arrástralos juntos o Supr`
-    : `sin assets a la ${dir > 0 ? 'derecha' : 'izquierda'} del cursor`);
+  toast(`${keys.length} asset(s) + la base a la ${dir > 0 ? 'derecha' : 'izquierda'} · ` +
+    'arrastra el grupo para RIPPLE (corta la base y todo lo de ese lado se pule) · Supr borra los assets');
 }
+let rippleDir = 1; // lado activo del último Q/E (para el ripple)
 
 // ↑ = siguiente bloque, ↓ = anterior (estilo CapCut): recorre los assets por tiempo; ↓ desde el
 // primero vuelve al base (sin selección). Seleccionar también lleva el playhead al inicio del bloque.
@@ -899,6 +915,49 @@ function startRangeTrim(e) {
   window.addEventListener('pointerup', up);
 }
 
+// RIPPLE: con la base incluida en la selección (Q/E), arrastrar el grupo CORTA la base en el
+// playhead y todo lo de ese lado (base + overlays) se pule junto — como agarrar la parte derecha
+// del timeline entero y jalarla. Los overlays ripplean SOLOS (sus posiciones out se recomputan por
+// los trims). Dirección: a la izquierda = tighten (cortar); el pipeline solo CORTA, no inserta
+// relleno, así que arrastrar a la derecha vuelve al punto de partida. El pivote es el playhead.
+function startRippleDrag(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  const pivot = base.currentTime || 0;
+  const x0 = e.clientX;
+  const undo0 = cloneState(state);
+  const trims0 = state.trims.map((r) => ({ start: r.start, end: r.end })); // snapshot inmutable
+  let changed = false, raf = 0, lastW = 0;
+  const r3 = (x) => Math.round(x * 1000) / 1000;
+  const move = (ev) => {
+    const dOut = (ev.clientX - x0) / pxPerSec; // out-seconds; izquierda (neg) = tighten
+    if (Math.abs(ev.clientX - x0) < 2 && !changed) return;
+    const w = Math.max(0, -dOut);
+    lastW = w;
+    const extra = w > 0.02 ? [{ start: r3(pivot), end: r3(Math.min(project.duration, pivot + w)) }] : [];
+    state.trims = mergeRanges([...trims0, ...extra]); // reconstruir desde el snapshot = idempotente
+    changed = true;
+    if (!raf) raf = requestAnimationFrame(() => { raf = 0; renderTimeline(); });
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    if (changed && lastW > 0.02) {
+      undoStack.push(undo0); if (undoStack.length > 100) undoStack.shift(); redoStack.length = 0;
+      validateSel();
+      refresh();
+      toast(`ripple −${lastW.toFixed(1)}s en ${fmt(tlOf(pivot))} · base + todo a la derecha pulido · ⌘Z deshace`);
+    } else {
+      state.trims = trims0; // sin corte neto: dejar el snapshot intacto
+      renderTimeline();
+      if (changed) toast('el ripple solo CORTA hacia la izquierda (el pipeline no inserta relleno)');
+    }
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+}
+
 // costura MÁS CERCANA al clic (no la topmost por z-order): con cientos de cortes densos las
 // hit-zones de 14px se solapan y el orden de DOM sesgaría el clic a la costura más tardía.
 function nearestSeam(clientX) {
@@ -921,18 +980,23 @@ for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2'
     const clip = e.target.closest('.clipItem');
     if (clip) {
       const k = clip.dataset.key;
-      startItemDrag(e, clip, k.startsWith('a') ? k : +k);
+      const key = k.startsWith('a') ? k : +k;
+      // con la base incluida (Q/E): agarrar un asset del grupo por el cuerpo = RIPPLE del todo
+      if (baseSelected && isSel(key) && !e.target.classList.contains('hd')) { startRippleDrag(e); return; }
+      startItemDrag(e, clip, key);
       return;
     }
     const tr = e.target.closest('.trimRange');
     if (tr) { startTrimDrag(e, tr, +tr.dataset.tidx); return; }
+    // con la base seleccionada, arrastrar la pista base = RIPPLE (agarra el lado entero y púlelo)
+    if (e.currentTarget.id === 'track0' && baseSelected) { startRippleDrag(e); return; }
     // en vista corte, elegir la costura más cercana al clic (no la topmost) — track0 solamente
     if (e.currentTarget.id === 'track0' && viewMode === 'compact') {
       const seam = nearestSeam(e.clientX);
       if (seam) { startSeamDrag(e, seam, +seam.dataset.tidx); return; }
     }
     if (e.altKey) { startRangeTrim(e); return; }
-    if (selKey !== null || multiSel.size) { clearSel(); renderTimeline(); } // click en vacío deselecciona
+    if (selKey !== null || multiSel.size || baseSelected) { clearSel(); renderTimeline(); } // click en vacío deselecciona
     seekFromEvent(e);
     const move = (ev) => seekFromEvent(ev);
     const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
@@ -1003,13 +1067,16 @@ $('zoomIn').addEventListener('click', () => setZoom(pxPerSec * 1.6));
 $('zoomOut').addEventListener('click', () => setZoom(pxPerSec / 1.6));
 $('zoomFit').addEventListener('click', () => { fitTimeline(); renderTimeline(); });
 
-// ---------- vista CORTE ↔ RAW (persistida; corte = default) ----------
+// ---------- toggle de HUECOS EN ROJO (persistido; oculto = corte compacto por default) ----------
+// 'compact' = costuras (sin rojo, default) · 'raw' = los cortes se muestran como HUECOS ROJOS con
+// su duración real (el "espacio vacío en rojo" que Daniel quiere ver a pedido).
 function applyViewMode() {
   const compact = viewMode === 'compact';
-  $('viewBtn').textContent = compact ? '✂ corte' : '🎞 raw';
+  $('viewBtn').textContent = compact ? '🟥 ver huecos' : '✂ ocultar huecos';
+  $('viewBtn').classList.toggle('on', !compact);
   $('viewBtn').title = compact
-    ? 'Vista CORTE (default, estilo CapCut): solo el material conservado; cada corte es una costura. Click = ver el raw completo con los rangos recortados'
-    : 'Vista RAW: el material completo con los rangos recortados visibles. Click = volver a la vista corte';
+    ? 'Mostrar los cortes como HUECOS ROJOS (el material recortado, con su hueco real). Ahora ves el corte compacto: costuras, sin rojo.'
+    : 'Ocultar los huecos: volver al corte compacto (costuras, sin espacio rojo).';
 }
 $('viewBtn').addEventListener('click', () => {
   viewMode = viewMode === 'compact' ? 'raw' : 'compact';
@@ -1017,7 +1084,9 @@ $('viewBtn').addEventListener('click', () => {
   applyViewMode();
   fitTimeline();
   refresh(); // timeline + lista de marcadores (sus tiempos cambian de idioma con la vista)
-  toast(viewMode === 'compact' ? 'vista CORTE: solo lo que queda; los cortes son costuras' : 'vista RAW: material completo con recortes visibles');
+  toast(viewMode === 'compact'
+    ? 'huecos ocultos: corte compacto (costuras, sin rojo)'
+    : 'huecos en ROJO: cada corte se ve como espacio vacío recortado');
 });
 applyViewMode();
 
@@ -1517,7 +1586,7 @@ window.addEventListener('keydown', (e) => {
     case ',': case '<': cycleSpeed(-1); break;
     case '.': case '>': cycleSpeed(1); break;
     case 'backspace': case 'delete': if (selectedKeys().length) { e.preventDefault(); removeSelectedItem(); } break;
-    case 'escape': if (selKey !== null || multiSel.size) { clearSel(); renderTimeline(); } break;
+    case 'escape': if (selKey !== null || multiSel.size || baseSelected) { clearSel(); renderTimeline(); } break;
     case 'arrowup': e.preventDefault(); navigateBlocks(1); break;    // siguiente bloque (CapCut)
     case 'arrowdown': e.preventDefault(); navigateBlocks(-1); break; // bloque anterior
     // ←/→ avanzan en el tiempo del TIMELINE: en vista corte el paso SALTA los trims

@@ -108,6 +108,50 @@ export function totalTrimmed(trims) {
   return mergeRanges(trims).reduce((acc, r) => acc + (r.end - r.start), 0);
 }
 
+// ---------- vista CORTE (estilo CapCut): mapeo raw ↔ out sobre los trims ----------
+// El timeline muestra SOLO el material conservado (duración final); cada trim colapsa a una
+// COSTURA (línea de corte). Estas funciones son el cambio de coordenadas.
+
+/** Segmentos conservados del base en tiempo raw, con su inicio acumulado en tiempo out. */
+export function keptSegments(trims, duration) {
+  const segs = [];
+  let cursor = 0, out = 0;
+  for (const r of mergeRanges(trims)) {
+    if (r.start > cursor + EPS) {
+      segs.push({ a: cursor, b: r.start, out });
+      out += r.start - cursor;
+    }
+    cursor = Math.max(cursor, r.end);
+  }
+  if (cursor < duration - EPS) segs.push({ a: cursor, b: duration, out });
+  return segs;
+}
+
+/** Duración del corte (out). */
+export function outDuration(trims, duration) {
+  return Math.max(0, duration - totalTrimmed(trims));
+}
+
+/** raw → out. Dentro de un trim colapsa a la costura. */
+export function rawToOut(segs, t) {
+  let out = 0;
+  for (const s of segs) {
+    if (t < s.a) return s.out;
+    if (t <= s.b + EPS) return s.out + (t - s.a);
+    out = s.out + (s.b - s.a);
+  }
+  return out;
+}
+
+/** out → raw (inversa). Una costura exacta resuelve HACIA ADELANTE (inicio del material
+ *  que sigue): así el seek en la costura muestra contenido conservado, no el trim. */
+export function outToRaw(segs, o) {
+  for (const s of segs) {
+    if (o < s.out + (s.b - s.a) - EPS) return s.a + Math.max(0, o - s.out);
+  }
+  return segs.length ? segs[segs.length - 1].b : 0;
+}
+
 // ---------- ediciones de items (overlays del timeline: mover / trim / eliminar) ----------
 // state.items = { [index]: {id, start?, dur?, offset?, removed?} } — SOLO los que cambiaron.
 // `offset` = in-point del media (segundos dentro del webm/mp4 del overlay); solo aplica a video.

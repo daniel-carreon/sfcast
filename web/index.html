@@ -11,7 +11,7 @@
 <header id="topbar">
   <div id="brand"><span class="sf">SF</span>STUDIO <span id="projname"></span></div>
   <div id="speeds" role="group" aria-label="velocidad"></div>
-  <button id="exportBtn" title="Exportar fixes.json (E)">Exportar fixes</button>
+  <button id="exportBtn" title="Exportar fixes.json (⌘E)">Exportar fixes</button>
 </header>
 
 <main id="main">
@@ -38,6 +38,9 @@
     <button id="magnetBtn" title="Imán (ajuste automático): snap a playhead y bordes al arrastrar · ⌥ lo invierte por gesto">🧲</button>
     <button id="linkBtn" title="Vinculación: al recortar un rango del base, los assets que caen completos adentro se eliminan con él">🔗</button>
   </div>
+  <div id="viewCtl">
+    <button id="viewBtn"></button>
+  </div>
   <div id="zoomCtl">
     <button id="zoomOut" title="alejar">−</button>
     <button id="zoomFit" title="ajustar todo">fit</button>
@@ -62,11 +65,12 @@
 </section>
 
 <footer id="help">
-  <b>↑/↓</b> bloque sig./ant. &nbsp;·&nbsp; <b>S/A/D</b> split·trim← ·trim→ (del asset seleccionado; sin selección = base)
-  &nbsp;·&nbsp; <b>⌥-arrastre</b> recorta rango &nbsp;·&nbsp; <b>arrastrar asset</b> = mover &nbsp;·&nbsp; <b>bordes</b> = trim
+  <b>Q/E</b> seleccionar todo a la izq./der. del cursor &nbsp;·&nbsp; <b>↑/↓</b> bloque sig./ant.
+  &nbsp;·&nbsp; <b>S/A/D</b> split·trim← ·trim→ (del asset seleccionado; sin selección = base)
+  &nbsp;·&nbsp; <b>⌥-arrastre</b> recorta rango &nbsp;·&nbsp; <b>costura ✂</b> click verifica · bordes ajustan · doble-click restaura
   &nbsp;·&nbsp; <b>Supr</b> borra &nbsp;·&nbsp; <b>⌘Z/⌘⇧Z</b> deshacer/rehacer &nbsp;·&nbsp; <b>🧲</b> imán &nbsp;·&nbsp; <b>🔗</b> vinculación
-  &nbsp;·&nbsp; <b>M</b> marcador &nbsp;·&nbsp; <b>E</b> exportar &nbsp;·&nbsp; <b>⌘Y</b> publicar &nbsp;·&nbsp; <b>&lt; &gt;</b> velocidad
-  &nbsp;·&nbsp; <b>Espacio</b> play &nbsp;·&nbsp; <b>←/→</b> 1 frame (⇧×10 · ⌥ mueve el asset)
+  &nbsp;·&nbsp; <b>M</b> marcador &nbsp;·&nbsp; <b>F</b> pantalla completa &nbsp;·&nbsp; <b>⌘E</b> exportar &nbsp;·&nbsp; <b>⌘Y</b> publicar
+  &nbsp;·&nbsp; <b>&lt; &gt;</b> velocidad &nbsp;·&nbsp; <b>Espacio</b> play &nbsp;·&nbsp; <b>←/→</b> 1 frame (⇧×10 · ⌥ mueve el asset)
 </footer>
 
 <div id="popover" hidden>

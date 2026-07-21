@@ -164,8 +164,16 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
       v.currentTime = 0.5; v.onseeked = res; setTimeout(res, 2000);
     }));
     await page.keyboard.press('d');
+    // vista CORTE (default): el trim aparece como COSTURA (línea de corte), no recuadro
+    await page.waitForSelector('.cutSeam', { timeout: 5000 });
+    const trimTitle = await page.$eval('.cutSeam', (el) => el.title);
+    // toggle de vista: raw muestra .trimRange, corte los colapsa a .cutSeam
+    await page.click('#viewBtn');
     await page.waitForSelector('.trimRange', { timeout: 5000 });
-    const trimTitle = await page.$eval('.trimRange', (el) => el.title);
+    const rawViewOk = (await page.$$('.cutSeam')).length === 0;
+    await page.click('#viewBtn');
+    await page.waitForSelector('.cutSeam', { timeout: 5000 });
+    const viewToggleOk = rawViewOk && (await page.$$('.trimRange')).length === 0;
     // ── edición manual de items: drag (mover) + trim de borde + Supr + ⌘Z ──
     const box0 = await page.$eval('#track2 .clipItem', (el) => {
       const r = el.getBoundingClientRect();
@@ -223,9 +231,9 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     await page.mouse.move(ruler.x + ruler.w * 0.75, ruler.y + ruler.h / 2, { steps: 5 });
     await page.mouse.up();
     await page.keyboard.up('Alt');
-    const nRanges = (await page.$$('.trimRange')).length;
-    // arrastrar el recorte recién creado: el rango completo se mueve (por si el punto exacto salió mal)
-    const tr0 = await page.$eval('.trimRange[data-tidx="1"]', (el) => {
+    const nRanges = (await page.$$('.cutSeam')).length;
+    // arrastrar la COSTURA recién creada: el corte completo se mueve (por si el punto exacto salió mal)
+    const tr0 = await page.$eval('.cutSeam[data-tidx="1"]', (el) => {
       const r = el.getBoundingClientRect();
       return { x: r.x, y: r.y, w: r.width, h: r.height };
     });
@@ -233,17 +241,36 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     await page.mouse.down();
     await page.mouse.move(tr0.x + tr0.w / 2 + 20, tr0.y + tr0.h / 2, { steps: 4 });
     await page.mouse.up();
-    const tr0b = await page.$eval('.trimRange[data-tidx="1"]', (el) => el.getBoundingClientRect().x);
-    const trimDragOk = tr0b > tr0.x + 10 && (await page.$$('.trimRange')).length === 2;
+    const tr0b = await page.$eval('.cutSeam[data-tidx="1"]', (el) => el.getBoundingClientRect().x);
+    const trimDragOk = tr0b > tr0.x + 10 && (await page.$$('.cutSeam')).length === 2;
+    // Q/E: seleccionar todo a un lado del cursor (E a la derecha desde t=0 = todos los assets)
+    await page.evaluate(() => new Promise((res) => {
+      const v = document.getElementById('base');
+      v.currentTime = 0; v.onseeked = res; setTimeout(res, 2000);
+    }));
+    await page.keyboard.press('e');
+    const totalItems = (await page.$$('.clipItem')).length;
+    const selRight = (await page.$$('.clipItem.sel')).length;
+    await page.keyboard.press('q');
+    const selLeft = (await page.$$('.clipItem.sel')).length;
+    const qeOk = totalItems > 0 && selRight === totalItems && selLeft === 0;
+    await page.keyboard.press('Escape');
+    // F: pantalla completa (toggle)
+    await page.keyboard.press('f');
+    await new Promise((r) => setTimeout(r, 300));
+    const fsOn = await page.evaluate(() => !!document.fullscreenElement);
+    await page.keyboard.press('f');
+    await new Promise((r) => setTimeout(r, 300));
+    const fsOk = fsOn && await page.evaluate(() => !document.fullscreenElement);
     const itemsOk = movedOk && infoOk && trimItemOk && goneOk && backOk && redoOk && back2Ok
-      && navSelOk && splitOk && nRanges === 2 && trimDragOk;
+      && navSelOk && splitOk && nRanges === 2 && trimDragOk && viewToggleOk && qeOk && fsOk;
     // marcador vía popover
     await page.keyboard.press('m');
     await page.waitForSelector('#popover:not([hidden])', { timeout: 5000 });
     await page.fill('#popInput', 'humo automatizado');
     await page.keyboard.press('Enter');
-    // export → escribe fixes.json del proyecto demo
-    await page.keyboard.press('e');
+    // export (⌘E: la E sola ahora selecciona a la derecha) → escribe fixes.json del proyecto demo
+    await page.keyboard.press('Meta+e');
     await page.waitForSelector('#modal:not([hidden])', { timeout: 5000 });
     await new Promise((r) => setTimeout(r, 400));
     const fixesTxt = await fsp.readFile(path.join(projDir, 'fixes.json'), 'utf8');
@@ -292,8 +319,8 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     const waveOk = wf.ok && typeof wj.rate === 'number' && Array.isArray(wj.peaks)
       && (await page.$('#waveCanvas')) !== null;
     await browser.close();
-    ok = fixesOk && waveOk && panelOk && itemsOk && errors.length === 0 && /recorte/.test(trimTitle);
-    detail = `trim="${trimTitle}" fixes=${fixesOk} wave=${waveOk} panel=${panelOk} items=${itemsOk} (drag/trim/supr/⌥rango) consola=${errors.length} errores`;
+    ok = fixesOk && waveOk && panelOk && itemsOk && errors.length === 0 && /corte/.test(trimTitle);
+    detail = `seam="${trimTitle.slice(0, 40)}…" fixes=${fixesOk} wave=${waveOk} panel=${panelOk} items=${itemsOk} (drag/trim/supr/⌥rango/QE/F/vista) consola=${errors.length} errores`;
     if (errors.length) detail += ` :: ${errors.slice(0, 3).join(' | ')}`;
   } catch (e) {
     detail = e.message.split('\n')[0];

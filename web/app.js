@@ -8,6 +8,7 @@ import {
   editItem, effItem, resolveItems, clampItem, pruneItemEdits,
   effAll, effByKey, baseOfKey, patchByKey, removeByKey,
   splitItemAt, trimItemTo, removeItemsInsideRange,
+  keptSegments, outDuration, rawToOut, outToRaw,
 } from './model.js';
 
 const $ = (id) => document.getElementById(id);
@@ -22,11 +23,32 @@ let pxPerSec = 1;       // zoom del timeline
 let fitPx = 1;
 let mounted = new Map(); // _key → {el}
 let speed = 1;
-let selKey = null;       // item seleccionado: índice base (número) o 'aN' (pieza añadida)
+let selKey = null;       // item PRIMARIO seleccionado: índice base (número) o 'aN' (pieza añadida)
+let multiSel = new Set(); // selección múltiple (Q/E o grupo): keys de items
 // modos estilo CapCut, persistidos: imán (snap al arrastrar) y vinculación (el recorte del base
 // se lleva los overlays que caen completos adentro)
 let magnetOn = localStorage.getItem('sf.magnet') !== '0';
 let linkOn = localStorage.getItem('sf.link') !== '0';
+// vista del timeline (persistida): 'compact' = CORTE estilo CapCut (solo material conservado,
+// los trims colapsan a costuras/líneas de corte — el DEFAULT) · 'raw' = material completo
+let viewMode = localStorage.getItem('sf.viewmode') || 'compact';
+let segsCache = []; // keptSegments cacheado; se recomputa en cada render (updateMapping)
+
+// ---------- cambio de coordenadas raw ↔ timeline (la vista corte vive aquí) ----------
+function updateMapping() { segsCache = keptSegments(state.trims, project.duration); }
+function tlDur() { return viewMode === 'compact' ? outDuration(state.trims, project.duration) : project.duration; }
+function tlOf(traw) { return viewMode === 'compact' ? rawToOut(segsCache, traw) : traw; }
+function tlToRaw(tl) { return viewMode === 'compact' ? outToRaw(segsCache, tl) : tl; }
+function XT(traw) { return tlOf(traw) * pxPerSec; }
+
+// ---------- selección (única + múltiple Q/E) ----------
+function isSel(key) { return key === selKey || multiSel.has(key); }
+function clearSel() { selKey = null; multiSel.clear(); }
+function setSingleSel(key) {
+  multiSel.clear();
+  if (key !== null) multiSel.add(key);
+  selKey = key;
+}
 
 // ---------- carga ----------
 async function boot() {
@@ -92,12 +114,20 @@ function drawWave() {
     ctx.fillText(wave ? 'sin pista de audio' : 'cargando waveform…', 8, H - 6);
     return;
   }
-  const t0 = scroll.scrollLeft / pxPerSec;
+  const t0 = scroll.scrollLeft / pxPerSec; // tiempo del TIMELINE (out en vista corte)
+  // en vista corte cada columna se remapea a tiempo raw (puntero monotónico: barato)
+  let segPtr = 0;
+  const colRaw = (tl) => {
+    if (viewMode !== 'compact') return tl;
+    while (segPtr < segsCache.length - 1 && tl > segsCache[segPtr].out + (segsCache[segPtr].b - segsCache[segPtr].a)) segPtr++;
+    const s = segsCache[segPtr];
+    return s ? s.a + Math.max(0, Math.min(s.b - s.a, tl - s.out)) : tl;
+  };
   ctx.fillStyle = 'rgba(255,145,1,.72)';
   for (let x = 0; x < W; x++) {
-    const bA = Math.floor((t0 + x / pxPerSec) * wave.rate);
+    const bA = Math.floor(colRaw(t0 + x / pxPerSec) * wave.rate);
     if (bA * 2 >= wave.peaks.length) break;
-    const bB = Math.max(bA + 1, Math.floor((t0 + (x + 1) / pxPerSec) * wave.rate));
+    const bB = Math.max(bA + 1, Math.floor(colRaw(t0 + (x + 1) / pxPerSec) * wave.rate));
     let mn = 0, mx = 0;
     for (let b = bA; b < bB && b * 2 + 1 < wave.peaks.length; b++) {
       const lo = wave.peaks[b * 2], hi = wave.peaks[b * 2 + 1];
@@ -203,8 +233,9 @@ function loop() {
     const t = base.currentTime || 0;
     const playing = !base.paused && !base.ended;
     syncOverlays(t, playing);
-    $('playhead').style.transform = `translateX(${t * pxPerSec}px)`;
-    $('timecode').textContent = `${fmt(t)} / ${fmt(project.duration)}`;
+    $('playhead').style.transform = `translateX(${XT(t)}px)`;
+    // en vista corte el reloj es el del RESULTADO (tiempo final), como CapCut
+    $('timecode').textContent = `${fmt(tlOf(t))} / ${fmt(tlDur())}`;
     $('playBtn').textContent = playing ? '⏸' : '▶';
     requestAnimationFrame(tick);
   };
@@ -219,25 +250,26 @@ function fmt(s) {
 
 // ---------- timeline ----------
 function fitTimeline(reset = true) {
+  updateMapping();
   const w = $('timelineScroll').clientWidth - 4;
-  fitPx = Math.max(0.01, w / project.duration);
+  fitPx = Math.max(0.01, w / Math.max(1, tlDur()));
   if (reset) pxPerSec = fitPx;
 }
 
 function renderTimeline() {
-  const W = Math.max(project.duration * pxPerSec, $('timelineScroll').clientWidth - 4);
+  updateMapping();
+  const W = Math.max(tlDur() * pxPerSec, $('timelineScroll').clientWidth - 4);
   $('timeline').style.width = `${W}px`;
-  const X = (t) => t * pxPerSec;
 
-  // ruler
+  // ruler (en vista corte marca el tiempo FINAL, como CapCut)
   const ruler = $('ruler');
   ruler.innerHTML = '';
   const steps = [0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600];
   const step = steps.find((s) => s * pxPerSec >= 70) || 600;
-  for (let t = 0; t <= project.duration; t += step) {
+  for (let t = 0; t <= tlDur(); t += step) {
     const d = document.createElement('div');
     d.className = 'tick';
-    d.style.left = `${X(t)}px`;
+    d.style.left = `${t * pxPerSec}px`;
     d.textContent = fmt(t);
     ruler.appendChild(d);
   }
@@ -248,14 +280,15 @@ function renderTimeline() {
   state.markers.forEach((mk, i) => {
     const p = document.createElement('div');
     p.className = 'mpin';
-    p.style.left = `${X(mk.t)}px`;
+    p.style.left = `${XT(mk.t)}px`;
     p.title = mk.nota;
     p.dataset.idx = i;
     lane.appendChild(p);
   });
 
   // items por track (efectivos, incl. piezas añadidas por split; editables: arrastrar = mover,
-  // bordes = trim, click = seleccionar)
+  // bordes = trim, click = seleccionar). En vista corte ambos EXTREMOS se remapean (un item que
+  // cruza trims conserva su ancho de salida real).
   const effItems = effAll(state, project.items);
   for (const tr of [1, 2, 3]) {
     const el = $('track' + tr);
@@ -263,9 +296,10 @@ function renderTimeline() {
     for (const it of effItems.filter((i) => (i.track || 1) === tr)) {
       const edited = typeof it._key === 'string' || !!state.items[it._key];
       const d = document.createElement('div');
-      d.className = `clipItem t${tr}` + (it._key === selKey ? ' sel' : '') + (edited ? ' edited' : '');
-      d.style.left = `${X(it.start)}px`;
-      d.style.width = `${Math.max(2, (it.dur * pxPerSec) - 1)}px`;
+      d.className = `clipItem t${tr}` + (isSel(it._key) ? ' sel' : '') + (edited ? ' edited' : '');
+      const x0 = XT(it.start);
+      d.style.left = `${x0}px`;
+      d.style.width = `${Math.max(2, XT(it.start + it.dur) - x0 - 1)}px`;
       d.title = `${it.id} · ${it.start}s +${it.dur}s — arrastra para mover · bordes = trim · Supr borra`;
       d.dataset.key = String(it._key);
       if (it.dur * pxPerSec > 34) d.textContent = it.id;
@@ -276,40 +310,65 @@ function renderTimeline() {
     }
   }
 
-  // base: segmentos + trims tachados + splits
+  // base según la vista:
+  //  · CORTE (default): clips conservados adyacentes + COSTURAS (línea de corte estilo CapCut);
+  //    la costura se arrastra (bordes = ajustar el corte, cuerpo = moverlo) y doble-click restaura
+  //  · RAW: material completo con los rangos recortados visibles (la vista quirúrgica)
   const bt = $('track0');
   bt.innerHTML = '';
   const merged = mergeRanges(state.trims);
-  let cursor = 0;
-  const segs = [];
-  for (const r of merged) {
-    if (r.start > cursor) segs.push([cursor, r.start]);
-    cursor = r.end;
+  if (viewMode === 'compact') {
+    for (const s of segsCache) {
+      const d = document.createElement('div');
+      d.className = 'baseSeg';
+      d.style.left = `${s.out * pxPerSec}px`;
+      d.style.width = `${Math.max(1, (s.b - s.a) * pxPerSec - 1)}px`;
+      bt.appendChild(d);
+    }
+    merged.forEach((r, i) => {
+      const d = document.createElement('div');
+      d.className = 'cutSeam';
+      d.style.left = `${rawToOut(segsCache, r.start) * pxPerSec}px`;
+      d.title = `corte: −${(r.end - r.start).toFixed(1)}s (raw ${fmt(r.start)} → ${fmt(r.end)}) — ` +
+        'click = verificar · bordes = ajustar · arrastrar = mover · doble-click restaura';
+      d.dataset.tidx = i;
+      const hl = document.createElement('div'); hl.className = 'hd l';
+      const hr = document.createElement('div'); hr.className = 'hd r';
+      d.append(hl, hr);
+      bt.appendChild(d);
+    });
+  } else {
+    let cursor = 0;
+    const segs = [];
+    for (const r of merged) {
+      if (r.start > cursor) segs.push([cursor, r.start]);
+      cursor = r.end;
+    }
+    if (cursor < project.duration) segs.push([cursor, project.duration]);
+    for (const [a, b] of segs) {
+      const d = document.createElement('div');
+      d.className = 'baseSeg';
+      d.style.left = `${a * pxPerSec}px`;
+      d.style.width = `${Math.max(1, (b - a) * pxPerSec - 1)}px`;
+      bt.appendChild(d);
+    }
+    merged.forEach((r, i) => {
+      const d = document.createElement('div');
+      d.className = 'trimRange';
+      d.style.left = `${r.start * pxPerSec}px`;
+      d.style.width = `${Math.max(2, (r.end - r.start) * pxPerSec - 1)}px`;
+      d.title = `recorte ${r.start}s → ${r.end}s — arrastra para mover · bordes = ajustar · doble-click restaura`;
+      d.dataset.tidx = i;
+      const hl = document.createElement('div'); hl.className = 'hd l';
+      const hr = document.createElement('div'); hr.className = 'hd r';
+      d.append(hl, hr);
+      bt.appendChild(d);
+    });
   }
-  if (cursor < project.duration) segs.push([cursor, project.duration]);
-  for (const [a, b] of segs) {
-    const d = document.createElement('div');
-    d.className = 'baseSeg';
-    d.style.left = `${X(a)}px`;
-    d.style.width = `${Math.max(1, (b - a) * pxPerSec - 1)}px`;
-    bt.appendChild(d);
-  }
-  merged.forEach((r, i) => {
-    const d = document.createElement('div');
-    d.className = 'trimRange';
-    d.style.left = `${X(r.start)}px`;
-    d.style.width = `${Math.max(2, (r.end - r.start) * pxPerSec - 1)}px`;
-    d.title = `recorte ${r.start}s → ${r.end}s — arrastra para mover · bordes = ajustar · doble-click restaura`;
-    d.dataset.tidx = i;
-    const hl = document.createElement('div'); hl.className = 'hd l';
-    const hr = document.createElement('div'); hr.className = 'hd r';
-    d.append(hl, hr);
-    bt.appendChild(d);
-  });
   for (const s of state.splits) {
     const d = document.createElement('div');
     d.className = 'splitLine';
-    d.style.left = `${X(s)}px`;
+    d.style.left = `${XT(s)}px`;
     bt.appendChild(d);
   }
 
@@ -326,7 +385,15 @@ function renderTimeline() {
 const TRACK_NAMES = { 1: 'clips', 2: 'alpha', 3: 'caps' };
 function renderItemInfo() {
   const box = $('itemInfo');
-  const it = selKey !== null ? effByKey(state, project.items, selKey) : null;
+  // selección múltiple (Q/E): tarjeta de grupo, no de item
+  if (multiSel.size > 1) {
+    box.hidden = false;
+    box.innerHTML = `<div class="iiId">${multiSel.size} assets seleccionados</div>` +
+      '<div class="iiHint"><b>arrastrar</b> mueve el grupo · <b>⌥←/→</b> 1 frame (⇧×10) · <b>Supr</b> borra todos · <b>Esc</b> deselecciona</div>';
+    return;
+  }
+  const only = selKey !== null ? selKey : (multiSel.size === 1 ? [...multiSel][0] : null);
+  const it = only !== null ? effByKey(state, project.items, only) : null;
   if (!it) {
     box.innerHTML = '';
     box.hidden = true;
@@ -348,7 +415,8 @@ function renderMarkers() {
     const del = document.createElement('button');
     del.className = 'mdel'; del.textContent = '✕'; del.title = 'borrar marcador';
     del.addEventListener('click', (e) => { e.stopPropagation(); pushUndo(); state.markers.splice(i, 1); refresh(); });
-    const t = document.createElement('div'); t.className = 'mt'; t.textContent = fmt(mk.t);
+    // el tiempo del marcador habla el idioma de la vista (out en corte, raw en raw)
+    const t = document.createElement('div'); t.className = 'mt'; t.textContent = fmt(tlOf(mk.t));
     const n = document.createElement('div'); n.className = 'mnota'; n.textContent = mk.nota || '(sin nota)';
     li.append(del, t, n);
     li.addEventListener('click', () => { base.currentTime = mk.t; });
@@ -365,6 +433,7 @@ function pushUndo() {
   redoStack.length = 0; // una edición nueva invalida el redo
 }
 function validateSel() {
+  for (const k of [...multiSel]) if (!effByKey(state, project.items, k)) multiSel.delete(k);
   if (selKey !== null && !effByKey(state, project.items, selKey)) selKey = null;
 }
 function undo() {
@@ -389,26 +458,65 @@ function redo() {
   }
 }
 
+function selectedKeys() {
+  if (multiSel.size) return [...multiSel];
+  return selKey !== null ? [selKey] : [];
+}
+
 function removeSelectedItem() {
-  if (selKey === null) return;
-  const it = effByKey(state, project.items, selKey);
-  if (!it) return;
+  const keys = selectedKeys();
+  if (!keys.length) return;
+  // adds ('aN') se eliminan con splice → borrar de mayor a menor índice para no invalidar keys
+  keys.sort((p, q) => {
+    const pa = typeof p === 'string', qa = typeof q === 'string';
+    if (pa && qa) return +q.slice(1) - +p.slice(1);
+    return pa === qa ? 0 : (pa ? 1 : -1);
+  });
   pushUndo();
-  removeByKey(state, project.items, selKey);
-  toast(`${it.id} eliminado · ⌘Z deshace`);
-  selKey = null;
+  let n = 0;
+  let lastId = null;
+  for (const k of keys) {
+    const it = effByKey(state, project.items, k);
+    if (it && removeByKey(state, project.items, k)) { n++; lastId = it.id; }
+  }
+  if (!n) { undoStack.pop(); return; }
+  toast(n === 1 ? `${lastId} eliminado · ⌘Z deshace` : `${n} assets eliminados · ⌘Z deshace`);
+  clearSel();
   refresh();
 }
 
 function nudgeSelectedItem(dt) {
-  if (selKey === null) return false;
-  const baseIt = baseOfKey(state, project.items, selKey);
-  const it = effByKey(state, project.items, selKey);
-  if (!it || !baseIt) return false;
+  const keys = selectedKeys();
+  if (!keys.length) return false;
   pushUndo();
-  patchByKey(state, project.items, selKey, clampItem(baseIt, { start: it.start + dt }, project.duration));
+  let n = 0;
+  for (const k of keys) {
+    const baseIt = baseOfKey(state, project.items, k);
+    const it = effByKey(state, project.items, k);
+    if (!it || !baseIt) continue;
+    patchByKey(state, project.items, k, clampItem(baseIt, { start: it.start + dt }, project.duration));
+    n++;
+  }
+  if (!n) { undoStack.pop(); return false; }
   refresh();
   return true;
+}
+
+// Q/E: seleccionar TODOS los componentes a un lado del cursor (dir<0 = izquierda, dir>0 = derecha).
+// Criterio: E toma los que EMPIEZAN en/después del playhead; Q los que TERMINAN en/antes.
+// Un asset que cruza el playhead no cae en ninguno (se clickea directo).
+function selectSide(dir) {
+  const t = base.currentTime || 0;
+  const items = effAll(state, project.items);
+  const keys = items
+    .filter((it) => (dir > 0 ? it.start >= t - 1e-3 : it.start + it.dur <= t + 1e-3))
+    .map((it) => it._key);
+  multiSel = new Set(keys);
+  selKey = keys.length === 1 ? keys[0] : null;
+  renderTimeline();
+  toast(keys.length
+    ? `${keys.length} asset(s) seleccionados a la ${dir > 0 ? 'derecha' : 'izquierda'} · arrástralos juntos o Supr`
+    : `sin assets a la ${dir > 0 ? 'derecha' : 'izquierda'} del cursor`);
 }
 
 // ↑ = siguiente bloque, ↓ = anterior (estilo CapCut): recorre los assets por tiempo; ↓ desde el
@@ -428,12 +536,12 @@ function navigateBlocks(dir) {
     next = cur + dir;
   }
   if (next < 0 || next >= items.length) {
-    selKey = null;
+    clearSel();
     renderTimeline();
     toast('base (sin selección)');
     return;
   }
-  selKey = items[next]._key;
+  setSingleSel(items[next]._key);
   base.currentTime = Math.min(project.duration, items[next].start + 0.001);
   renderTimeline();
   toast(`${items[next].id} · ${fmt(items[next].start)}`);
@@ -441,8 +549,11 @@ function navigateBlocks(dir) {
 
 // ---------- interacción ----------
 function timeFromEvent(e) {
+  // devuelve tiempo RAW (los consumidores — seek, trims — viven en raw); la conversión
+  // desde coordenadas de pantalla pasa por el timeline (out en vista corte)
   const rect = $('timeline').getBoundingClientRect();
-  return Math.max(0, Math.min(project.duration, (e.clientX - rect.left) / pxPerSec));
+  const tl = Math.max(0, Math.min(tlDur(), (e.clientX - rect.left) / pxPerSec));
+  return Math.max(0, Math.min(project.duration, tlToRaw(tl)));
 }
 function seekFromEvent(e) {
   base.currentTime = timeFromEvent(e);
@@ -479,7 +590,7 @@ function showSnapGuide(t) {
     g.id = 'snapGuide';
     $('timeline').appendChild(g);
   }
-  g.style.left = `${t * pxPerSec}px`;
+  g.style.left = `${XT(t)}px`;
   g.hidden = false;
 }
 function hideSnapGuide() {
@@ -488,7 +599,10 @@ function hideSnapGuide() {
 }
 
 function selectByKey(key) {
-  selKey = key;
+  // si el item ya es parte de una selección múltiple, clickearlo NO la rompe (permite
+  // agarrar el grupo Q/E y arrastrarlo); clickear uno de fuera sí re-selecciona solo
+  if (!multiSel.has(key)) setSingleSel(key);
+  else selKey = key;
   renderTimeline();
 }
 
@@ -515,6 +629,19 @@ function startItemDrag(e, div, key) {
   const srcDur = (srcEl?.tagName === 'VIDEO' && Number.isFinite(srcEl.duration)) ? srcEl.duration : null;
   const cands = snapCandidates(key);
   let changed = false;
+  // arrastre de GRUPO (selección Q/E): mover el primario mueve a todos con el mismo delta
+  const group = (mode === 'move' && multiSel.size > 1 && multiSel.has(key))
+    ? [...multiSel].filter((k) => k !== key).map((k) => {
+        const it = effByKey(state, project.items, k);
+        const b = baseOfKey(state, project.items, k);
+        return it && b ? { k, start0: it.start, base: b } : null;
+      }).filter(Boolean)
+    : [];
+  const placeDiv = (el, eff) => {
+    const px0 = XT(eff.start);
+    el.style.left = `${px0}px`;
+    el.style.width = `${Math.max(2, XT(eff.start + eff.dur) - px0 - 1)}px`;
+  };
   div.classList.add('dragging');
 
   const move = (ev) => {
@@ -551,8 +678,17 @@ function startItemDrag(e, div, key) {
     patchByKey(state, project.items, key, patch);
     changed = true;
     const eff = effByKey(state, project.items, key);
-    div.style.left = `${eff.start * pxPerSec}px`;
-    div.style.width = `${Math.max(2, eff.dur * pxPerSec - 1)}px`;
+    placeDiv(div, eff);
+    // el grupo sigue al primario con su mismo delta
+    if (group.length) {
+      const delta = eff.start - it0.start;
+      for (const g of group) {
+        patchByKey(state, project.items, g.k, clampItem(g.base, { start: g.start0 + delta }, project.duration));
+        const ge = effByKey(state, project.items, g.k);
+        const gdiv = $('track' + (ge.track || 1)).querySelector(`.clipItem[data-key="${g.k}"]`);
+        if (gdiv && ge) placeDiv(gdiv, ge);
+      }
+    }
     if (hit !== null) showSnapGuide(hit); else hideSnapGuide();
     renderItemInfo();
   };
@@ -567,7 +703,9 @@ function startItemDrag(e, div, key) {
       redoStack.length = 0;
       const eff = effByKey(state, project.items, key);
       refresh();
-      toast(`${it0.id} ${mode === 'move' ? '→' : 'trim'} ${fmt(eff.start)} (+${eff.dur.toFixed(2)}s)`);
+      toast(group.length
+        ? `${group.length + 1} assets movidos juntos · ⌘Z deshace`
+        : `${it0.id} ${mode === 'move' ? '→' : 'trim'} ${fmt(eff.start)} (+${eff.dur.toFixed(2)}s)`);
     }
   };
   window.addEventListener('pointermove', move);
@@ -644,6 +782,59 @@ function startTrimDrag(e, div, tidx) {
   window.addEventListener('pointerup', up);
 }
 
+// COSTURA (vista corte): el corte es una línea entre dos clips, como CapCut. Bordes = ajustar
+// (izq. mueve trim.start, der. mueve trim.end — extender/devolver material), cuerpo = mover el
+// corte completo, click = seek a 1.5s antes para VERIFICARLO, doble-click = restaurar.
+// El ripple cambia TODA la geometría → re-render completo por frame (rAF).
+function startSeamDrag(e, div, tidx) {
+  e.preventDefault();
+  const r0 = state.trims[tidx];
+  if (!r0) return;
+  const zone = e.target.classList.contains('hd') ? (e.target.classList.contains('l') ? 'l' : 'r') : 'move';
+  const x0 = e.clientX;
+  const undo0 = cloneState(state);
+  const len0 = r0.end - r0.start;
+  let changed = false;
+  let raf = 0;
+
+  const move = (ev) => {
+    const dx = (ev.clientX - x0) / pxPerSec; // px de pantalla → segundos de material (1:1 en el borde)
+    if (Math.abs(ev.clientX - x0) < 2 && !changed) return;
+    let did = false;
+    if (zone === 'l') {
+      did = setTrimRange(state, tidx, Math.min(r0.start + dx, r0.end - 0.05), r0.end, project.duration);
+    } else if (zone === 'r') {
+      did = setTrimRange(state, tidx, r0.start, Math.max(r0.end + dx, r0.start + 0.05), project.duration);
+    } else {
+      const ns = Math.max(0, Math.min(r0.start + dx, project.duration - len0));
+      did = setTrimRange(state, tidx, ns, ns + len0, project.duration);
+    }
+    if (!did) return;
+    changed = true;
+    if (!raf) raf = requestAnimationFrame(() => { raf = 0; renderTimeline(); });
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    if (changed) {
+      const r = state.trims[tidx];
+      state.trims = mergeRanges(state.trims);
+      undoStack.push(undo0);
+      if (undoStack.length > 100) undoStack.shift();
+      redoStack.length = 0;
+      refresh();
+      toast(`corte ${zone === 'move' ? 'movido' : 'ajustado'}: −${(r.end - r.start).toFixed(1)}s (raw ${fmt(r.start)}–${fmt(r.end)}) · ⌘Z deshace`);
+    } else {
+      // click sin arrastre = VERIFICAR el corte: seek a 1.5s antes de la costura
+      base.currentTime = Math.max(0, r0.start - 1.5);
+      toast(`corte: −${len0.toFixed(1)}s (raw ${fmt(r0.start)} → ${fmt(r0.end)}) · Espacio para escucharlo · doble-click restaura`);
+    }
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+}
+
 // ⌥-arrastre sobre el timeline = seleccionar un RANGO y recortarlo del base (el gesto del silencio)
 function startRangeTrim(e) {
   e.preventDefault();
@@ -654,8 +845,8 @@ function startRangeTrim(e) {
   let t1 = t0;
   const paint = () => {
     const a = Math.min(t0, t1), b = Math.max(t0, t1);
-    sel.style.left = `${a * pxPerSec}px`;
-    sel.style.width = `${Math.max(1, (b - a) * pxPerSec)}px`;
+    sel.style.left = `${XT(a)}px`;
+    sel.style.width = `${Math.max(1, XT(b) - XT(a))}px`;
   };
   paint();
   const move = (ev) => { t1 = timeFromEvent(ev); paint(); };
@@ -693,8 +884,10 @@ for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2'
     }
     const tr = e.target.closest('.trimRange');
     if (tr) { startTrimDrag(e, tr, +tr.dataset.tidx); return; }
+    const seam = e.target.closest('.cutSeam');
+    if (seam) { startSeamDrag(e, seam, +seam.dataset.tidx); return; }
     if (e.altKey) { startRangeTrim(e); return; }
-    if (selKey !== null) { selKey = null; renderTimeline(); } // click en vacío deselecciona
+    if (selKey !== null || multiSel.size) { clearSel(); renderTimeline(); } // click en vacío deselecciona
     seekFromEvent(e);
     const move = (ev) => seekFromEvent(ev);
     const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
@@ -703,14 +896,14 @@ for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2'
   });
 }
 
-// doble-click en un recorte = eliminarlo (restaura el contenido cortado)
+// doble-click en un recorte (raw) o en una costura (corte) = eliminarlo (restaura el contenido)
 $('track0').addEventListener('dblclick', (e) => {
-  const tr = e.target.closest('.trimRange');
+  const tr = e.target.closest('.trimRange') || e.target.closest('.cutSeam');
   if (!tr) return;
   pushUndo();
   state.trims.splice(+tr.dataset.tidx, 1);
   refresh();
-  toast('recorte eliminado: contenido restaurado · ⌘Z deshace');
+  toast('corte eliminado: contenido restaurado · ⌘Z deshace');
 });
 
 $('playBtn').addEventListener('click', togglePlay);
@@ -751,7 +944,8 @@ function setZoom(px, anchorT = null, anchorScreenX = null) {
     screenX = anchorScreenX;
     anchor = (scroll.scrollLeft + screenX) / pxPerSec;
   } else {
-    anchor = anchorT ?? (base.currentTime || 0);
+    // anchor vive en coordenadas del TIMELINE (out en vista corte)
+    anchor = anchorT ?? tlOf(base.currentTime || 0);
     screenX = anchor * pxPerSec - scroll.scrollLeft;
   }
   // techo que ESCALA con fitPx: un techo fijo menor que fitPx dejaba el zoom inerte en proyectos cortos
@@ -763,6 +957,38 @@ function setZoom(px, anchorT = null, anchorScreenX = null) {
 $('zoomIn').addEventListener('click', () => setZoom(pxPerSec * 1.6));
 $('zoomOut').addEventListener('click', () => setZoom(pxPerSec / 1.6));
 $('zoomFit').addEventListener('click', () => { fitTimeline(); renderTimeline(); });
+
+// ---------- vista CORTE ↔ RAW (persistida; corte = default) ----------
+function applyViewMode() {
+  const compact = viewMode === 'compact';
+  $('viewBtn').textContent = compact ? '✂ corte' : '🎞 raw';
+  $('viewBtn').title = compact
+    ? 'Vista CORTE (default, estilo CapCut): solo el material conservado; cada corte es una costura. Click = ver el raw completo con los rangos recortados'
+    : 'Vista RAW: el material completo con los rangos recortados visibles. Click = volver a la vista corte';
+}
+$('viewBtn').addEventListener('click', () => {
+  viewMode = viewMode === 'compact' ? 'raw' : 'compact';
+  localStorage.setItem('sf.viewmode', viewMode);
+  applyViewMode();
+  fitTimeline();
+  refresh(); // timeline + lista de marcadores (sus tiempos cambian de idioma con la vista)
+  toast(viewMode === 'compact' ? 'vista CORTE: solo lo que queda; los cortes son costuras' : 'vista RAW: material completo con recortes visibles');
+});
+applyViewMode();
+
+// ---------- F: pantalla completa ----------
+function toggleFullscreen() {
+  if (document.fullscreenElement || document.webkitFullscreenElement) {
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    return;
+  }
+  const el = document.documentElement;
+  const req = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (req) {
+    const p = req.call(el);
+    if (p && p.catch) p.catch(() => toast('pantalla completa bloqueada por el navegador'));
+  }
+}
 
 // ---------- modos estilo CapCut: 🧲 imán · 🔗 vinculación (persistidos) ----------
 function renderModes() {
@@ -862,7 +1088,7 @@ function openMarkerPopover(t) {
   const pop = $('popover');
   const input = $('popInput');
   pop.hidden = false;
-  const x = Math.min(window.innerWidth - 320, Math.max(8, t * pxPerSec - $('timelineScroll').scrollLeft));
+  const x = Math.min(window.innerWidth - 320, Math.max(8, XT(t) - $('timelineScroll').scrollLeft));
   pop.style.left = `${x}px`;
   pop.style.bottom = '210px';
   input.value = '';
@@ -1191,6 +1417,7 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if ((e.metaKey || e.ctrlKey) && k === 'y') { e.preventDefault(); togglePublishPanel(); return; }
+  if ((e.metaKey || e.ctrlKey) && k === 'e') { e.preventDefault(); exportFixes(); return; }
   // ⌥←/⌥→ = mover el item seleccionado 1 frame (⇧×10); las flechas solas SIEMPRE son playhead
   if (e.altKey && !e.metaKey && !e.ctrlKey && (k === 'arrowleft' || k === 'arrowright')) {
     e.preventDefault();
@@ -1244,16 +1471,19 @@ window.addEventListener('keydown', (e) => {
       }
       break;
     case 'm': openMarkerPopover(t); break;
-    case 'e': exportFixes(); break;
+    case 'q': selectSide(-1); break; // seleccionar TODO a la izquierda del cursor
+    case 'e': selectSide(1); break;  // seleccionar TODO a la derecha del cursor
+    case 'f': toggleFullscreen(); break;
     case 'y': togglePublishPanel(); break;
     case ',': case '<': cycleSpeed(-1); break;
     case '.': case '>': cycleSpeed(1); break;
-    case 'backspace': case 'delete': if (selKey !== null) { e.preventDefault(); removeSelectedItem(); } break;
-    case 'escape': if (selKey !== null) { selKey = null; renderTimeline(); } break;
+    case 'backspace': case 'delete': if (selectedKeys().length) { e.preventDefault(); removeSelectedItem(); } break;
+    case 'escape': if (selKey !== null || multiSel.size) { clearSel(); renderTimeline(); } break;
     case 'arrowup': e.preventDefault(); navigateBlocks(1); break;    // siguiente bloque (CapCut)
     case 'arrowdown': e.preventDefault(); navigateBlocks(-1); break; // bloque anterior
-    case 'arrowleft': e.preventDefault(); base.currentTime = Math.max(0, t - frame * (e.shiftKey ? 10 : 1)); break;
-    case 'arrowright': e.preventDefault(); base.currentTime = Math.min(project.duration, t + frame * (e.shiftKey ? 10 : 1)); break;
+    // ←/→ avanzan en el tiempo del TIMELINE: en vista corte el paso SALTA los trims
+    case 'arrowleft': e.preventDefault(); base.currentTime = Math.max(0, tlToRaw(Math.max(0, tlOf(t) - frame * (e.shiftKey ? 10 : 1)))); break;
+    case 'arrowright': e.preventDefault(); base.currentTime = Math.min(project.duration, tlToRaw(Math.min(tlDur(), tlOf(t) + frame * (e.shiftKey ? 10 : 1)))); break;
     default: break;
   }
 });

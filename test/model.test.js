@@ -246,3 +246,48 @@ test('round-trip item_adds en fixes.json', () => {
   assert.equal(s2.adds.length, 1);
   assert.equal(effAll(s2, ITEMS).length, 3);
 });
+
+// ---------- vista corte: mapeo raw ↔ out ----------
+import { keptSegments, outDuration, rawToOut, outToRaw } from '../web/model.js';
+
+test('keptSegments: complemento de los trims con out acumulado', () => {
+  const trims = [{ start: 10, end: 20 }, { start: 50, end: 55 }];
+  assert.deepEqual(keptSegments(trims, DUR), [
+    { a: 0, b: 10, out: 0 },
+    { a: 20, b: 50, out: 10 },
+    { a: 55, b: 100, out: 40 },
+  ]);
+  assert.equal(outDuration(trims, DUR), 85);
+});
+
+test('keptSegments: trim al inicio y al final', () => {
+  const trims = [{ start: 0, end: 5 }, { start: 95, end: 100 }];
+  assert.deepEqual(keptSegments(trims, DUR), [{ a: 5, b: 95, out: 0 }]);
+  assert.equal(outDuration(trims, DUR), 90);
+});
+
+test('rawToOut: dentro de un trim colapsa a la costura', () => {
+  const segs = keptSegments([{ start: 10, end: 20 }], DUR);
+  assert.equal(rawToOut(segs, 5), 5);
+  assert.equal(rawToOut(segs, 15), 10);  // adentro del trim → costura
+  assert.equal(rawToOut(segs, 20), 10);
+  assert.equal(rawToOut(segs, 30), 20);
+  assert.equal(rawToOut(segs, 100), 90);
+});
+
+test('outToRaw es la inversa de rawToOut fuera de los trims', () => {
+  const segs = keptSegments([{ start: 10, end: 20 }, { start: 50, end: 55 }], DUR);
+  for (const t of [0, 5, 9.9, 20.1, 33, 49.9, 55.1, 80, 100]) {
+    assert.ok(Math.abs(outToRaw(segs, rawToOut(segs, t)) - t) < 1e-3, `round-trip ${t}`);
+  }
+  assert.equal(outToRaw(segs, 10), 20);  // la costura resuelve al inicio del material que sigue
+  assert.equal(outToRaw(segs, 85), 100);
+  assert.equal(outToRaw(segs, 999), 100); // clamp al final
+});
+
+test('sin trims el mapeo es identidad', () => {
+  const segs = keptSegments([], DUR);
+  assert.deepEqual(segs, [{ a: 0, b: 100, out: 0 }]);
+  assert.equal(rawToOut(segs, 42), 42);
+  assert.equal(outToRaw(segs, 42), 42);
+});

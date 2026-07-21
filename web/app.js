@@ -298,11 +298,12 @@ function renderTimeline() {
       const d = document.createElement('div');
       d.className = `clipItem t${tr}` + (isSel(it._key) ? ' sel' : '') + (edited ? ' edited' : '');
       const x0 = XT(it.start);
+      const w = Math.max(2, XT(it.start + it.dur) - x0 - 1); // ancho OUT real (colapsa costuras internas)
       d.style.left = `${x0}px`;
-      d.style.width = `${Math.max(2, XT(it.start + it.dur) - x0 - 1)}px`;
+      d.style.width = `${w}px`;
       d.title = `${it.id} · ${it.start}s +${it.dur}s — arrastra para mover · bordes = trim · Supr borra`;
       d.dataset.key = String(it._key);
-      if (it.dur * pxPerSec > 34) d.textContent = it.id;
+      if (w > 34) d.textContent = it.id; // el label depende del ancho renderizado, no de la dur cruda
       const hl = document.createElement('div'); hl.className = 'hd l';
       const hr = document.createElement('div'); hr.className = 'hd r';
       d.append(hl, hr);
@@ -461,6 +462,20 @@ function redo() {
 function selectedKeys() {
   if (multiSel.size) return [...multiSel];
   return selKey !== null ? [selKey] : [];
+}
+
+// S/A/D con selección (única O de grupo Q/E): aplica `fn` a cada asset seleccionado. Devuelve
+// true si HABÍA selección (aunque ningún asset contuviera el playhead), para que el caller NO
+// caiga a la operación de BASE — evita que un A/D con 🔗 borre en cascada el grupo recién elegido.
+function itemOpOverSelection(fn, okMsg) {
+  const keys = selectedKeys();
+  if (!keys.length) return false;
+  pushUndo();
+  let n = 0;
+  for (const kk of keys) if (fn(kk)) n++;
+  if (n) { refresh(); toast(typeof okMsg === 'function' ? okMsg(n) : okMsg); }
+  else { undoStack.pop(); toast('playhead fuera de los assets seleccionados'); }
+  return true;
 }
 
 function removeSelectedItem() {
@@ -629,12 +644,13 @@ function startItemDrag(e, div, key) {
   const srcDur = (srcEl?.tagName === 'VIDEO' && Number.isFinite(srcEl.duration)) ? srcEl.duration : null;
   const cands = snapCandidates(key);
   let changed = false;
-  // arrastre de GRUPO (selección Q/E): mover el primario mueve a todos con el mismo delta
+  // arrastre de GRUPO (selección Q/E): el primario mueve a todos con el mismo delta EN TL (out),
+  // así el grupo se mantiene visualmente junto aunque cada uno cruce costuras distintas
   const group = (mode === 'move' && multiSel.size > 1 && multiSel.has(key))
     ? [...multiSel].filter((k) => k !== key).map((k) => {
         const it = effByKey(state, project.items, k);
         const b = baseOfKey(state, project.items, k);
-        return it && b ? { k, start0: it.start, base: b } : null;
+        return it && b ? { k, outStart0: tlOf(it.start), base: b } : null;
       }).filter(Boolean)
     : [];
   const placeDiv = (el, eff) => {
@@ -642,24 +658,30 @@ function startItemDrag(e, div, key) {
     el.style.left = `${px0}px`;
     el.style.width = `${Math.max(2, XT(eff.start + eff.dur) - px0 - 1)}px`;
   };
+  // el gesto vive en TL-space (out): en vista corte pxPerSec mide px/seg-OUT, así que el delta de
+  // pantalla es un delta OUT — sumarlo a un ancla RAW corrompe la posición al cruzar una costura.
+  // Ancla→TL, sumar dx, volver a RAW con tlToRaw (todo esto es identidad en vista raw).
+  const A0 = tlOf(it0.start);
+  const B0 = tlOf(it0.start + it0.dur);
+  const candsTl = cands.map(tlOf);
   div.classList.add('dragging');
 
   const move = (ev) => {
-    const dx = (ev.clientX - x0) / pxPerSec;
+    const dx = (ev.clientX - x0) / pxPerSec; // delta en segundos OUT (tl-space)
     if (Math.abs(ev.clientX - x0) < 2 && !changed) return;
     let patch = null;
-    let hit = null;
+    let hit = null; // el hit de snapInfo vive en TL; a showSnapGuide (que espera raw) va con tlToRaw
     if (mode === 'move') {
-      const s1 = snapInfo(it0.start + dx, cands, ev.altKey);
-      let ns = s1.t;
+      const s1 = snapInfo(A0 + dx, candsTl, ev.altKey);
+      let nsTl = s1.t;
       hit = s1.hit;
-      const s2 = snapInfo(ns + it0.dur, cands, ev.altKey);
-      if (s2.hit !== null && s1.hit === null) { ns = s2.t - it0.dur; hit = s2.hit; } // imán por el borde derecho
-      patch = clampItem(baseIt, { start: ns }, project.duration, srcDur);
+      const s2 = snapInfo(nsTl + (B0 - A0), candsTl, ev.altKey);
+      if (s2.hit !== null && s1.hit === null) { nsTl = s2.t - (B0 - A0); hit = s2.hit; } // imán por el borde derecho
+      patch = clampItem(baseIt, { start: tlToRaw(nsTl) }, project.duration, srcDur);
     } else if (mode === 'l') {
-      const s1 = snapInfo(it0.start + dx, cands, ev.altKey);
+      const s1 = snapInfo(A0 + dx, candsTl, ev.altKey);
       hit = s1.hit;
-      let ns = s1.t;
+      let ns = tlToRaw(s1.t);
       const end = it0.start + it0.dur;
       const minStart = baseIt.type === 'video' ? it0.start - (it0.offset || 0) : 0; // el media no existe antes de su 0
       ns = Math.max(minStart, Math.min(ns, end - 0.1));
@@ -670,26 +692,26 @@ function startItemDrag(e, div, key) {
         ...(baseIt.type === 'video' ? { offset: (it0.offset || 0) + delta } : {}),
       }, project.duration, srcDur);
     } else {
-      const s1 = snapInfo(it0.start + it0.dur + dx, cands, ev.altKey);
+      const s1 = snapInfo(B0 + dx, candsTl, ev.altKey);
       hit = s1.hit;
-      let ne = Math.max(it0.start + 0.1, Math.min(s1.t, project.duration));
+      let ne = Math.max(it0.start + 0.1, Math.min(tlToRaw(s1.t), project.duration));
       patch = clampItem(baseIt, { dur: ne - it0.start }, project.duration, srcDur);
     }
     patchByKey(state, project.items, key, patch);
     changed = true;
     const eff = effByKey(state, project.items, key);
     placeDiv(div, eff);
-    // el grupo sigue al primario con su mismo delta
+    // el grupo sigue al primario con su mismo delta EN TL (out)
     if (group.length) {
-      const delta = eff.start - it0.start;
+      const outDelta = tlOf(eff.start) - A0;
       for (const g of group) {
-        patchByKey(state, project.items, g.k, clampItem(g.base, { start: g.start0 + delta }, project.duration));
+        patchByKey(state, project.items, g.k, clampItem(g.base, { start: tlToRaw(g.outStart0 + outDelta) }, project.duration));
         const ge = effByKey(state, project.items, g.k);
         const gdiv = $('track' + (ge.track || 1)).querySelector(`.clipItem[data-key="${g.k}"]`);
         if (gdiv && ge) placeDiv(gdiv, ge);
       }
     }
-    if (hit !== null) showSnapGuide(hit); else hideSnapGuide();
+    if (hit !== null) showSnapGuide(tlToRaw(hit)); else hideSnapGuide();
     renderItemInfo();
   };
   const up = () => {
@@ -796,17 +818,25 @@ function startSeamDrag(e, div, tidx) {
   const len0 = r0.end - r0.start;
   let changed = false;
   let raf = 0;
+  // dx vive en segundos OUT (pxPerSec = px/seg-OUT en vista corte). El eje out se define por los
+  // OTROS trims (el que arrastramos está colapsado): capturamos ese mapping FIJO al inicio del
+  // gesto para traducir el delta de pantalla a RAW aun cuando la costura cruza otro corte.
+  const segs0 = keptSegments(state.trims.filter((_, i) => i !== tidx), project.duration);
+  const outStart0 = rawToOut(segs0, r0.start);
+  const outEnd0 = rawToOut(segs0, r0.end);
 
   const move = (ev) => {
-    const dx = (ev.clientX - x0) / pxPerSec; // px de pantalla → segundos de material (1:1 en el borde)
+    const dx = (ev.clientX - x0) / pxPerSec; // delta en segundos OUT
     if (Math.abs(ev.clientX - x0) < 2 && !changed) return;
     let did = false;
     if (zone === 'l') {
-      did = setTrimRange(state, tidx, Math.min(r0.start + dx, r0.end - 0.05), r0.end, project.duration);
+      const ns = outToRaw(segs0, outStart0 + dx);
+      did = setTrimRange(state, tidx, Math.min(ns, r0.end - 0.05), r0.end, project.duration);
     } else if (zone === 'r') {
-      did = setTrimRange(state, tidx, r0.start, Math.max(r0.end + dx, r0.start + 0.05), project.duration);
+      const ne = outToRaw(segs0, outEnd0 + dx);
+      did = setTrimRange(state, tidx, r0.start, Math.max(ne, r0.start + 0.05), project.duration);
     } else {
-      const ns = Math.max(0, Math.min(r0.start + dx, project.duration - len0));
+      const ns = Math.max(0, Math.min(outToRaw(segs0, outStart0 + dx), project.duration - len0));
       did = setTrimRange(state, tidx, ns, ns + len0, project.duration);
     }
     if (!did) return;
@@ -869,6 +899,18 @@ function startRangeTrim(e) {
   window.addEventListener('pointerup', up);
 }
 
+// costura MÁS CERCANA al clic (no la topmost por z-order): con cientos de cortes densos las
+// hit-zones de 14px se solapan y el orden de DOM sesgaría el clic a la costura más tardía.
+function nearestSeam(clientX) {
+  let best = null, bestD = 10; // umbral de 10px
+  for (const s of $('track0').querySelectorAll('.cutSeam')) {
+    const r = s.getBoundingClientRect();
+    const d = Math.abs(clientX - (r.left + r.width / 2));
+    if (d < bestD) { bestD = d; best = s; }
+  }
+  return best;
+}
+
 for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2', 'track3']) {
   $(id).addEventListener('pointerdown', (e) => {
     if (e.target.classList.contains('mpin')) {
@@ -884,8 +926,11 @@ for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2'
     }
     const tr = e.target.closest('.trimRange');
     if (tr) { startTrimDrag(e, tr, +tr.dataset.tidx); return; }
-    const seam = e.target.closest('.cutSeam');
-    if (seam) { startSeamDrag(e, seam, +seam.dataset.tidx); return; }
+    // en vista corte, elegir la costura más cercana al clic (no la topmost) — track0 solamente
+    if (e.currentTarget.id === 'track0' && viewMode === 'compact') {
+      const seam = nearestSeam(e.clientX);
+      if (seam) { startSeamDrag(e, seam, +seam.dataset.tidx); return; }
+    }
     if (e.altKey) { startRangeTrim(e); return; }
     if (selKey !== null || multiSel.size) { clearSel(); renderTimeline(); } // click en vacío deselecciona
     seekFromEvent(e);
@@ -896,9 +941,9 @@ for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2'
   });
 }
 
-// doble-click en un recorte (raw) o en una costura (corte) = eliminarlo (restaura el contenido)
+// doble-click en un recorte (raw) o en una costura (corte, la más cercana) = eliminarlo (restaura)
 $('track0').addEventListener('dblclick', (e) => {
-  const tr = e.target.closest('.trimRange') || e.target.closest('.cutSeam');
+  const tr = e.target.closest('.trimRange') || (viewMode === 'compact' ? nearestSeam(e.clientX) : null);
   if (!tr) return;
   pushUndo();
   state.trims.splice(+tr.dataset.tidx, 1);
@@ -1411,6 +1456,11 @@ window.addEventListener('keydown', (e) => {
   const frame = 1 / (project.fps || 30);
   const k = e.key.toLowerCase();
 
+  // dossier (⌘Y) / modal de export (⌘E) abiertos = ESPEJO a pantalla completa: bloquear TODAS
+  // las teclas del timeline (incl. ⌘Z) menos las que los cierran, para no mutar el proyecto detrás
+  if (!$('modal').hidden) { if (k === 'escape') $('modal').hidden = true; return; }
+  if (!$('publishPanel').hidden) { if (k === 'escape' || k === 'y') { e.preventDefault(); togglePublishPanel(); } return; }
+
   if ((e.metaKey || e.ctrlKey) && k === 'z') {
     e.preventDefault();
     if (e.shiftKey) redo(); else undo();
@@ -1429,21 +1479,14 @@ window.addEventListener('keydown', (e) => {
   switch (k) {
     case ' ': e.preventDefault(); togglePlay(); break;
     case 's':
-      if (selKey !== null) {
-        pushUndo();
-        if (splitItemAt(state, project.items, selKey, t)) { refresh(); toast(`asset partido @ ${fmt(t)}`); }
-        else { undoStack.pop(); toast('playhead fuera del asset seleccionado'); }
-      } else {
+      // con selección (única o grupo): parte cada asset en el playhead; sin selección: split del base
+      if (!itemOpOverSelection((kk) => splitItemAt(state, project.items, kk, t), (n) => `${n} asset(s) partido(s) @ ${fmt(t)}`)) {
         pushUndo();
         if (addSplit(state, t, project.duration)) { refresh(); toast(`split @ ${fmt(t)}`); } else undoStack.pop();
       }
       break;
     case 'a':
-      if (selKey !== null) {
-        pushUndo();
-        if (trimItemTo(state, project.items, selKey, t, 'l')) { refresh(); toast('asset: trim ← al playhead'); }
-        else { undoStack.pop(); toast('playhead fuera del asset seleccionado'); }
-      } else {
+      if (!itemOpOverSelection((kk) => trimItemTo(state, project.items, kk, t, 'l'), (n) => `${n} asset(s): trim ← al playhead`)) {
         const p = prevBoundary(state, t, project.duration);
         pushUndo();
         if (trimLeft(state, t, project.duration)) {
@@ -1455,11 +1498,7 @@ window.addEventListener('keydown', (e) => {
       }
       break;
     case 'd':
-      if (selKey !== null) {
-        pushUndo();
-        if (trimItemTo(state, project.items, selKey, t, 'r')) { refresh(); toast('asset: trim → al playhead'); }
-        else { undoStack.pop(); toast('playhead fuera del asset seleccionado'); }
-      } else {
+      if (!itemOpOverSelection((kk) => trimItemTo(state, project.items, kk, t, 'r'), (n) => `${n} asset(s): trim → al playhead`)) {
         const n2 = nextBoundary(state, t, project.duration);
         pushUndo();
         if (trimRight(state, t, project.duration)) {

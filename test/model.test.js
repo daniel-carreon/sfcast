@@ -291,3 +291,18 @@ test('sin trims el mapeo es identidad', () => {
   assert.equal(rawToOut(segs, 42), 42);
   assert.equal(outToRaw(segs, 42), 42);
 });
+
+// ---------- regresiones de los blockers de coordenadas (workflow 21 jul) ----------
+test('mover un punto por un delta OUT que cruza un trim (fix blocker startItemDrag)', () => {
+  const segs = keptSegments([{ start: 20, end: 30 }], DUR); // 10s cortados
+  // item en raw 15 (antes del corte), arrastrado +20s OUT: el correcto es 45 (salta los 10s), NO 35
+  assert.equal(outToRaw(segs, rawToOut(segs, 15) + 20), 45);
+  // arrastre que NO cruza el corte: delta OUT == delta RAW
+  assert.equal(outToRaw(segs, rawToOut(segs, 5) + 10), 15);
+});
+
+test('arrastrar costura izquierda cruzando OTRO trim (fix blocker startSeamDrag)', () => {
+  const segs0 = keptSegments([{ start: 10, end: 15 }], DUR); // el otro trim, que NO se arrastra
+  // borde izq del trim [50,60] arrastrado -40 OUT: el correcto es 5, NO 10 (la suma ingenua)
+  assert.equal(outToRaw(segs0, rawToOut(segs0, 50) - 40), 5);
+});

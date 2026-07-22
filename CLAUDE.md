@@ -52,6 +52,13 @@ rm -rf /Applications/SFCast.app && cp -R dist/SFCast.app /Applications/   # inst
    cdhash del binario). Es esperado, no un bug.
 5. **La grabación siempre queda a salvo en local** (`~/Movies/SFCast/{id}/`) aunque la
    subida falle. `--partial` reanuda.
+6. **Destino local vs VPS** (toggle del micropanel, `autoUpload` en settings.json, v1.7):
+   ON = sube al VPS al terminar (lo de siempre); OFF = SOLO guarda en local, sin subir.
+   Se empuja luego con "↑ subir" del Historial. El push posterior NO comprime en sitio
+   (`compressBeforeUpload=false`) para no degradar el master local — la compresión de
+   `Transcoder` reemplaza los originales, así que jamás corre sobre lo que guardaste para
+   editar. En modo local el clipboard recibe la RUTA local (no el link del VPS, que aún
+   no existe).
 
 ## El cuello de botella real
 

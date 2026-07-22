@@ -225,6 +225,7 @@ struct LauncherView: View {
             if mode == .window { windowRow }
             cameraRow
             micRow
+            destinoRow
             recordButton
             footer
         }
@@ -413,6 +414,26 @@ struct LauncherView: View {
             .padding(.bottom, 9)
             .background(cardShape(corners: [.bottom]))
             .opacity(s.micEnabled && micOK ? 1 : 0.25)
+        }
+    }
+
+    // ── destino: sube al VPS al terminar, o solo guarda en tu Mac ─────────────
+    // Espejo AI-first: el estado SIEMPRE se ve antes de grabar (nube = sube al
+    // VPS · disco = solo local). Persiste en settings.json (autoUpload).
+    private var destinoRow: some View {
+        row(icon: s.autoUpload ? "cloud.fill" : "internaldrive.fill") {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(s.autoUpload ? "Sube al VPS al terminar" : "Solo guarda en tu Mac")
+                    .font(.system(size: 12, weight: .medium)).foregroundColor(Theme.txt)
+                Text(s.autoUpload ? "link listo al instante" : "lo subes luego desde el Historial")
+                    .font(.system(size: 10)).foregroundColor(Theme.dim)
+            }
+            Spacer()
+            Toggle("", isOn: Binding(
+                get: { s.autoUpload },
+                set: { v in mutate { $0.autoUpload = v } }))
+                .labelsHidden().toggleStyle(.switch).tint(Theme.acc)
+                .scaleEffect(0.8)
         }
     }
 

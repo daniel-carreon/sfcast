@@ -19,6 +19,11 @@ struct AppSettings: Codable {
     /// 1200 kbps medido sobre grabación real de pantalla 1080p: 5x más chico y
     /// se leen los menús y la barra lateral. Subir a 2000 si algún día se nota.
     var videoBitrateKbps = 1200
+    /// Destino al detener: true = sube al VPS al instante (lo de siempre);
+    /// false = SOLO guarda en ~/Movies/SFCast/{id} y NO sube (lo empujas luego
+    /// desde el Historial). La grabación queda en local en AMBOS casos
+    /// (invariante #5); esto solo decide si además viaja al VPS al terminar.
+    var autoUpload = true
 
     init() {}
 
@@ -41,6 +46,7 @@ struct AppSettings: Codable {
         fps = try c.decodeIfPresent(Int.self, forKey: .fps) ?? fps
         compressBeforeUpload = try c.decodeIfPresent(Bool.self, forKey: .compressBeforeUpload) ?? compressBeforeUpload
         videoBitrateKbps = try c.decodeIfPresent(Int.self, forKey: .videoBitrateKbps) ?? videoBitrateKbps
+        autoUpload = try c.decodeIfPresent(Bool.self, forKey: .autoUpload) ?? autoUpload
     }
 
     static let dir = URL(fileURLWithPath: NSString(

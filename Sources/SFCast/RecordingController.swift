@@ -283,16 +283,27 @@ final class RecordingController {
         let began = startedAt
         let modeRaw = mode.rawValue
         let uploaderSettings = settings
+        // Destino (toggle del micropanel): true = sube al VPS al instante (lo de
+        // siempre); false = SOLO guarda en ~/Movies/SFCast/{id}. --no-upload
+        // (demo) también fuerza local. La grabación queda en local en AMBOS casos.
+        let willUpload = !noUpload && uploaderSettings.autoUpload
 
         // ⚡ EL MOMENTO MÁGICO, AHORA INSTANTÁNEO (Daniel 15 jul: "se tarda unos
         // segundos y se pierde la experiencia"): link al portapapeles y pill
         // fuera ANTES de cerrar el MP4 — cerrar el segmento tarda ~0.3-1s
         // esperando el didFinish del writer, y ese era TODO el lag percibido.
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(url, forType: .string)
+        if willUpload {
+            NSPasteboard.general.setString(url, forType: .string)
+            notify("SFCast — link copiado 🔗", "Subiendo video… te aviso cuando esté listo.")
+            Log.info("Link copiado al portapapeles: \(url)")
+        } else {
+            // Modo local: aún no hay link del VPS — copio la RUTA local para que
+            // puedas pegarla o arrastrarla (al editor, etc.) al instante.
+            NSPasteboard.general.setString(dir.path, forType: .string)
+            Log.info("Modo local: la sesión queda en \(dir.path)")
+        }
         panel.hide()
-        notify("SFCast — link copiado 🔗", "Subiendo video… te aviso cuando esté listo.")
-        Log.info("Link copiado al portapapeles: \(url)")
 
         if wasPaused {
             bubble.hide()
@@ -320,52 +331,125 @@ final class RecordingController {
         var entry = History.Entry(
             id: id, url: url,
             date: ISO8601DateFormatter().string(from: began),
-            durationSeconds: duration, mode: modeRaw, status: "uploading", title: nil)
+            durationSeconds: duration, mode: modeRaw,
+            status: willUpload ? "uploading" : "local", title: nil)
         History.upsert(entry)
 
         var ok = true
-        if noUpload {
-            Log.info("(--no-upload) sesión queda en \(dir.path)")
+        if !willUpload {
+            // SOLO local: se guarda SIN comprimir (calidad completa, útil para
+            // editar) y NO se sube. Se empuja al VPS luego desde el Historial
+            // ("↑ subir"). Dejamos meta.json escrito para ese push y abrimos el
+            // Finder en la carpeta (queda a la mano para arrastrar al editor).
+            writeMeta(to: dir, id: id, modeRaw: modeRaw, began: began,
+                      duration: duration, segments: segments)
+            notify("SFCast — guardado en tu Mac 💾",
+                   "En ~/Movies/SFCast/\(id). Lo subes al VPS desde el Historial cuando quieras.")
+            NSWorkspace.shared.activateFileViewerSelecting([dir])
         } else {
-            let uploader = Uploader(settings: uploaderSettings)
-            // Página "Procesando…" instantánea + abrir el navegador AHÍ (petición
-            // Daniel 14 jul: "cuando termine me envíe a la url donde se grabó").
-            // El worker la reemplaza con el viewer real al terminar el pipeline.
-            do {
-                try await uploader.publishPlaceholder(id: id)
-                if let u = URL(string: url + "/") { NSWorkspace.shared.open(u) }
-            } catch {
-                Log.error("Placeholder no se pudo publicar (sigo con el upload): \(error.localizedDescription)")
-            }
-            // COMPRIMIR ANTES DE SUBIR (v1.6). Va DESPUÉS del placeholder y del
-            // navegador a propósito: el link ya está copiado y la página ya está
-            // abierta, así que estos ~2s por cada 15s de video no se sienten —
-            // y a cambio el archivo sube ~5x más rápido, que es donde estaba TODA
-            // la espera real (89s de pipeline vs ~15 min de subida, medido 15 jul).
-            if uploaderSettings.compressBeforeUpload {
-                await Transcoder.compressSegments(in: dir, bitrateKbps: uploaderSettings.videoBitrateKbps)
-            }
+            // Petición Daniel 14 jul: "cuando termine me envíe a la url donde se
+            // grabó" → performUpload publica el placeholder, abre el navegador,
+            // comprime (v1.6) y sube. El worker pisa el placeholder al terminar.
             let meta = Uploader.Meta(
                 id: id, mode: modeRaw,
                 startedAt: ISO8601DateFormatter().string(from: began),
                 stoppedAt: ISO8601DateFormatter().string(from: Date()),
                 durationSeconds: duration,
                 segments: segments)
-            do {
-                try await uploader.upload(sessionDir: dir, meta: meta)
-                entry.status = "done"
-                notify("SFCast — video listo ✓", "Procesando transcript y resumen en el VPS.")
-            } catch {
-                ok = false
-                entry.status = "failed"
-                // que la página abierta no gire para siempre: pisa el placeholder
-                try? await uploader.publishFailurePage(id: id)
-                notify("SFCast — upload falló ⚠️", "El video quedó en ~/Movies/SFCast/\(id)")
-                Log.error("Upload definitivamente falló: \(error.localizedDescription)")
-            }
+            ok = await performUpload(id: id, dir: dir, url: url,
+                                     uploaderSettings: uploaderSettings, meta: meta,
+                                     openBrowser: true)
+            entry.status = ok ? "done" : "failed"
             History.upsert(entry)
         }
         return (url, ok)
+    }
+
+    /// El tail de subida al VPS: placeholder → navegador → comprime → rsync →
+    /// notifica. Compartido por stopAndWait y por "↑ Subir al VPS" del Historial.
+    /// Devuelve true si el upload llegó al servidor.
+    private func performUpload(id: String, dir: URL, url: String,
+                               uploaderSettings: AppSettings, meta: Uploader.Meta,
+                               openBrowser: Bool) async -> Bool {
+        let uploader = Uploader(settings: uploaderSettings)
+        do {
+            try await uploader.publishPlaceholder(id: id)
+            if openBrowser, let u = URL(string: url + "/") { NSWorkspace.shared.open(u) }
+        } catch {
+            Log.error("Placeholder no se pudo publicar (sigo con el upload): \(error.localizedDescription)")
+        }
+        // Comprimir antes de subir (v1.6): ~5x más chico ⇒ ~5x más rápido, que es
+        // donde estaba TODA la espera real. En el push desde el Historial esto
+        // viene APAGADO (uploaderSettings.compressBeforeUpload = false) para no
+        // tocar el master local que guardaste a propósito en calidad completa.
+        if uploaderSettings.compressBeforeUpload {
+            await Transcoder.compressSegments(in: dir, bitrateKbps: uploaderSettings.videoBitrateKbps)
+        }
+        do {
+            try await uploader.upload(sessionDir: dir, meta: meta)
+            notify("SFCast — video listo ✓", "Procesando transcript y resumen en el VPS.")
+            return true
+        } catch {
+            // que la página abierta no gire para siempre: pisa el placeholder
+            try? await uploader.publishFailurePage(id: id)
+            notify("SFCast — upload falló ⚠️", "El video quedó en ~/Movies/SFCast/\(id)")
+            Log.error("Upload definitivamente falló: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Escribe meta.json en el sessionDir (lo que lee el worker del VPS). En modo
+    /// local lo dejamos listo para que el push posterior no tenga que rearmarlo.
+    private func writeMeta(to dir: URL, id: String, modeRaw: String, began: Date,
+                           duration: Double, segments: [String]) {
+        let meta = Uploader.Meta(
+            id: id, mode: modeRaw,
+            startedAt: ISO8601DateFormatter().string(from: began),
+            stoppedAt: ISO8601DateFormatter().string(from: Date()),
+            durationSeconds: duration, segments: segments)
+        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try? enc.encode(meta).write(to: dir.appendingPathComponent("meta.json"))
+    }
+
+    /// "↑ Subir al VPS" del Historial: empuja una grabación que quedó en local
+    /// (status "local", o un "failed" que sigue en disco). Reconstruye la sesión
+    /// desde ~/Movies/SFCast/{id}. NO comprime en sitio: respeta el master local.
+    func uploadExisting(id: String) async {
+        guard state == .idle else {
+            notify("SFCast", "Termina la grabación en curso antes de subir otra.")
+            return
+        }
+        let dir = AppSettings.recordingsDir.appendingPathComponent(id)
+        let segs = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
+            .filter { $0.hasPrefix("seg-") && ($0.hasSuffix(".mp4") || $0.hasSuffix(".mov")) }
+            .sorted()
+        guard !segs.isEmpty else {
+            notify("SFCast — no está en tu Mac", "No encontré segmentos en ~/Movies/SFCast/\(id).")
+            return
+        }
+        var s = AppSettings.load()
+        s.compressBeforeUpload = false          // el master local se queda intacto
+        let url = "\(s.baseURL)/v/\(id)"
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url, forType: .string)
+        notify("SFCast — subiendo 🔗", "Link copiado. Te aviso cuando esté listo.")
+
+        var entry = History.load().first { $0.id == id } ?? History.Entry(
+            id: id, url: url, date: ISO8601DateFormatter().string(from: Date()),
+            durationSeconds: 0, mode: "screen", status: "uploading", title: nil)
+        entry.url = url
+        entry.status = "uploading"
+        History.upsert(entry)
+
+        let meta = Uploader.Meta(
+            id: id, mode: entry.mode, startedAt: entry.date,
+            stoppedAt: ISO8601DateFormatter().string(from: Date()),
+            durationSeconds: entry.durationSeconds, segments: segs)
+        let ok = await performUpload(id: id, dir: dir, url: url,
+                                     uploaderSettings: s, meta: meta, openBrowser: true)
+        entry.status = ok ? "done" : "failed"
+        History.upsert(entry)
     }
 
     func cancel() async {

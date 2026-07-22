@@ -116,12 +116,22 @@ final class StatusBar: NSObject, NSMenuDelegate {
                 let histItem = NSMenuItem(title: "Historial", action: nil, keyEquivalent: "")
                 let hsub = NSMenu()
                 for e in hist.prefix(8) {
-                    let icon = e.status == "done" ? "✓" : (e.status == "uploading" ? "↑" : "⚠️")
-                    let label = "\(icon) \(e.title ?? e.id) (\(Int(e.durationSeconds))s)"
-                    let mi = NSMenuItem(title: String(label.prefix(60)), action: #selector(copyLink(_:)), keyEquivalent: "")
-                    mi.target = self
-                    mi.representedObject = e.url
-                    hsub.addItem(mi)
+                    let name = e.title ?? e.id
+                    if e.status == "local" {
+                        // guardada solo en tu Mac: el click la SUBE al VPS
+                        let mi = NSMenuItem(title: String("💾 \(name) (\(Int(e.durationSeconds))s) — ↑ subir".prefix(60)),
+                                            action: #selector(uploadExistingItem(_:)), keyEquivalent: "")
+                        mi.target = self
+                        mi.representedObject = e.id
+                        hsub.addItem(mi)
+                    } else {
+                        let icon = e.status == "done" ? "✓" : (e.status == "uploading" ? "↑" : "⚠️")
+                        let mi = NSMenuItem(title: String("\(icon) \(name) (\(Int(e.durationSeconds))s)".prefix(60)),
+                                            action: #selector(copyLink(_:)), keyEquivalent: "")
+                        mi.target = self
+                        mi.representedObject = e.url
+                        hsub.addItem(mi)
+                    }
                 }
                 hsub.addItem(.separator())
                 let bib = NSMenuItem(title: "Abrir biblioteca…", action: #selector(openLibrary), keyEquivalent: "")
@@ -194,6 +204,10 @@ final class StatusBar: NSObject, NSMenuDelegate {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(url, forType: .string)
         notify("SFCast", "Link copiado: \(url)")
+    }
+    @objc private func uploadExistingItem(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        Task { await rc.uploadExisting(id: id) }
     }
     @objc private func openLibrary() {
         if let url = URL(string: "\(rc.settings.baseURL)/biblioteca/") {

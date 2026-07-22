@@ -1124,18 +1124,25 @@ $('viewBtn').addEventListener('click', () => {
 applyViewMode();
 
 // ---------- F: pantalla completa ----------
+// F = el VIDEO a pantalla completa REAL (edge-to-edge), no la app entera con timeline. Fullscreen
+// del #stageWrap: el navegador lo lleva a tamaño de pantalla, layoutStage recalcula el #stage a esas
+// dimensiones y el <video> (object-fit: contain) llena la pantalla lo más grande posible.
 function toggleFullscreen() {
   if (document.fullscreenElement || document.webkitFullscreenElement) {
     (document.exitFullscreen || document.webkitExitFullscreen).call(document);
     return;
   }
-  const el = document.documentElement;
+  const el = $('stageWrap');
   const req = el.requestFullscreen || el.webkitRequestFullscreen;
   if (req) {
     const p = req.call(el);
     if (p && p.catch) p.catch(() => toast('pantalla completa bloqueada por el navegador'));
   }
 }
+// al entrar/salir de fullscreen, recomputar el tamaño del escenario para el nuevo contenedor
+const onFsChange = () => { if (project) requestAnimationFrame(layoutStage); };
+document.addEventListener('fullscreenchange', onFsChange);
+document.addEventListener('webkitfullscreenchange', onFsChange);
 
 // ---------- modos estilo CapCut: 🧲 imán · 🔗 vinculación (persistidos) ----------
 function renderModes() {

@@ -318,9 +318,28 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     const wj = await wf.json();
     const waveOk = wf.ok && typeof wj.rate === 'number' && Array.isArray(wj.peaks)
       && (await page.$('#waveCanvas')) !== null;
+    // ── GESTO NUEVO (Daniel 22 jul), AL FINAL para no ensuciar los checks previos: arrastrar sobre la
+    // ONDA DE AUDIO = seleccionar rango del video principal (audio pegado) → Supr lo borra; clic derecho
+    // → Separar audio. La onda NO tiene intercepción de costura (eso es solo track0 en vista corte). ──
+    await page.keyboard.press('Escape');
+    const wr = await page.$eval('#waveRow', (el) => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; });
+    const trimBefore = await page.$eval('#trimSummary', (el) => el.textContent);
+    await page.mouse.move(wr.x + wr.w * 0.03, wr.y + wr.h / 2);   // arranque, lejos de trims previos
+    await page.mouse.down();
+    await page.mouse.move(wr.x + wr.w * 0.11, wr.y + wr.h / 2, { steps: 6 });
+    await page.mouse.up();
+    const rangeSelOk = (await page.$$('.baseRangePersist')).length === 1;      // rango persistente pintado
+    await page.keyboard.press('Delete');
+    const trimAfter = await page.$eval('#trimSummary', (el) => el.textContent);
+    const rangeDelOk = (await page.$$('.baseRangePersist')).length === 0 && trimAfter !== trimBefore; // recortó
+    await page.mouse.click(wr.x + wr.w * 0.5, wr.y + wr.h / 2, { button: 'right' });
+    const ctxOk = await page.evaluate(() => { const m = document.getElementById('ctxMenu'); return !!m && !m.hidden && /Separar audio/.test(m.textContent); });
+    await page.evaluate(() => { const it = [...document.querySelectorAll('#ctxMenu .ctxItem')].find((d) => /Separar audio/.test(d.textContent)); it && it.click(); });
+    const audioSepOk = await page.evaluate(() => document.getElementById('waveRow').classList.contains('detached'));
+    const baseGestureOk = rangeSelOk && rangeDelOk && ctxOk && audioSepOk;
     await browser.close();
-    ok = fixesOk && waveOk && panelOk && itemsOk && errors.length === 0 && /corte/.test(trimTitle);
-    detail = `seam="${trimTitle.slice(0, 40)}…" fixes=${fixesOk} wave=${waveOk} panel=${panelOk} items=${itemsOk} (drag/trim/supr/⌥rango/QE/F/vista) consola=${errors.length} errores`;
+    ok = fixesOk && waveOk && panelOk && itemsOk && baseGestureOk && errors.length === 0 && /corte/.test(trimTitle);
+    detail = `seam="${trimTitle.slice(0, 40)}…" fixes=${fixesOk} wave=${waveOk} panel=${panelOk} items=${itemsOk} baseSel/borra/audioSep=${baseGestureOk} (drag/trim/supr/⌥rango/rango-base/sep-audio/QE/F/vista) consola=${errors.length} errores`;
     if (errors.length) detail += ` :: ${errors.slice(0, 3).join(' | ')}`;
   } catch (e) {
     detail = e.message.split('\n')[0];

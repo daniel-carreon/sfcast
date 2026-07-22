@@ -316,3 +316,17 @@ test('ripple: cortar w en el pivote adelanta todo lo de la derecha w seg (out); 
   assert.equal(rawToOut(after, 20), 20);   // a la izquierda del pivote, intacto
   assert.equal(outDuration([{ start: pivot, end: pivot + w }], DUR), 95);
 });
+
+test('audioLinked: default true (audio pegado al video), se persiste SOLO cuando se separa', () => {
+  const s = newState();
+  assert.equal(s.audioLinked, true);
+  // default true → toFixes NO emite el campo (fixes lean)
+  assert.equal('audio_linked' in toFixes(s, 'v.mp4'), false);
+  // separado (clic derecho) → se emite false y fromFixes lo lee de vuelta
+  s.audioLinked = false;
+  const fx = toFixes(s, 'v.mp4');
+  assert.equal(fx.audio_linked, false);
+  assert.equal(fromFixes(fx).audioLinked, false);
+  // un fixes viejo sin el campo → default true (retrocompatible)
+  assert.equal(fromFixes({ trims: [] }).audioLinked, true);
+});

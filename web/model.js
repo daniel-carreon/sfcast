@@ -7,7 +7,7 @@ const MIN_ITEM_DUR = 0.1;
 export function newState() {
   // items = ediciones por índice del timeline base · adds = piezas NUEVAS (nacen al partir un
   // asset con S), clonan el media de un item base (`from`) con su propio placement.
-  return { splits: [], trims: [], markers: [], items: {}, adds: [] };
+  return { splits: [], trims: [], markers: [], items: {}, adds: [], audioLinked: true };
 }
 
 export function cloneState(s) {
@@ -357,6 +357,9 @@ export function toFixes(state, videoSrc, extra = {}) {
     trims: mergeRanges(state.trims).map((r) => ({ start: round3(r.start), end: round3(r.end) })),
     markers: state.markers.map((m) => ({ t: round3(m.t), nota: m.nota })),
     splits: [...state.splits],
+    // audio pegado al video por default (un solo mp4); false = Daniel lo separó (clic derecho) →
+    // señal para la fábrica de tratar el audio como pista independiente. Solo se emite si es false.
+    ...(state.audioLinked === false ? { audio_linked: false } : {}),
     ...(itemEdits.length ? { item_edits: itemEdits } : {}),
     ...(itemAdds.length ? { item_adds: itemAdds } : {}),
     ...extra,
@@ -368,6 +371,7 @@ export function fromFixes(fixes) {
   if (Array.isArray(fixes?.trims)) s.trims = mergeRanges(fixes.trims.map((r) => ({ start: +r.start, end: +r.end })));
   if (Array.isArray(fixes?.markers)) s.markers = fixes.markers.map((m) => ({ t: +m.t, nota: String(m.nota ?? '') }));
   if (Array.isArray(fixes?.splits)) s.splits = fixes.splits.map(Number).sort((a, b) => a - b);
+  s.audioLinked = fixes?.audio_linked !== false; // default true salvo que se haya separado explícito
   if (Array.isArray(fixes?.item_edits)) {
     for (const e of fixes.item_edits) {
       if (!Number.isInteger(e?.index) || e.index < 0) continue;

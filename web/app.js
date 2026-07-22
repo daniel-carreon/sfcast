@@ -82,8 +82,12 @@ function XT(traw) { return tlOf(traw) * pxPerSec; }
 // baseSelected = la pista principal (el video) entra en la selección: Q/E la incluyen y arrastrar
 // el grupo hace un RIPPLE (corta la base en el playhead y todo lo de ese lado se pule junto).
 let baseSelected = false;
+// baseRange = rango {a,b} en RAW seleccionado sobre la base (o el audio ligado) para BORRARLO con Supr.
+// Es el gesto de editor de video que pidió Daniel: arrastrar sobre el video principal para elegir un
+// tramo y borrarlo (recorta video + audio juntos, sin tener que decirle a la IA el timestamp exacto).
+let baseRange = null;
 function isSel(key) { return key === selKey || multiSel.has(key); }
-function clearSel() { selKey = null; multiSel.clear(); baseSelected = false; }
+function clearSel() { selKey = null; multiSel.clear(); baseSelected = false; baseRange = null; }
 function setSingleSel(key) {
   multiSel.clear();
   baseSelected = false; // seleccionar un asset suelto saca a la base del grupo
@@ -434,6 +438,18 @@ function renderTimeline() {
   $('trimSummary').innerHTML = (state.trims.length
     ? `<b>${cut.toFixed(1)}s</b> recortados en ${mergeRanges(state.trims).length} rango(s) · dur final ${fmt(project.duration - cut)}`
     : 'sin recortes') + (nEdits ? ` · <span class="iedit">${nEdits} asset(s) editado(s)</span>` : '');
+  // rango persistente seleccionado sobre la base (para borrar con Supr) — el gesto de editor de Daniel
+  const oldBR = $('timeline').querySelector('.baseRangePersist');
+  if (oldBR) oldBR.remove();
+  if (baseRange) {
+    const br = document.createElement('div');
+    br.className = 'baseRangePersist';
+    br.style.left = `${XT(baseRange.a)}px`;
+    br.style.width = `${Math.max(2, XT(baseRange.b) - XT(baseRange.a))}px`;
+    $('timeline').appendChild(br);
+  }
+  // audio separado del video (clic derecho) → despega la vista de la onda
+  $('waveRow').classList.toggle('detached', state.audioLinked === false);
   renderItemInfo();
   queueWave();
 }
@@ -962,6 +978,95 @@ function startRangeTrim(e) {
   window.addEventListener('pointerup', up);
 }
 
+// SELECCIÓN DE RANGO sobre la base (o el audio ligado): arrastrar pinta un rango; al soltar queda
+// SELECCIONADO (persistente) y con Supr se borra. Click simple (sin arrastre) = seek. Es el gesto de
+// cualquier editor de video que pidió Daniel: seleccionar el tramo y borrarlo (recorta video+audio).
+function startBaseRangeSelect(e) {
+  const t0 = timeFromEvent(e);
+  const sel = document.createElement('div');
+  sel.className = 'rangeSel';
+  $('timeline').appendChild(sel);
+  let t1 = t0, moved = false;
+  const paint = () => {
+    const a = Math.min(t0, t1), b = Math.max(t0, t1);
+    sel.style.left = `${XT(a)}px`;
+    sel.style.width = `${Math.max(1, XT(b) - XT(a))}px`;
+  };
+  paint();
+  const move = (ev) => { t1 = timeFromEvent(ev); if (Math.abs(XT(t1) - XT(t0)) > 3) moved = true; paint(); };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    sel.remove();
+    const a = Math.min(t0, t1), b = Math.max(t0, t1);
+    if (moved && b - a >= 0.03) {
+      selKey = null; multiSel.clear(); baseSelected = false;   // el rango es la selección activa
+      baseRange = { a: Math.round(a * 1000) / 1000, b: Math.round(b * 1000) / 1000 };
+      renderTimeline();
+      toast(`rango ${fmt(a)} → ${fmt(b)} (${(b - a).toFixed(1)}s) seleccionado · Supr lo borra · Esc cancela`);
+    } else {
+      if (selKey !== null || multiSel.size || baseSelected || baseRange) clearSel();
+      base.currentTime = Math.max(0, Math.min(project.duration, t0));   // click = seek
+      renderTimeline();
+    }
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+}
+
+// borra el rango seleccionado = recorte del base (video + audio JUNTOS; ripple a la izquierda). El
+// audio va con el video porque son el mismo mp4 (audioLinked); si Daniel lo separó, la fábrica lo
+// trata como pista aparte vía la señal audio_linked del fixes.json.
+function deleteBaseRange() {
+  if (!baseRange) return false;
+  const { a, b } = baseRange;
+  pushUndo();
+  state.trims.push({ start: a, end: b });
+  state.trims = mergeRanges(state.trims);
+  const n = applyLinkedRemoval(a, b);
+  baseRange = null;
+  validateSel();
+  refresh();
+  toast(`recorte ${fmt(a)} → ${fmt(b)} borrado (video+audio)${n ? ` · ${n} asset(s) adentro 🔗` : ''} · ⌘Z deshace`);
+  return true;
+}
+
+// clic derecho: separar/unir el audio del video principal. Por default van pegados (un solo mp4);
+// separarlos marca la intención para la fábrica (audio_linked:false en el fixes) y despega la vista
+// de la onda. La mayoría del tiempo Daniel NO separa (lo hace la IA), pero la capacidad existe.
+function toggleAudioLink() {
+  state.audioLinked = state.audioLinked === false ? true : false;
+  hideCtxMenu();
+  refresh();
+  toast(state.audioLinked === false
+    ? 'audio SEPARADO del video · la fábrica lo tratará como pista aparte · clic derecho → Unir audio'
+    : 'audio UNIDO al video · se cortan juntos');
+}
+
+// ---- menú contextual (clic derecho) sobre la base / la onda de audio ----
+function hideCtxMenu() { const m = $('ctxMenu'); if (m) m.hidden = true; }
+function showCtxMenu(x, y) {
+  const m = $('ctxMenu');
+  if (!m) return;
+  const rows = [];
+  if (baseRange) rows.push({ label: '🗑 Borrar rango seleccionado', act: () => { deleteBaseRange(); } });
+  rows.push({
+    label: state.audioLinked === false ? '🔗 Unir audio al video' : '✂ Separar audio',
+    act: () => { toggleAudioLink(); },
+  });
+  m.innerHTML = '';
+  for (const r of rows) {
+    const d = document.createElement('div');
+    d.className = 'ctxItem';
+    d.textContent = r.label;
+    d.addEventListener('click', () => { hideCtxMenu(); r.act(); });
+    m.appendChild(d);
+  }
+  m.style.left = `${x}px`;
+  m.style.top = `${y}px`;
+  m.hidden = false;
+}
+
 // RIPPLE: con la base incluida en la selección (Q/E), arrastrar el grupo CORTA la base en el
 // playhead y todo lo de ese lado (base + overlays) se pule junto — como agarrar la parte derecha
 // del timeline entero y jalarla. Los overlays ripplean SOLOS (sus posiciones out se recomputan por
@@ -1043,6 +1148,9 @@ for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2'
       if (seam) { startSeamDrag(e, seam, +seam.dataset.tidx); return; }
     }
     if (e.altKey) { startRangeTrim(e); return; }
+    // base / audio: arrastrar = seleccionar un RANGO para borrarlo; click = seek. El gesto de editor
+    // de video que pidió Daniel (22 jul): seleccionar el tramo del video principal y borrarlo.
+    if (e.currentTarget.id === 'track0' || e.currentTarget.id === 'waveRow') { startBaseRangeSelect(e); return; }
     if (selKey !== null || multiSel.size || baseSelected) { clearSel(); renderTimeline(); } // click en vacío deselecciona
     seekFromEvent(e);
     const move = (ev) => seekFromEvent(ev);
@@ -1051,6 +1159,16 @@ for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2'
     window.addEventListener('pointerup', up);
   });
 }
+
+// clic derecho sobre la base o la onda de audio → menú contextual (separar audio / borrar rango)
+for (const id of ['track0', 'waveRow']) {
+  $(id).addEventListener('contextmenu', (e) => { e.preventDefault(); showCtxMenu(e.clientX, e.clientY); });
+}
+// cerrar el menú al clicar fuera (captura, antes que otros handlers)
+document.addEventListener('pointerdown', (e) => {
+  const m = $('ctxMenu');
+  if (m && !m.hidden && !m.contains(e.target)) hideCtxMenu();
+}, true);
 
 // doble-click en un recorte (raw) o en una costura (corte, la más cercana) = eliminarlo (restaura)
 $('track0').addEventListener('dblclick', (e) => {
@@ -1709,8 +1827,13 @@ window.addEventListener('keydown', (e) => {
     case 'y': togglePublishPanel(); break;
     case ',': case '<': cycleSpeed(-1); break;
     case '.': case '>': cycleSpeed(1); break;
-    case 'backspace': case 'delete': if (selectedKeys().length) { e.preventDefault(); removeSelectedItem(); } break;
-    case 'escape': if (selKey !== null || multiSel.size || baseSelected) { clearSel(); renderTimeline(); } break;
+    case 'backspace': case 'delete':
+      if (baseRange) { e.preventDefault(); deleteBaseRange(); }           // rango del base seleccionado → recorta
+      else if (selectedKeys().length) { e.preventDefault(); removeSelectedItem(); }
+      break;
+    case 'escape':
+      if (selKey !== null || multiSel.size || baseSelected || baseRange) { clearSel(); renderTimeline(); }
+      break;
     case 'arrowup': e.preventDefault(); navigateBlocks(1); break;    // siguiente bloque (CapCut)
     case 'arrowdown': e.preventDefault(); navigateBlocks(-1); break; // bloque anterior
     // ←/→ avanzan en el tiempo del TIMELINE: en vista corte el paso SALTA los trims

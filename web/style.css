@@ -42,6 +42,39 @@ body {
 /* F = video a pantalla completa REAL: el escenario llena toda la pantalla (edge-to-edge) */
 #stageWrap:fullscreen { width: 100vw; height: 100vh; background: #000; }
 #stageWrap:-webkit-full-screen { width: 100vw; height: 100vh; background: #000; }
+
+/* barra de controles en pantalla completa (tipo reproductor, auto-oculta) */
+#fsBar {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 30;
+  display: flex; align-items: center; gap: 12px; padding: 22px 24px 18px;
+  background: linear-gradient(180deg, transparent, rgba(0,0,0,.85));
+  transition: opacity .25s ease;
+}
+#fsBar.fsHidden { opacity: 0; pointer-events: none; }
+.fsBtn {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+  width: 36px; height: 36px; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.16);
+  border-radius: 8px; color: #fff; cursor: pointer; transition: background .12s;
+}
+.fsBtn:hover { background: rgba(255,255,255,.18); }
+.fsBtn svg { width: 18px; height: 18px; display: block; }
+.fsTime { color: #fff; font-variant-numeric: tabular-nums; font-size: 13px; white-space: nowrap; flex: 0 0 auto; }
+#fsSeek { flex: 1 1 auto; height: 6px; background: rgba(255,255,255,.22); border-radius: 3px; position: relative; cursor: pointer; touch-action: none; }
+#fsSeek:hover { height: 8px; }
+#fsSeekFill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--sf); border-radius: 3px; }
+#fsSeekKnob { position: absolute; top: 50%; left: 0; width: 13px; height: 13px; border-radius: 50%; background: #fff; transform: translate(-50%, -50%); box-shadow: 0 0 5px rgba(0,0,0,.6); }
+#fsSpeeds { display: flex; gap: 3px; flex: 0 0 auto; }
+.fsSpeed { background: rgba(255,255,255,.08); color: #d6d6de; border: 1px solid rgba(255,255,255,.16); border-radius: 6px; padding: 6px 9px; font-size: 11px; font-weight: 700; cursor: pointer; }
+.fsSpeed:hover { background: rgba(255,255,255,.18); }
+.fsSpeed.active { background: var(--sf); color: #111; border-color: var(--sf); }
+#fsHelp {
+  position: absolute; left: 50%; bottom: 92px; transform: translateX(-50%); z-index: 31;
+  max-width: min(760px, 90vw); text-align: center;
+  background: rgba(12,12,16,.92); border: 1px solid rgba(255,255,255,.16); border-radius: 12px;
+  padding: 14px 20px; color: #b9b9c6; font-size: 13px; line-height: 2;
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+}
+#fsHelp b { color: var(--sf); }
 #stage { position: relative; background: #000; overflow: hidden; }
 #stage video, #stage img { position: absolute; inset: 0; width: 100%; height: 100%; }
 #base { object-fit: contain; z-index: 1; }

@@ -17,6 +17,7 @@ const SPEEDS = [1, 1.25, 1.5, 2];
 
 // ---------- iconos de la barra: Lucide (lucide.dev, ISC), SVG inline · cero dependencias ----------
 const LU = (paths) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+const LUF = (paths) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" stroke="none">${paths}</svg>`; // relleno (play/pausa)
 const IC = {
   magnet: LU('<path d="m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15"/><path d="m5 8 4 4"/><path d="m12 15 4 4"/>'),
   link: LU('<path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" x2="16" y1="12" y2="12"/>'),
@@ -25,6 +26,9 @@ const IC = {
   zoomIn: LU('<circle cx="11" cy="11" r="8"/><line x1="21" x2="16.65" y1="21" y2="16.65"/><line x1="11" x2="11" y1="8" y2="14"/><line x1="8" x2="14" y1="11" y2="11"/>'),
   fit: LU('<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>'),
   gear: LU('<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>'),
+  play: LUF('<path d="M8 5v14l11-7z"/>'),
+  pause: LUF('<path d="M6 4h4v16H6zM14 4h4v16h-4z"/>'),
+  keyboard: LU('<rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.01"/><path d="M10 8h.01"/><path d="M14 8h.01"/><path d="M18 8h.01"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/><path d="M7 16h10"/>'),
 };
 $('magnetBtn').innerHTML = IC.magnet;
 $('linkBtn').innerHTML = IC.link;
@@ -274,6 +278,16 @@ function loop() {
     // en vista corte el reloj es el del RESULTADO (tiempo final), como CapCut
     $('timecode').textContent = `${fmt(tlOf(t))} / ${fmt(tlDur())}`;
     $('playBtn').textContent = playing ? '⏸' : '▶';
+    // controles de pantalla completa (solo cuando aplica): scrub + reloj + icono play/pausa
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      const cur = tlOf(t), dur = tlDur();
+      const frac = dur > 0 ? Math.max(0, Math.min(1, cur / dur)) : 0;
+      $('fsSeekFill').style.width = `${frac * 100}%`;
+      $('fsSeekKnob').style.left = `${frac * 100}%`;
+      $('fsTime').textContent = `${fmt(cur)} / ${fmt(dur)}`;
+      const want = playing ? 'pause' : 'play';
+      if ($('fsPlay').dataset.ic !== want) { $('fsPlay').innerHTML = playing ? IC.pause : IC.play; $('fsPlay').dataset.ic = want; }
+    }
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
@@ -1072,6 +1086,7 @@ function setSpeed(s) {
   for (const m of mounted.values()) if (m.el.tagName === 'VIDEO') m.el.playbackRate = s;
   $('speedBadge').textContent = s + 'x';
   for (const b of $('speeds').children) b.classList.toggle('active', +b.dataset.speed === s);
+  for (const b of $('fsSpeeds').children) b.classList.toggle('active', +b.dataset.speed === s);
 }
 function cycleSpeed(dir) {
   const i = SPEEDS.indexOf(speed);
@@ -1139,8 +1154,75 @@ function toggleFullscreen() {
     if (p && p.catch) p.catch(() => toast('pantalla completa bloqueada por el navegador'));
   }
 }
-// al entrar/salir de fullscreen, recomputar el tamaño del escenario para el nuevo contenedor
-const onFsChange = () => { if (project) requestAnimationFrame(layoutStage); };
+// ---------- barra de controles en pantalla completa (tipo reproductor, auto-oculta) ----------
+$('fsPlay').innerHTML = IC.play;
+$('fsKeys').innerHTML = IC.keyboard;
+(function buildFsSpeeds() {
+  const box = $('fsSpeeds');
+  for (const s of SPEEDS) {
+    const b = document.createElement('button');
+    b.className = 'fsSpeed'; b.textContent = s + 'x'; b.dataset.speed = s;
+    if (s === speed) b.classList.add('active');
+    b.addEventListener('click', (e) => { e.stopPropagation(); setSpeed(s); fsShowBar(); });
+    box.appendChild(b);
+  }
+})();
+$('fsPlay').addEventListener('click', (e) => { e.stopPropagation(); togglePlay(); fsShowBar(); });
+$('fsKeys').addEventListener('click', (e) => { e.stopPropagation(); $('fsHelp').hidden = !$('fsHelp').hidden; fsShowBar(); });
+
+// scrub: la barra representa el TIMELINE (out en vista corte); click/arrastre = seek
+function fsSeekTo(e) {
+  const r = $('fsSeek').getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  base.currentTime = Math.max(0, Math.min(project.duration, tlToRaw(frac * tlDur())));
+}
+$('fsSeek').addEventListener('pointerdown', (e) => {
+  e.stopPropagation();
+  fsSeekTo(e);
+  const move = (ev) => { fsSeekTo(ev); fsShowBar(); };
+  const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+});
+
+// auto-ocultar: la barra desaparece (con el cursor) tras inactividad si está reproduciendo
+let fsHideTimer = null;
+function fsShowBar() {
+  if (!(document.fullscreenElement || document.webkitFullscreenElement)) return;
+  const bar = $('fsBar');
+  bar.hidden = false;
+  bar.classList.remove('fsHidden');
+  $('stageWrap').style.cursor = '';
+  clearTimeout(fsHideTimer);
+  fsHideTimer = setTimeout(() => {
+    if ((document.fullscreenElement || document.webkitFullscreenElement) && !base.paused && $('fsHelp').hidden) {
+      bar.classList.add('fsHidden');
+      $('stageWrap').style.cursor = 'none';
+    }
+  }, 2600);
+}
+// click en el video (no en la barra) = play/pausa, como un reproductor
+$('stageWrap').addEventListener('click', (e) => {
+  if (!(document.fullscreenElement || document.webkitFullscreenElement)) return;
+  if (e.target.closest('#fsBar') || e.target.closest('#fsHelp')) return;
+  togglePlay(); fsShowBar();
+});
+
+// al entrar/salir de fullscreen: recomputar el escenario y prender/apagar la barra + su auto-hide
+const onFsChange = () => {
+  const fs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  if (project) requestAnimationFrame(layoutStage);
+  if (fs) {
+    fsShowBar();
+    $('stageWrap').addEventListener('pointermove', fsShowBar);
+  } else {
+    $('fsBar').hidden = true;
+    $('fsHelp').hidden = true;
+    $('stageWrap').style.cursor = '';
+    $('stageWrap').removeEventListener('pointermove', fsShowBar);
+    clearTimeout(fsHideTimer);
+  }
+};
 document.addEventListener('fullscreenchange', onFsChange);
 document.addEventListener('webkitfullscreenchange', onFsChange);
 

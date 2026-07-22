@@ -21,6 +21,17 @@
       <video id="base" playsinline preload="auto"></video>
       <div id="overlays"></div>
     </div>
+    <!-- controles de pantalla completa: viven DENTRO del elemento fullscreen para ser visibles -->
+    <div id="fsHelp" hidden>
+      <b>Espacio</b> play · <b>←/→</b> 1 frame (⇧×10) · <b>&lt; &gt;</b> velocidad · <b>↑/↓</b> bloque · <b>Q/E</b> selección · <b>S/A/D</b> corte · <b>M</b> marcador · <b>F</b> o <b>Esc</b> salir
+    </div>
+    <div id="fsBar" hidden>
+      <button id="fsPlay" class="fsBtn" title="play / pausa (Espacio)"></button>
+      <span id="fsTime" class="fsTime">0:00 / 0:00</span>
+      <div id="fsSeek" title="arrastra para moverte por el video"><div id="fsSeekFill"></div><div id="fsSeekKnob"></div></div>
+      <div id="fsSpeeds" role="group" aria-label="velocidad"></div>
+      <button id="fsKeys" class="fsBtn" title="atajos"></button>
+    </div>
   </div>
   <div id="dragSidebar" title="arrastra para redimensionar el panel"></div>
   <aside id="sidebar">

@@ -12,6 +12,7 @@
   <div id="brand"><span class="sf">SF</span>STUDIO <span id="projname"></span></div>
   <div id="speeds" role="group" aria-label="velocidad"></div>
   <button id="exportBtn" title="Exportar fixes.json (⌘E)">Exportar fixes</button>
+  <button id="gearBtn" title="Atajos y ajustes"></button>
 </header>
 
 <main id="main">
@@ -64,14 +65,44 @@
   </div>
 </section>
 
-<footer id="help">
-  <b>Q/E</b> seleccionar todo (+ la base) a la izq./der. del cursor → arrastra = ripple &nbsp;·&nbsp; <b>🟥 ver huecos</b> muestra los cortes en rojo &nbsp;·&nbsp; <b>↑/↓</b> bloque sig./ant.
-  &nbsp;·&nbsp; <b>S/A/D</b> split·trim← ·trim→ (del asset seleccionado; sin selección = base)
-  &nbsp;·&nbsp; <b>⌥-arrastre</b> recorta rango &nbsp;·&nbsp; <b>costura ✂</b> click verifica · bordes ajustan · doble-click restaura
-  &nbsp;·&nbsp; <b>Supr</b> borra &nbsp;·&nbsp; <b>⌘Z/⌘⇧Z</b> deshacer/rehacer &nbsp;·&nbsp; <b>🧲</b> imán &nbsp;·&nbsp; <b>🔗</b> vinculación
-  &nbsp;·&nbsp; <b>M</b> marcador &nbsp;·&nbsp; <b>F</b> pantalla completa &nbsp;·&nbsp; <b>⌘E</b> exportar &nbsp;·&nbsp; <b>⌘Y</b> publicar
-  &nbsp;·&nbsp; <b>&lt; &gt;</b> velocidad &nbsp;·&nbsp; <b>Espacio</b> play &nbsp;·&nbsp; <b>←/→</b> 1 frame (⇧×10 · ⌥ mueve el asset)
-</footer>
+<div id="helpPanel" hidden>
+  <header class="hpHead"><span>Atajos</span><button id="hpClose" title="cerrar (Esc)">✕</button></header>
+  <div class="hpBody">
+    <section>
+      <h4>Reproducción</h4>
+      <div class="hpRow"><span class="hpKeys"><kbd>Espacio</kbd></span><span class="hpDesc">play / pausa</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>&lt;</kbd><kbd>&gt;</kbd></span><span class="hpDesc">velocidad (1 · 1.25 · 1.5 · 2×)</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>←</kbd><kbd>→</kbd></span><span class="hpDesc">1 frame (<kbd>⇧</kbd> ×10)</span></div>
+    </section>
+    <section>
+      <h4>Navegación y selección</h4>
+      <div class="hpRow"><span class="hpKeys"><kbd>↑</kbd><kbd>↓</kbd></span><span class="hpDesc">bloque siguiente / anterior</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>Q</kbd><kbd>E</kbd></span><span class="hpDesc">seleccionar todo (+ la base) a la izq./der. del cursor → arrastra el grupo = <b>ripple</b></span></div>
+    </section>
+    <section>
+      <h4>Corte del base</h4>
+      <div class="hpRow"><span class="hpKeys"><kbd>S</kbd><kbd>A</kbd><kbd>D</kbd></span><span class="hpDesc">split · trim← · trim→ (sin selección = base)</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>⌥</kbd>+arrastre</span><span class="hpDesc">recorta un rango</span></div>
+      <div class="hpRow"><span class="hpKeys">costura ✂</span><span class="hpDesc">click verifica · bordes ajustan · doble-click restaura</span></div>
+      <div class="hpRow"><span class="hpKeys tijeras">tijeras</span><span class="hpDesc">botón de la barra: ver los huecos en <b>rojo</b></span></div>
+    </section>
+    <section>
+      <h4>Assets (overlays)</h4>
+      <div class="hpRow"><span class="hpKeys">arrastrar</span><span class="hpDesc">mover · bordes = trim</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>⌥</kbd><kbd>←</kbd><kbd>→</kbd></span><span class="hpDesc">mover el asset 1 frame (<kbd>⇧</kbd> ×10)</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>Supr</kbd></span><span class="hpDesc">borrar el / los seleccionados</span></div>
+    </section>
+    <section>
+      <h4>Modos y general</h4>
+      <div class="hpRow"><span class="hpKeys">imán · 🔗</span><span class="hpDesc">snap al arrastrar · vinculación (recorte se lleva los assets adentro)</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>⌘Z</kbd><kbd>⌘⇧Z</kbd></span><span class="hpDesc">deshacer / rehacer</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>M</kbd></span><span class="hpDesc">marcador con nota</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>F</kbd></span><span class="hpDesc">pantalla completa</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>⌘E</kbd></span><span class="hpDesc">exportar fixes.json</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>⌘Y</kbd></span><span class="hpDesc">panel de publicación</span></div>
+    </section>
+  </div>
+</div>
 
 <div id="popover" hidden>
   <input id="popInput" type="text" placeholder="nota del marcador…" autocomplete="off">

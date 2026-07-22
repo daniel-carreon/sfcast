@@ -204,8 +204,41 @@ body {
 }
 #playhead::before { content: ''; position: absolute; top: 0; left: -5px; border: 6px solid transparent; border-top-color: var(--sf); }
 
-#help { padding: 6px 16px; color: #55555f; border-top: 1px solid var(--line); font-size: 11px; background: var(--panel); }
-#help b { color: var(--dim); }
+/* botón de engrane (top-right, junto a Exportar fixes) */
+#gearBtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 28px; background: #17171d; color: var(--dim);
+  border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
+  transition: color .15s, border-color .15s;
+}
+#gearBtn svg { width: 16px; height: 16px; display: block; }
+#gearBtn:hover, #gearBtn.on { color: var(--text); border-color: #3a3a44; }
+
+/* panel de Atajos (dropdown top-right; antes vivía en el footer) */
+#helpPanel {
+  position: fixed; top: 48px; right: 10px; width: 384px; max-height: 78vh; z-index: 260;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 14px 44px rgba(0,0,0,.55); display: flex; flex-direction: column; overflow: hidden;
+}
+.hpHead { display: flex; align-items: center; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+.hpHead span { font-weight: 800; letter-spacing: .12em; font-size: 11.5px; text-transform: uppercase; color: var(--sf); }
+#hpClose { margin-left: auto; background: none; border: 0; color: var(--dim); cursor: pointer; font-size: 14px; line-height: 1; }
+#hpClose:hover { color: var(--text); }
+.hpBody { padding: 6px 14px 14px; overflow-y: auto; }
+.hpBody section { margin-top: 13px; }
+.hpBody section:first-child { margin-top: 6px; }
+.hpBody h4 { font-size: 9px; text-transform: uppercase; letter-spacing: .18em; color: #55555f; margin: 0 0 5px; }
+.hpRow { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; font-size: 12px; }
+.hpKeys { flex: 0 0 104px; display: flex; gap: 3px; flex-wrap: wrap; align-items: baseline; color: var(--dim); font-size: 11px; }
+.hpKeys.tijeras { color: #ff5c5c; font-weight: 700; }
+.hpDesc { flex: 1; line-height: 1.45; color: #c6c6d2; }
+.hpDesc b { color: var(--text); }
+kbd {
+  font: 600 10.5px/1 "SF Mono", Menlo, ui-monospace, monospace; color: var(--text);
+  background: #22222a; border: 1px solid #34343f; border-bottom-width: 2px;
+  border-radius: 4px; padding: 2px 5px; min-width: 15px; text-align: center; display: inline-block;
+}
+.hpDesc kbd { border-bottom-width: 1px; }
 
 #popover { position: fixed; z-index: 100; }
 #popInput {

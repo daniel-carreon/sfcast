@@ -24,12 +24,29 @@ const IC = {
   zoomOut: LU('<circle cx="11" cy="11" r="8"/><line x1="21" x2="16.65" y1="21" y2="16.65"/><line x1="8" x2="14" y1="11" y2="11"/>'),
   zoomIn: LU('<circle cx="11" cy="11" r="8"/><line x1="21" x2="16.65" y1="21" y2="16.65"/><line x1="11" x2="11" y1="8" y2="14"/><line x1="8" x2="14" y1="11" y2="11"/>'),
   fit: LU('<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>'),
+  gear: LU('<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>'),
 };
 $('magnetBtn').innerHTML = IC.magnet;
 $('linkBtn').innerHTML = IC.link;
 $('zoomOut').innerHTML = IC.zoomOut;
 $('zoomIn').innerHTML = IC.zoomIn;
 $('zoomFit').innerHTML = IC.fit;
+$('gearBtn').innerHTML = IC.gear;
+
+// ---------- panel de Atajos (engrane top-right) ----------
+function toggleHelpPanel(force) {
+  const p = $('helpPanel');
+  const open = force !== undefined ? force : p.hidden;
+  p.hidden = !open;
+  $('gearBtn').classList.toggle('on', open);
+}
+$('gearBtn').addEventListener('click', (e) => { e.stopPropagation(); toggleHelpPanel(); });
+$('hpClose').addEventListener('click', () => toggleHelpPanel(false));
+// click fuera del panel (y que no sea el engrane) lo cierra
+document.addEventListener('pointerdown', (e) => {
+  if ($('helpPanel').hidden) return;
+  if (!e.target.closest('#helpPanel') && !e.target.closest('#gearBtn')) toggleHelpPanel(false);
+});
 
 let project = null;
 let state = newState();
@@ -1545,6 +1562,8 @@ window.addEventListener('keydown', (e) => {
   // las teclas del timeline (incl. ⌘Z) menos las que los cierran, para no mutar el proyecto detrás
   if (!$('modal').hidden) { if (k === 'escape') $('modal').hidden = true; return; }
   if (!$('publishPanel').hidden) { if (k === 'escape' || k === 'y') { e.preventDefault(); togglePublishPanel(); } return; }
+  // el panel de atajos NO bloquea teclas (es referencia); solo Esc lo cierra
+  if (!$('helpPanel').hidden && k === 'escape') { toggleHelpPanel(false); return; }
 
   if ((e.metaKey || e.ctrlKey) && k === 'z') {
     e.preventDefault();

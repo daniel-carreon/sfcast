@@ -82,23 +82,20 @@ body {
 }
 #timecode { font-variant-numeric: tabular-nums; color: var(--text); font-size: 13px; }
 #speedBadge { color: var(--sf); font-weight: 800; font-size: 13px; min-width: 44px; }
+/* barra de iconos (Lucide): magnet · link · huecos · zoom — botones cuadrados uniformes */
 #modesCtl { margin-left: auto; display: flex; gap: 4px; }
-#modesCtl button {
-  background: #17171d; border: 1px solid var(--line); border-radius: 6px;
-  padding: 3px 9px; cursor: pointer; font-size: 13px; filter: grayscale(1) opacity(.55);
-  transition: filter .15s, border-color .15s;
-}
-#modesCtl button:hover { filter: grayscale(.4) opacity(.85); }
-#modesCtl button.active { filter: none; border-color: var(--sf); box-shadow: 0 0 6px rgba(255,145,1,.35); }
 #zoomCtl, #viewCtl { display: flex; gap: 4px; }
-#zoomCtl button, #viewCtl button {
-  background: #17171d; color: var(--dim); border: 1px solid var(--line);
-  border-radius: 6px; padding: 3px 10px; cursor: pointer; font-weight: 700;
+#modesCtl button, #zoomCtl button, #viewCtl button {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 26px; background: #17171d; color: var(--dim);
+  border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s, box-shadow .15s;
 }
-#zoomCtl button:hover, #viewCtl button:hover { color: var(--text); }
-#viewBtn { color: var(--sf); border-color: #6b4a12; font-size: 12px; white-space: nowrap; }
-/* huecos en rojo ACTIVOS: el botón se tiñe de rojo para avisar que estás viendo el espacio recortado */
-#viewBtn.on { color: #ff6b6b; border-color: #7a2a2a; background: #1a1012; }
+#modesCtl button svg, #zoomCtl button svg, #viewCtl button svg { width: 15px; height: 15px; display: block; }
+#modesCtl button:hover, #zoomCtl button:hover, #viewCtl button:hover { color: var(--text); border-color: #3a3a44; }
+/* toggles activos: imán/vinculación en oro, huecos en rojo */
+#modesCtl button.active { color: var(--sf); border-color: var(--sf); box-shadow: 0 0 6px rgba(255,145,1,.35); }
+#viewBtn.on { color: #ff5c5c; border-color: #7a2a2a; background: #1a1012; box-shadow: 0 0 6px rgba(255,77,77,.3); }
 
 #timelinePane { border-top: 1px solid var(--line); background: #0c0c10; flex-shrink: 0; }
 #timelineScroll { overflow-x: auto; overflow-y: hidden; }

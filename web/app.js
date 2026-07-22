@@ -15,6 +15,22 @@ const $ = (id) => document.getElementById(id);
 const base = $('base');
 const SPEEDS = [1, 1.25, 1.5, 2];
 
+// ---------- iconos de la barra: Lucide (lucide.dev, ISC), SVG inline · cero dependencias ----------
+const LU = (paths) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+const IC = {
+  magnet: LU('<path d="m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15"/><path d="m5 8 4 4"/><path d="m12 15 4 4"/>'),
+  link: LU('<path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" x2="16" y1="12" y2="12"/>'),
+  scissors: LU('<circle cx="6" cy="6" r="3"/><path d="M8.12 8.12 12 12"/><path d="M20 4 8.12 15.88"/><circle cx="6" cy="18" r="3"/><path d="M14.8 14.8 20 20"/>'),
+  zoomOut: LU('<circle cx="11" cy="11" r="8"/><line x1="21" x2="16.65" y1="21" y2="16.65"/><line x1="8" x2="14" y1="11" y2="11"/>'),
+  zoomIn: LU('<circle cx="11" cy="11" r="8"/><line x1="21" x2="16.65" y1="21" y2="16.65"/><line x1="11" x2="11" y1="8" y2="14"/><line x1="8" x2="14" y1="11" y2="11"/>'),
+  fit: LU('<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>'),
+};
+$('magnetBtn').innerHTML = IC.magnet;
+$('linkBtn').innerHTML = IC.link;
+$('zoomOut').innerHTML = IC.zoomOut;
+$('zoomIn').innerHTML = IC.zoomIn;
+$('zoomFit').innerHTML = IC.fit;
+
 let project = null;
 let state = newState();
 const undoStack = [];
@@ -1072,7 +1088,7 @@ $('zoomFit').addEventListener('click', () => { fitTimeline(); renderTimeline(); 
 // su duración real (el "espacio vacío en rojo" que Daniel quiere ver a pedido).
 function applyViewMode() {
   const compact = viewMode === 'compact';
-  $('viewBtn').textContent = compact ? '🟥 ver huecos' : '✂ ocultar huecos';
+  $('viewBtn').innerHTML = IC.scissors; // icon-only; el estado se comunica con el color (.on = rojo)
   $('viewBtn').classList.toggle('on', !compact);
   $('viewBtn').title = compact
     ? 'Mostrar los cortes como HUECOS ROJOS (el material recortado, con su hueco real). Ahora ves el corte compacto: costuras, sin rojo.'

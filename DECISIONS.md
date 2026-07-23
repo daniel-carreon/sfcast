@@ -278,3 +278,99 @@ midió antes de tocar nada, y la pregunta apuntaba al lugar equivocado:
    del directorio. Comprimir es lo único del flujo que toca el MP4 en sitio;
    quería probar el camino real (compuertas, replace, temporal) contra videos
    de verdad sin arriesgar una grabación.
+
+## v2.0 — Modo Estudio: escenas + doble salida (22 jul 2026)
+
+Spec: `business-os/.claude/specs/sfcast-modo-estudio-2026-07-22-spec.md` (compilada
+con goal-compiler; grafo del sistema adentro). Outcome: estudio de grabación
+soberano estilo OBS/Streamlabs con piel Screen Studio, ADITIVO sobre el Loom.
+
+### Stack elegido y por qué
+
+| Capa | Elección | Por qué |
+|---|---|---|
+| Compositor | **CoreImage → CVPixelBuffer** (pool IOSurface, render loop DispatchSourceTimer @ fps) | GPU sin shaders propios ni deps; 0 drops medidos (242 frames). Metal crudo = más control, mucho más código |
+| Frames pantalla | **SCStream + SCStreamOutput** (BGRA) — NUEVO junto al SCRecordingOutput | SCRecordingOutput no expone frames; el preview/programa los necesita. El Loom conserva su ruta barata intacta |
+| Raw pantalla | **SCRecordingOutput colgado del MISMO stream del preview** (hot add/remove al grabar) | La captura ya corre; añadir el writer es gratis. Probado: didFinish llega tras removeRecordingOutput |
+| Raw cámara | **AVCaptureMovieFileOutput** en sesión PROPIA del Estudio (+ mic input) | Patrón camOnly probado; .mov con voz = estilo Screen Studio |
+| Programa | **AVAssetWriter** HEVC (bitrate escalado por píxeles, ~0.12 bits/px/frame) + **2 pistas AAC separadas** (mic / sistema) | Pistas separadas = editables; los players tocan la 1 (mic). Reloj host compartido (SCK y AVCapture timestampean igual) |
+| Preview | IOSurface del pixel buffer → `layer.contents` (aspect-fit) | Cero framework extra; 30fps sin sudar |
+| UI desktop | **SwiftUI en NSWindow** (NSHostingView), anatomía OBS (Escenas/Fuentes/Preview/Mixer/Salidas), piel oscura + mostaza | SwiftUI ya vive en el repo (micropanel); ventana con `sharingType=.none` (patrón pill) |
+| Modelo | scenes.json aparte de settings.json, decode tolerante, rects NORMALIZADOS (0-1) | El layout sobrevive cambios de resolución; presets de fábrica incl. escena "Loom" POR COMPOSICIÓN |
+| Programa → VPS | El programa se llama **seg-001.mp4** + meta.json | Compat total: "↑ subir" del Historial y el worker lo tratan como video normal |
+| QA | `--studiotest N` + fuente **Patrón de prueba** sintética | E2E (compositor/escenas/switch/writers/manifest) SIN permisos TCC; PNGs del frame de programa como evidencia |
+
+### Descubrimientos técnicos
+
+1. **TCC se atribuye al proceso responsable, no al binario**: el MISMO
+   /Applications/SFCast.app corrido desde terminal sale "sin permisos" (la
+   terminal es la responsable); lanzado con `open` (launchd) sale con cámara y
+   pantalla completas. Por eso --studiotest se corre con `open -W --args`.
+2. **`open -W` con la app ya corriendo NO lanza instancia nueva** — activa la
+   existente y espera a que ELLA muera (parece cuelgue). Quit primero.
+3. **`exit(0)` NO ejecuta `defer`**: el restore de scenes.json del QA tuvo que
+   ser explícito antes de cada salida.
+4. **AVCaptureSession arranca lento**: camera.mov dura ~2s menos que screen.mp4
+   (t0 distinto). Alineación derivable: ambos terminan juntos (endedAt del
+   manifest) ⇒ t0_cam = end - duración. Documentado como límite v1.
+5. Cross-guards Loom⇄Estudio: los start* del Loom rebotan si el Estudio GRABA;
+   prepareSession cierra el Estudio en preview (misma regla que el micropanel).
+   Abrir el Estudio esconde micropanel y burbuja (el vúmetro pelea el mic — v1.4).
+
+### Límites conocidos (v2.0, honestos)
+
+- Transform con sliders, no drag-on-canvas (el preview no es interactivo aún).
+- Fuentes: display principal completo (sin picker de ventana/región en Estudio),
+  UNA cámara. Audio global, no por escena. Sin transiciones en el switch.
+- El push al VPS de una sesión de Estudio sube la carpeta ENTERA (raws incluidos).
+- Grabación de Estudio no sobrevive reinicio de la app (igual que la pausa Loom).
+
+## v2.1 — Canvas interactivo + Ajustes (22 jul 2026, feedback de Daniel)
+
+1. **Preview interactivo estilo OBS**: clic selecciona (el de más arriba en la
+   pila), drag mueve, 8 handles (esquinas + bordes) redimensionan — mapeo
+   aspect-fit view↔canvas normalizado; overlay CAShapeLayer mostaza SOLO en la
+   ventana (sharingType=.none ⇒ jamás en la grabación). Transform en vivo sin
+   golpear disco; persiste al soltar. Los sliders del inspector MURIERON.
+2. **Fuentes angosto** (210px) + fit/burbuja compactos bajo la lista.
+3. **Escenas con drag & drop** (List + .onMove).
+4. **Ajustes 80/20 de GRABACIÓN** (gear, no streaming): FPS 24/30/60, canvas
+   (nativo/1080p/1440p), calidad del programa (bits/px/frame 0.16/0.12/0.08),
+   cámara y mic (MISMOS AppSettings del Loom — una sola config), audio sistema,
+   carpeta de salida. "Aplicar" reinicia el motor.
+5. **"La escena Loom no funciona" = pantalla sin permiso post-rebuild.** Cura:
+   `retryScreenIfNeeded()` cada ~3s engancha el tap cuando el permiso llega
+   (sin reabrir), y el chip "Pantalla: dar permiso" es clicable (prompt + pane).
+
+## v2.2 — Pulido del Estudio (22 jul 2026, ronda 2 de feedback)
+
+1. **Doble-clic en titlebar = zoom**: `.fullSizeContentView` extendía el
+   contenido bajo el titlebar y se comía el doble-clic. Fuera del styleMask.
+2. **Overlay de selección morado, SOLO contorno**: el CAShapeLayer único
+   rellenaba el rect completo de mostaza (bug). Ahora 2 capas: borde stroke
+   morado #8C27F1 sin fill + handles rellenos.
+3. **Simetría Streamlabs**: las 4 columnas del strip inferior a maxWidth
+   .infinity (ancho igual, cero huecos).
+4. **Drag & drop de escenas REAL**: List.onMove no funciona en macOS con
+   controles dentro de la fila → onDrag/onDrop manual con DropDelegate
+   (reorden vivo en dropEntered, persist en performDrop). Tap selecciona.
+5. **Botón "Modo Loom"** fijo en el panel Escenas: cierra el Estudio y abre el
+   micropanel clásico (pedido de Daniel: la escena compuesta no sustituye al
+   flujo Loom real — se salta a él).
+
+## v2.3 — Estruendo de audio + pulido final (22 jul 2026, ronda 3)
+
+1. **El "estruendo" al inicio de las grabaciones (raíz encontrada):** el
+   MovieFileOutput de cámara se AÑADÍA a la AVCaptureSession corriendo justo al
+   dar Grabar → reconfiguración del grafo de CoreAudio → pop de ~0.5s GRABADO.
+   Fix: el output vive en la sesión desde el arranque del motor (antes de
+   startRunning); Grabar solo llama startRecording (cero reconfiguración).
+   Refuerzo en el programa: warmup de 150ms — el writer recortaba audio a mitad
+   de buffer en el startSession y también tronaba.
+2. **Vúmetro con ataque/caída** (attack instantáneo, decay 0.80 por tick a
+   15Hz): el valor crudo brincaba feo.
+3. **Self-view "Burbuja" ELIMINADO** (el Loom vive aparte con su burbuja real).
+4. **Escenas: clic derecho** → Renombrar / Duplicar (⌘D) / Eliminar; ⌘D global.
+5. **Visibilidad en capturas configurable** (Ajustes → Ventana): default
+   invisible estilo OBS (sharingType=.none); toggle ON = ventana normal
+   (.readOnly), aplica al instante. Era la "app que no sale en mis screenshots".

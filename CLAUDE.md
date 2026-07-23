@@ -39,6 +39,17 @@ rm -rf /Applications/SFCast.app && cp -R dist/SFCast.app /Applications/   # inst
 ./infra/deploy.sh               # sube el worker al VPS y reinicia el servicio
 ```
 
+## Modo Estudio (v2.0, 22 jul 2026)
+
+Estudio multi-escena estilo OBS/piel Screen Studio, ADITIVO sobre el Loom:
+`StudioModel.swift` (escenas/fuentes, scenes.json) · `StudioEngine.swift`
+(SCStream frames + compositor CoreImage + niveles) · `StudioRecorder.swift`
+(doble salida: screen.mp4 + camera.mov raw, seg-001.mp4 programa con 2 pistas
+AAC, manifest.json = contrato con SFStudio/edición agéntica) ·
+`StudioWindow.swift` (vista desktop SwiftUI + `--studiotest`). Decisiones y
+gotchas: `DECISIONS.md` §v2.0. QA: `open -W /Applications/SFCast.app --args
+--studiotest 8` (SIEMPRE via open — TCC se atribuye al proceso responsable).
+
 ## Invariantes que NO se tocan
 
 1. **El orden al detener es 1-link, 2-pill fuera, 3-cerrar MP4.** Cerrar el MP4 tarda

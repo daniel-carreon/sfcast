@@ -106,6 +106,41 @@ liga al cdhash del binario. Cámara y micrófono NO se revocan porque la firma
 
 ---
 
+## 4b. Modo Estudio (v2.0 — escenas + doble salida)
+
+> Menú ⏺ (clic derecho) → **🎬 Modo Estudio…** Es el OBS/Streamlabs soberano con
+> piel Screen Studio: paneles de **Escenas · Fuentes · Preview/Programa · Mixer ·
+> Salidas**. El modo Loom queda intacto; el Estudio es opt-in.
+
+- **Escenas**: presets de fábrica "Completa", **"Loom"** (pantalla + burbuja de
+  cámara POR COMPOSICIÓN, sin burn-in — cámara editable después), "Mi cámara
+  solo", "Lado a lado". Crear/duplicar/renombrar/borrar; **switch EN VIVO**
+  durante la grabación (queda en el timeline del manifest).
+- **Fuentes** por escena: Pantalla, Cámara, Patrón de prueba. Reordenables (la
+  última de la lista queda encima), transform con sliders (x/y/ancho/alto),
+  llenar/ajustar, **burbuja circular**, mostrar/ocultar.
+- **Doble salida** (config por grabación, panel Salidas):
+  - `screen.mp4` — pantalla RAW (SCRecordingOutput del mismo stream del preview)
+  - `camera.mov` — cámara RAW con tu voz (mic)
+  - `seg-001.mp4` — el PROGRAMA compuesto (HEVC) con 2 pistas de audio
+    SEPARADAS: track 1 mic, track 2 audio del sistema (estilo Screen Studio)
+- **Local-first**: todo cae en `~/Movies/SFCast/{id}/` con **`manifest.json`**
+  (inventario de archivos con rol, timeline de switches, snapshot de escenas) —
+  el contrato para que un agente edite con cámara y pantalla separadas. Si el
+  programa está activo también se escribe `meta.json`: el "↑ subir" del
+  Historial y el worker del VPS lo tratan como un video normal (ojo: el rsync
+  sube la carpeta ENTERA, raws incluidos — con tu upstream, pesa).
+- La ventana del Estudio es **invisible a la captura** (`sharingType = .none`,
+  como el pill). Escenas en `~/Library/Application Support/SFCast/scenes.json`.
+- Grabación Loom y Estudio son excluyentes (guard cruzado con aviso).
+
+**Regalable:** el Estudio no toca el VPS ni credenciales. Para regalar el build:
+`./scripts/build-app.sh` → compartir `dist/SFCast.app` (arrastrar a /Applications).
+El tercero aprueba cámara/mic/pantalla en su primer uso; si no quiere el VPS,
+apaga "subir" en el micropanel (`autoUpload=false`) o usa solo el Estudio.
+
+---
+
 ## 5. Mejores prácticas (sacarle el jugo)
 
 **Antes de grabar**
@@ -209,7 +244,14 @@ data.json con el transcript). Dile a Levy:
 /Applications/SFCast.app/Contents/MacOS/SFCast --selftest 4       # motor de captura real
 /Applications/SFCast.app/Contents/MacOS/SFCast --paneltest 8      # muestra el pill sin grabar
 /Applications/SFCast.app/Contents/MacOS/SFCast --compresstest ~/Movies/SFCast/{id}   # compresor sobre una COPIA
+open -W /Applications/SFCast.app --args --studiotest 8            # QA del Modo Estudio E2E
 ```
+
+**OJO --studiotest:** lánzalo con `open` (launchd), no con el binario directo —
+desde terminal el TCC se atribuye a la TERMINAL y pantalla/cámara salen "sin
+señal" (graba solo el patrón de prueba, que es el fallback diseñado). Deja en
+`~/Movies/SFCast/{id}/` los 3 archivos + manifest + PNGs del frame de programa
+por escena + PNG de la ventana. Restaura `scenes.json` al salir.
 
 ---
 

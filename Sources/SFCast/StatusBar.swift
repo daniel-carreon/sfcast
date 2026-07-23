@@ -109,6 +109,8 @@ final class StatusBar: NSObject, NSMenuDelegate {
             menu.addItem(winItem)
             add(menu, "Grabar solo cámara", #selector(recordCam))
             menu.addItem(.separator())
+            add(menu, "🎬 Modo Estudio…", #selector(openStudio))
+            menu.addItem(.separator())
             // La burbuja se configura EN la burbuja (clic derecho) y en el
             // micropanel — este menú ya no duplica esos controles (v1.4).
             let hist = History.load()
@@ -185,6 +187,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
     }
 
     @objc private func openHub() { HubWindowController.shared.show() }
+    @objc private func openStudio() { StudioController.shared.open() }
     @objc private func openLauncher() {
         LauncherPanelController.shared.show(relativeTo: item.button)
     }

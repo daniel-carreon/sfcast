@@ -91,7 +91,7 @@ final class RecordingController {
     // MARK: - arranques
 
     func startScreen() async {
-        guard state == .idle, let screen = Self.captureScreen() else { return }
+        guard state == .idle, !studioBlocks, let screen = Self.captureScreen() else { return }
         settings = AppSettings.load()   // PRIMERO: recoge glow/tamaño/cámara/mic del hub
         prepareSession(mode: .screen)
         let gen = generation
@@ -157,7 +157,7 @@ final class RecordingController {
     }
 
     func startWindow(_ window: SCWindow) async {
-        guard state == .idle, let screen = Self.captureScreen() else { return }
+        guard state == .idle, !studioBlocks, let screen = Self.captureScreen() else { return }
         settings = AppSettings.load()
         prepareSession(mode: .window)
         let gen = generation
@@ -195,7 +195,7 @@ final class RecordingController {
     }
 
     func startCamOnly() async {
-        guard state == .idle, let screen = Self.captureScreen() else { return }
+        guard state == .idle, !studioBlocks, let screen = Self.captureScreen() else { return }
         settings = AppSettings.load()
         prepareSession(mode: .camOnly)
         let gen = generation
@@ -492,12 +492,25 @@ final class RecordingController {
         if state != .idle { state = .idle }
     }
 
+    /// Cross-guard con el Modo Estudio: si el Estudio está GRABANDO, el Loom no
+    /// arranca (compartirían cámara/mic/SCK). Con el Estudio solo en preview,
+    /// prepareSession lo cierra — misma regla que el micropanel.
+    var studioBlocks: Bool {
+        if StudioController.shared.isStudioRecording {
+            notify("SFCast", "El Estudio está grabando. Deténlo antes de grabar en modo Loom.")
+            return true
+        }
+        return false
+    }
+
     private func prepareSession(mode: Mode) {
         // TODO arranque pasa por aquí (botón del micropanel, ⌘⇧L, menú clásico):
         // cerrar el micropanel y apagar su vúmetro SIEMPRE — el meter tiene su
         // propia AVCaptureSession sobre el mic y competiría con SCStream o con
         // el session de la burbuja (hallazgo CONFIRMADO del review v1.4).
         LauncherPanelController.shared.hide(keepPreview: true)
+        // El Estudio (si está abierto en preview) suelta cámara/pantalla aquí.
+        StudioController.shared.closeForLoom()
         self.mode = mode
         generation += 1
         videoID = makeVideoID()

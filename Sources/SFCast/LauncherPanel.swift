@@ -227,6 +227,7 @@ struct LauncherView: View {
             micRow
             destinoRow
             recordButton
+            studioButton
             footer
         }
         .padding(14)
@@ -452,6 +453,26 @@ struct LauncherView: View {
         }
         .buttonStyle(.plain)
         .disabled(startDisabled)
+    }
+
+    // ── Modo Estudio (NO graba: abre la vista desktop de escenas) ────────────
+    private var studioButton: some View {
+        Button {
+            LauncherPanelController.shared.hide(keepPreview: false)
+            StudioController.shared.open()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "rectangle.3.group.fill")
+                Text("Studio").fontWeight(.semibold)
+                Text("escenas · doble salida")
+                    .font(.system(size: 10)).opacity(0.55)
+            }
+            .font(.system(size: 13))
+            .foregroundColor(Theme.acc)
+            .frame(maxWidth: .infinity).padding(.vertical, 9)
+            .background(RoundedRectangle(cornerRadius: 11).stroke(Theme.acc.opacity(0.55), lineWidth: 1.2))
+        }
+        .buttonStyle(.plain)
     }
 
     private var startDisabled: Bool {

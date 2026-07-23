@@ -109,7 +109,7 @@ struct HubView: View {
                 .buttonStyle(.plain)
             }
             Spacer()
-            Text("v1.6").font(.system(size: 9)).foregroundColor(Theme.dim.opacity(0.6))
+            Text("v2.0").font(.system(size: 9)).foregroundColor(Theme.dim.opacity(0.6))
                 .padding(.bottom, 16)
         }
         .padding(.horizontal, 14)
@@ -161,6 +161,23 @@ private struct InicioView: View {
                     .foregroundColor(.black)
                     .frame(maxWidth: .infinity).padding(.vertical, 12)
                     .background(RoundedRectangle(cornerRadius: 12).fill(Theme.acc))
+                }
+                .buttonStyle(.plain)
+                Button {
+                    Task { @MainActor in
+                        HubWindowController.shared.hide()
+                        StudioController.shared.open()
+                    }
+                } label: {
+                    HStack {
+                        Image(systemName: "rectangle.3.group.fill")
+                        Text("Modo Estudio").fontWeight(.semibold)
+                        Text("escenas · doble salida").font(.system(size: 11)).opacity(0.55)
+                    }
+                    .font(.system(size: 14))
+                    .foregroundColor(Theme.acc)
+                    .frame(maxWidth: .infinity).padding(.vertical, 11)
+                    .background(RoundedRectangle(cornerRadius: 12).stroke(Theme.acc.opacity(0.55), lineWidth: 1.3))
                 }
                 .buttonStyle(.plain)
             }

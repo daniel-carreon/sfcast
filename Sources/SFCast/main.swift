@@ -16,9 +16,18 @@ if let i = cliArgs.firstIndex(of: "--selftest") {
 }
 if cliArgs.contains("--no-upload") { demoNoUpload = true }
 if cliArgs.contains("--version") {
-    print("SFCast 1.6.0")
+    print("SFCast 2.0.0")
     exit(0)
 }
+
+/// QA del Modo Estudio (`--studiotest N`): abre la vista desktop CAPTURABLE,
+/// graba N segundos (patrón de prueba garantizado + pantalla/cámara si hay
+/// permiso), hace un switch de escena en vivo a la mitad, y deja PNGs del frame
+/// de programa + de la ventana + los archivos de la sesión como evidencia.
+let studioTestSeconds: Int? = {
+    guard let i = cliArgs.firstIndex(of: "--studiotest") else { return nil }
+    return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 8
+}()
 
 /// QA del compresor (`--compresstest <dir>`): corre Transcoder sobre una COPIA
 /// del directorio dado y reporta antes/después. Existe porque comprimir es lo
@@ -125,7 +134,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusBar.setup()
         Log.info("SFCast arriba (demo=\(demo.map(String.init) ?? "no") selftest=\(selftest.map(String.init) ?? "no"))")
-        if let seconds = paneltest {
+        if let seconds = studioTestSeconds {
+            Task { @MainActor in await StudioController.shared.runTest(seconds: seconds) }
+        } else if let seconds = paneltest {
             Task { @MainActor in await runPanelTest(seconds: seconds) }
         } else if let seconds = selftest {
             Task { @MainActor in await runSelftest(seconds: seconds) }

@@ -519,3 +519,58 @@ nivel con caducidad) más los modos de QA que los ejercen.
 open -W /Applications/SFCast.app --args --studiobench 45              # peso + mic + salud
 open -W /Applications/SFCast.app --args --studiobench 30 --killstream # prueba la recuperación
 ```
+
+## v2.5 — El aro neón del Loom, ahora por fuente de escena (25 jul 2026)
+
+Pedido de Daniel: "la burbuja del Loom tiene un aro morado neón y puedo cambiarlo
+a ámbar; quiero eso mismo para la cámara en las escenas, con clic derecho en la
+fuente".
+
+**No es una feature nueva, es la MISMA receta portada.** El aro de la burbuja
+(`CameraBubble.Glow`) es: anillo de **1.5pt al 90% de alpha** + halo de
+**radio 10 al 50%**, en `#8C27F1` morado o `#ff9101` ámbar. Se copiaron los dos
+colores y las dos proporciones tal cual a `SceneGlow`, expresadas como fracción
+del lado menor del item (`ringFraction 0.007`, `haloFraction 0.045`) para que se
+vea igual a cualquier tamaño de cámara o de canvas. Si el aro del Loom cambia
+algún día, esto cambia con él — es el mismo lenguaje visual, no una paleta nueva.
+
+Única diferencia deliberada: el halo va un pelo más ancho. En el Loom tenía que
+morir dentro del `glowPad` de 34px del NSPanel o se veía el corte cuadrado
+(feedback de Daniel del 15 jul); aquí el compositor no recorta y no hace falta
+apretarlo.
+
+**Cómo se pinta.** El halo va DEBAJO del video y el anillo ENCIMA — igual que en
+la burbuja, donde el shadow vive en `glowView` y el borde en `innerView` (que
+dibuja sobre su contenido). Ambas capas se generan con CoreGraphics (trazo para
+el anillo, relleno + `CIGaussianBlur` para el halo) y se **cachean** por
+(rect, color, recorte, opacidad): dibujarlas en cada frame costaría 30 veces por
+segundo lo mismo que cuesta una vez.
+
+⚠️ **Con `circleMask` el aro es el círculo INSCRITO, no un óvalo del rect.** El
+recorte de `place` usa el lado menor centrado; si el aro usara el rect completo
+quedaría despegado del video en cuanto el item no fuera cuadrado.
+
+**Dónde se prende:** clic derecho en la fuente (lo pedido) **y** un selector
+`Aro: — / Morado / Ámbar` en el inspector, porque un menú contextual es invisible
+hasta que alguien lo descubre. Un punto del color en la fila de Fuentes indica
+cuáles lo traen puesto. El clic derecho actúa **por id**, no sobre la selección:
+clic derecho no selecciona, y editar "lo seleccionado" tocaría el item
+equivocado.
+
+**Costo medido** (`--glowtest`, presupuesto de 33.3 ms a 30fps):
+
+| | ms/frame |
+|---|---|
+| Sin aro | 1.47 |
+| Con aro, cacheado | 3.28 |
+| Con aro, arrastrándolo (cache miss cada frame) | 4.27 |
+
+Peor caso = 13% del presupuesto. Y como el aro se compone en el MISMO
+`CVPixelBuffer` que alimenta preview y `ProgramSink`, lo que se ve es
+exactamente lo que se graba.
+
+QA visual (un aro no se valida leyendo código, se valida mirándolo):
+
+```bash
+open -W /Applications/SFCast.app --args --glowtest   # PNGs + perf + foto de la ventana
+```

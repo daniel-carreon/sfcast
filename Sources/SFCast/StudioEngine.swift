@@ -590,7 +590,13 @@ final class Compositor: @unchecked Sendable {
                 starved.insert(item.kind)   // COMPARADOR: fuente activa sin frames
                 continue
             }
+            // ARO NEÓN: halo DEBAJO del video, anillo ENCIMA — igual que la
+            // burbuja del Loom (allá el shadow vive en glowView y el borde en
+            // innerView, que dibuja sobre el contenido).
+            let glow = glowLayers(item: item, canvas: canvas)
+            if let halo = glow?.halo { image = halo.composited(over: image) }
             image = place(src, item: item, canvas: canvas).composited(over: image)
+            if let ring = glow?.ring { image = ring.composited(over: image) }
         }
         guard let pb = makeBuffer(canvas) else { return nil }
         context.render(image, to: pb, bounds: CGRect(origin: .zero, size: canvas),
@@ -616,14 +622,112 @@ final class Compositor: @unchecked Sendable {
         }
     }
 
+    // MARK: - aro neón (el mismo del Loom, por item de escena)
+
+    private struct GlowKey: Hashable {
+        let x: Int, y: Int, w: Int, h: Int
+        let circle: Bool
+        let glow: String
+        let opacity: Int
+    }
+    private var glowCache: [GlowKey: (halo: CIImage, ring: CIImage)] = [:]
+
+    /// Devuelve las dos capas del aro. **Cacheadas**: dibujar el anillo y
+    /// desenfocar el halo en cada frame costaría 30 veces por segundo lo mismo
+    /// que cuesta una vez; solo cambian si cambia el rect, el color o el recorte.
+    private func glowLayers(item: SceneItem, canvas: CGSize) -> (halo: CIImage, ring: CIImage)? {
+        guard let rgb = item.glow.rgb else { return nil }
+        let target = targetRect(item, canvas: canvas)
+        guard target.width > 4, target.height > 4 else { return nil }
+        let key = GlowKey(x: Int(target.origin.x.rounded()), y: Int(target.origin.y.rounded()),
+                          w: Int(target.width.rounded()), h: Int(target.height.rounded()),
+                          circle: item.circleMask, glow: item.glow.rawValue,
+                          opacity: Int((item.opacity * 100).rounded()))
+        if let hit = glowCache[key] { return hit }
+
+        let minSide = min(target.width, target.height)
+        let ringW = max(2.0, minSide * SceneGlow.ringFraction)
+        let halo = minSide * SceneGlow.haloFraction
+        // El desenfoque gaussiano muere a ~3σ: ese es el margen que hay que
+        // dejar alrededor o el halo sale cortado en recto (el mismo error que
+        // el `glowPad` corrige en el NSPanel de la burbuja).
+        let pad = halo * 3 + ringW
+        let box = target.insetBy(dx: -pad, dy: -pad)
+        // Con `circleMask` el video se recorta al círculo INSCRITO (lado menor,
+        // centrado — ver `place`). El aro tiene que ser ESE círculo, no un
+        // óvalo del rect completo, o quedaría despegado del recorte.
+        var shape = target.offsetBy(dx: -box.origin.x, dy: -box.origin.y)
+        if item.circleMask {
+            shape = CGRect(x: shape.midX - minSide / 2, y: shape.midY - minSide / 2,
+                           width: minSide, height: minSide)
+        }
+        let radius = item.circleMask ? minSide / 2 : minSide * 0.035
+        let alpha = item.opacity
+
+        guard let ringImg = drawShape(size: box.size, rect: shape, radius: radius, rgb: rgb,
+                                      alpha: SceneGlow.ringAlpha * alpha, stroke: ringW),
+              let bodyImg = drawShape(size: box.size, rect: shape, radius: radius, rgb: rgb,
+                                      alpha: SceneGlow.haloAlpha * alpha, stroke: nil)
+        else { return nil }
+
+        let blurred = bodyImg
+            .clampedToExtent()
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: halo])
+            .cropped(to: CGRect(origin: .zero, size: box.size))
+        let offset = CGAffineTransform(translationX: box.origin.x, y: box.origin.y)
+        let layers = (halo: blurred.transformed(by: offset),
+                      ring: ringImg.transformed(by: offset))
+        if glowCache.count > 24 { glowCache.removeAll() }   // techo simple
+        glowCache[key] = layers
+        return layers
+    }
+
+    /// Dibuja el círculo/rect redondeado en un bitmap transparente: relleno para
+    /// el halo (que luego se desenfoca), o trazo para el anillo definido.
+    private func drawShape(size: CGSize, rect: CGRect, radius: CGFloat,
+                           rgb: (r: Double, g: Double, b: Double), alpha: Double,
+                           stroke: CGFloat?) -> CIImage? {
+        let w = Int(size.width.rounded()), h = Int(size.height.rounded())
+        guard w > 0, h > 0,
+              let cs = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: cs,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        let color = CGColor(srgbRed: rgb.r, green: rgb.g, blue: rgb.b, alpha: alpha)
+        // El trazo se centra en el path: se encoge medio grosor para que el
+        // anillo quede DENTRO del borde del video, como el border de una capa.
+        let inset = (stroke ?? 0) / 2
+        let path = CGPath(roundedRect: rect.insetBy(dx: inset, dy: inset),
+                          cornerWidth: max(0, radius - inset),
+                          cornerHeight: max(0, radius - inset), transform: nil)
+        ctx.addPath(path)
+        if let s = stroke {
+            ctx.setStrokeColor(color)
+            ctx.setLineWidth(s)
+            ctx.strokePath()
+        } else {
+            ctx.setFillColor(color)
+            ctx.fillPath()
+        }
+        guard let img = ctx.makeImage() else { return nil }
+        return CIImage(cgImage: img)
+    }
+
+    /// El rect del item en píxeles del canvas (lo comparten `place` y el aro —
+    /// si se calcularan por separado, el aro se despegaría del video).
+    private func targetRect(_ item: SceneItem, canvas: CGSize) -> CGRect {
+        CGRect(x: item.rect.origin.x * canvas.width,
+               y: item.rect.origin.y * canvas.height,
+               width: item.rect.width * canvas.width,
+               height: item.rect.height * canvas.height)
+    }
+
     /// Coloca la imagen de la fuente en su rect normalizado del canvas
     /// (aspect-fill con recorte centrado, o aspect-fit), máscara circular
     /// opcional (burbuja Loom) y opacidad.
     private func place(_ src: CIImage, item: SceneItem, canvas: CGSize) -> CIImage {
-        let target = CGRect(x: item.rect.origin.x * canvas.width,
-                            y: item.rect.origin.y * canvas.height,
-                            width: item.rect.width * canvas.width,
-                            height: item.rect.height * canvas.height)
+        let target = targetRect(item, canvas: canvas)
         let s = src.extent.size
         guard s.width > 1, s.height > 1, target.width > 1, target.height > 1 else { return src }
         let scale = item.fit == .fill

@@ -141,7 +141,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusBar.setup()
         Log.info("SFCast arriba (demo=\(demo.map(String.init) ?? "no") selftest=\(selftest.map(String.init) ?? "no"))")
-        if let seconds = studioBenchSeconds {
+        if cliArgs.contains("--glowtest") {
+            Task { @MainActor in await StudioController.shared.runGlowTest() }
+        } else if let seconds = studioBenchSeconds {
             Task { @MainActor in await StudioController.shared.runBench(seconds: seconds) }
         } else if let seconds = studioTestSeconds {
             Task { @MainActor in await StudioController.shared.runTest(seconds: seconds) }

@@ -35,6 +35,41 @@ enum StudioFit: String, Codable, CaseIterable {
     var label: String { self == .fill ? "Llenar" : "Ajustar" }
 }
 
+/// El ARO NEÓN — el mismo del Loom, ahora disponible por item de escena.
+///
+/// Es EXACTAMENTE el lenguaje visual de la burbuja (`CameraBubble.Glow`): mismos
+/// dos colores de marca, misma receta (anillo definido + halo apenas presente).
+/// No es una paleta nueva: si el aro del Loom cambia, esto cambia con él.
+enum SceneGlow: String, Codable, CaseIterable {
+    case nada, morado, ambar
+
+    /// Mismos valores que `CameraBubble.Glow.color`.
+    var rgb: (r: Double, g: Double, b: Double)? {
+        switch self {
+        case .nada: return nil
+        case .morado: return (0.549, 0.153, 0.945)   // #8C27F1
+        case .ambar: return (1.0, 0.567, 0.004)      // #ff9101
+        }
+    }
+    var label: String {
+        switch self {
+        case .nada: return "Sin aro"
+        case .morado: return "Aro morado neón"
+        case .ambar: return "Aro ámbar neón"
+        }
+    }
+
+    // Proporciones heredadas de la burbuja (1.5pt de anillo y 10pt de halo
+    // sobre 280pt de diámetro), en fracción del lado menor del item para que se
+    // vea igual a cualquier tamaño de canvas o de cámara. El halo va un pelo más
+    // ancho que en el Loom: allá tenía que morir dentro del `glowPad` de 34px
+    // del NSPanel o se veía el corte cuadrado; aquí el compositor no recorta.
+    static let ringFraction: Double = 0.007
+    static let haloFraction: Double = 0.045
+    static let ringAlpha: Double = 0.9
+    static let haloAlpha: Double = 0.5
+}
+
 /// Un item DENTRO de una escena: qué fuente, dónde y cómo.
 /// `rect` es NORMALIZADO (0-1, origen abajo-izquierda como AppKit) sobre el
 /// canvas del programa — así el layout sobrevive cambios de resolución.
@@ -46,6 +81,7 @@ struct SceneItem: Codable, Identifiable, Equatable {
     var circleMask = false      // burbuja estilo Loom (recorte circular)
     var enabled = true
     var opacity: Double = 1.0
+    var glow: SceneGlow = .nada // aro neón estilo Loom (clic derecho en Fuentes)
 
     init(kind: StudioSourceKind, rect: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1),
          fit: StudioFit = .fill, circleMask: Bool = false) {
@@ -64,6 +100,7 @@ struct SceneItem: Codable, Identifiable, Equatable {
         circleMask = try c.decodeIfPresent(Bool.self, forKey: .circleMask) ?? false
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         opacity = try c.decodeIfPresent(Double.self, forKey: .opacity) ?? 1.0
+        glow = try c.decodeIfPresent(SceneGlow.self, forKey: .glow) ?? .nada
     }
 }
 

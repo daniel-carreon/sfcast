@@ -39,7 +39,7 @@ rm -rf /Applications/SFCast.app && cp -R dist/SFCast.app /Applications/   # inst
 ./infra/deploy.sh               # sube el worker al VPS y reinicia el servicio
 ```
 
-## Modo Estudio (v2.4, 25 jul 2026)
+## Modo Estudio (v2.5, 25 jul 2026)
 
 Estudio multi-escena estilo OBS/piel Screen Studio, ADITIVO sobre el Loom:
 `StudioModel.swift` (escenas/fuentes, scenes.json) · `StudioEngine.swift`
@@ -47,13 +47,14 @@ Estudio multi-escena estilo OBS/piel Screen Studio, ADITIVO sobre el Loom:
 (doble salida: screen.mp4 + camera.mov raw, seg-001.mp4 programa con 2 pistas
 AAC, manifest.json = contrato con SFStudio/edición agéntica) ·
 `StudioWindow.swift` (vista desktop SwiftUI + `--studiotest`). Decisiones y
-gotchas: `DECISIONS.md` §v2.0–§v2.4. QA (SIEMPRE via `open` — TCC se atribuye al
+gotchas: `DECISIONS.md` §v2.0–§v2.5. QA (SIEMPRE via `open` — TCC se atribuye al
 proceso responsable, no al binario):
 
 ```bash
 open -W /Applications/SFCast.app --args --studiotest 8                 # E2E compositor/escenas
 open -W /Applications/SFCast.app --args --studiobench 45               # PESO por archivo + mic + salud
 open -W /Applications/SFCast.app --args --studiobench 30 --killstream  # mata el stream: prueba la recuperación
+open -W /Applications/SFCast.app --args --glowtest                     # aro neón: PNGs + costo por frame
 ```
 
 Los tres bugs de la sesión real del 25 jul (mixer clavado, 15x el peso de OBS,

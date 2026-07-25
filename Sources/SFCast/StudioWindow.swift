@@ -239,6 +239,94 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         exit(0)
     }
 
+    /// QA VISUAL del aro (`--glowtest`): compone un frame por cada color con la
+    /// cámara en burbuja y otro en rectángulo, y deja los PNG. Un aro no se
+    /// valida leyendo código: se valida MIRÁNDOLO.
+    func runGlowTest() async {
+        testMode = true
+        let cfgFile = StudioConfig.file
+        let backup = try? Data(contentsOf: cfgFile)
+        var cfg = StudioConfig(scenes: [], activeSceneID: nil)
+        let base = SceneItem(kind: .testPattern)
+        var scenes: [StudioScene] = []
+        for g in SceneGlow.allCases {
+            for circle in [true, false] {
+                var cam = SceneItem(kind: .camera,
+                                    rect: CGRect(x: 0.62, y: 0.28, width: 0.30, height: 0.45),
+                                    fit: .fill, circleMask: circle)
+                cam.glow = g
+                scenes.append(StudioScene(name: "\(g.rawValue)-\(circle ? "burbuja" : "rect")",
+                                          items: [base, cam]))
+            }
+        }
+        cfg.scenes = scenes
+        cfg.activeSceneID = scenes.first?.id
+        config = cfg
+        open()
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        let out = URL(fileURLWithPath: "/tmp/sfcast-glow")
+        try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        for s in scenes {
+            selectScene(s.id)
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            guard let pb = engine.snapshotProgramFrame() else { continue }
+            let url = out.appendingPathComponent("\(s.name).png")
+            let ctx = CIContext()
+            if let cs = CGColorSpace(name: CGColorSpace.sRGB),
+               let data = ctx.pngRepresentation(of: CIImage(cvPixelBuffer: pb),
+                                                format: .BGRA8, colorSpace: cs) {
+                try? data.write(to: url)
+                print("GLOWTEST \(url.path)")
+            }
+        }
+        // COSTO por frame. El aro añade trabajo al render loop, así que hay que
+        // medirlo, no suponerlo: caso cacheado (lo normal) y peor caso (el item
+        // se mueve, o sea cache miss en CADA frame — arrastrarlo en el preview).
+        func bench(_ label: String, moving: Bool) {
+            guard let s = scenes.first(where: { $0.name.contains("morado") }) else { return }
+            selectScene(s.id)
+            let t0 = CACurrentMediaTime()
+            let n = 120
+            for i in 0..<n {
+                if moving {
+                    updateItem(s.items[1].id) { $0.rect.origin.x = 0.62 + Double(i % 40) * 0.002 }
+                    pushActiveSceneNow()
+                }
+                _ = engine.snapshotProgramFrame()
+            }
+            let ms = (CACurrentMediaTime() - t0) / Double(n) * 1000
+            Log.info(String(format: "GLOWTEST_PERF %@ %.2f ms/frame (presupuesto a 30fps: 33.3)", label, ms))
+        }
+        if let s = scenes.first(where: { $0.name.contains("nada") }) {
+            selectScene(s.id)
+            let t0 = CACurrentMediaTime()
+            for _ in 0..<120 { _ = engine.snapshotProgramFrame() }
+            Log.info(String(format: "GLOWTEST_PERF sin-aro %.2f ms/frame",
+                            (CACurrentMediaTime() - t0) / 120 * 1000))
+        }
+        bench("con-aro-cacheado", moving: false)
+        bench("con-aro-moviendose", moving: true)
+
+        // Foto de la VENTANA con la cámara seleccionada: el panel Fuentes mide
+        // 235px y le acabo de meter una fila. Un desbordamiento en SwiftUI no
+        // avisa — hay que mirarlo.
+        if let s = scenes.first(where: { $0.name == "morado-burbuja" }) {
+            selectScene(s.id)
+            selectedItemID = s.items.last?.id
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            saveWindowShot(to: out)
+        }
+
+        await engine.stop()
+        if let backup { try? backup.write(to: cfgFile) } else { try? FileManager.default.removeItem(at: cfgFile) }
+        print("GLOWTEST_OK \(out.path)")
+        exit(0)
+    }
+
+    /// Empuja la escena activa al motor SIN pasar por el ciclo de SwiftUI
+    /// (el QA de rendimiento necesita que el cambio llegue en el mismo frame).
+    private func pushActiveSceneNow() { engine.setActiveScene(activeScene) }
+
     private func writeFramePNG(name: String) {
         guard let pb = engine.snapshotProgramFrame() else {
             print("STUDIOTEST_WARN sin frame de programa para \(name)")
@@ -497,6 +585,13 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
 
     func updateSelectedItem(_ mutate: (inout SceneItem) -> Void) {
         guard let id = selectedItemID else { return }
+        updateItem(id, mutate)
+    }
+
+    /// Muta un item POR ID. El clic derecho no cambia la selección, así que el
+    /// menú contextual tiene que actuar sobre la fila donde se hizo clic, no
+    /// sobre "lo seleccionado" (sería editar el item equivocado).
+    func updateItem(_ id: UUID, _ mutate: (inout SceneItem) -> Void) {
         mutateActiveScene { scene in
             guard let i = scene.items.firstIndex(where: { $0.id == id }) else { return }
             mutate(&scene.items[i])
@@ -1031,6 +1126,21 @@ struct SourcesPanel: View {
                         }
                         .toggleStyle(.checkbox)
                     }
+                    // El aro también aquí, no solo en el clic derecho: un menú
+                    // contextual es invisible hasta que alguien lo descubre.
+                    HStack(spacing: 6) {
+                        Text("Aro").font(.system(size: 10)).foregroundStyle(StudioSkin.dim)
+                        Picker("", selection: Binding(
+                            get: { item.glow },
+                            set: { v in c.updateSelectedItem { $0.glow = v } })) {
+                            Text("—").tag(SceneGlow.nada)
+                            Text("Morado").tag(SceneGlow.morado)
+                            Text("Ámbar").tag(SceneGlow.ambar)
+                        }
+                        .pickerStyle(.segmented)
+                        .controlSize(.mini)
+                        .frame(width: 150)
+                    }
                 } else {
                     Text("Mueve y escala directo en el preview ↑")
                         .font(.system(size: 9.5))
@@ -1069,6 +1179,14 @@ struct SourcesPanel: View {
                     .font(.system(size: 11.5))
                     .foregroundStyle(item.enabled ? StudioSkin.text : StudioSkin.dim)
                     .lineLimit(1)
+                // Punto del color del aro: se VE cuál fuente lo trae puesto sin
+                // tener que abrir el menú.
+                if let rgb = item.glow.rgb {
+                    Circle()
+                        .stroke(Color(red: rgb.r, green: rgb.g, blue: rgb.b), lineWidth: 1.6)
+                        .frame(width: 8, height: 8)
+                        .shadow(color: Color(red: rgb.r, green: rgb.g, blue: rgb.b).opacity(0.9), radius: 3)
+                }
                 Spacer()
                 Button {
                     c.selectedItemID = item.id
@@ -1085,6 +1203,32 @@ struct SourcesPanel: View {
             .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
+        // CLIC DERECHO sobre la fuente: el aro neón del Loom, aquí (pedido de
+        // Daniel). Actúa sobre ESTA fila por id — el clic derecho no selecciona.
+        .contextMenu {
+            ForEach(SceneGlow.allCases, id: \.self) { g in
+                Button {
+                    c.selectedItemID = item.id
+                    c.updateItem(item.id) { $0.glow = g }
+                } label: {
+                    Label(item.glow == g ? "✓ \(g.label)" : g.label,
+                          systemImage: g == .nada ? "circle.dashed" : "circle.circle.fill")
+                }
+            }
+            Divider()
+            Button(item.circleMask ? "✓ Burbuja (recorte circular)" : "Burbuja (recorte circular)") {
+                c.selectedItemID = item.id
+                c.updateItem(item.id) { $0.circleMask.toggle() }
+            }
+            Button(item.enabled ? "Ocultar fuente" : "Mostrar fuente") {
+                c.updateItem(item.id) { $0.enabled.toggle() }
+            }
+            Divider()
+            Button("Eliminar fuente", role: .destructive) {
+                c.selectedItemID = item.id
+                c.removeSelectedItem()
+            }
+        }
     }
 
 }

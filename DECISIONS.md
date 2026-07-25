@@ -374,3 +374,148 @@ soberano estilo OBS/Streamlabs con piel Screen Studio, ADITIVO sobre el Loom.
 5. **Visibilidad en capturas configurable** (Ajustes → Ventana): default
    invisible estilo OBS (sharingType=.none); toggle ON = ventana normal
    (.readOnly), aplica al instante. Era la "app que no sale en mis screenshots".
+
+## v2.4 — Los tres bugs del 25 jul: mixer, peso y congelada
+
+Daniel intentó grabar en serio con el Modo Estudio (en paralelo con
+OBS/Streamlabs, para comparar) y salió con tres cosas rotas. Las tres estaban
+relacionadas por una misma causa de fondo: **la app no medía nada de lo que
+hacía**, así que ninguna se notaba hasta que el daño estaba hecho.
+
+Evidencia madre (log de esa mañana), sesión `tr4oulursct6`, 09:29:36 → 10:20:02:
+
+```
+09:29:36  Estudio: grabando tr4oulursct6 → [screen.mp4, camera.mov, seg-001.mp4]
+10:12:22  ERROR: camOnly segmento: Disk Full          ← 43 min después
+10:20:02  Estudio: programa cerró — 90438 frames, 0 drops, mic=282593 sys=0
+                                                       ↑ CERO audio de sistema
+                                                         en 50 minutos
+```
+
+`sys=0` es la huella del stream muerto: el tap de audio de ScreenCaptureKit late
+mientras el stream vive. La sesión anterior (misma app, 6 min antes) traía
+`sys=11196`. O sea: el SCStream murió al arrancar esa grabación y **se grabaron
+50 minutos del mismo frame**, sin una sola línea de log.
+
+### 1. El mixer marcaba una LÍNEA FIJA — no era el micrófono
+
+Síntoma: la barra del micrófono clavada, pasara lo que pasara.
+
+Camino hasta la raíz (cada paso descartó una hipótesis):
+
+| Medición | Resultado | Qué descartó |
+|---|---|---|
+| `ffmpeg -f avfoundation -i :1` sobre el mismo Shure | −76.5 dB | El micro NO está caliente |
+| La pista de mic del `seg-001.mp4` grabado | −60.6 dB | Lo que se GRABA está bien |
+| `AudioMath.rms` sobre esos mismos buffers | −7.8 dBFS, constante | **El lector es el que miente** |
+| Volcado en hexadecimal de los bytes | `fff90fca fffa07f7 …` | No son float32 (leído así ⇒ NaN) |
+| ASBD real | `int24 flags=0x14` | 24 bits **alineados alto en 4 bytes** |
+
+**Raíz:** el lector daba por hecho `Int16`. El Shure MV7+ entrega int24 en
+contenedor de 32 bits, así que el código partía cada muestra en dos int16 falsos
+y medía la ESTRUCTURA DE LOS BYTES, no el sonido. Esa estructura es casi
+constante ⇒ una línea inmóvil. Y como el `else` era "todo lo que no es float es
+int16", nadie lo iba a notar leyendo el código.
+
+**Fix:** `forEachSample` deduce el ancho del contenedor **midiéndolo**
+(`bytes / (frames · canales)`), no de `mBitsPerChannel`, y honra
+`kAudioFormatFlagIsAlignedHigh`, big-endian, int8/16/24/32 y float32/64.
+Además el RMS se calcula quitando la media (un offset DC no se oye pero clava la
+barra) y `AudioLevelBox` CADUCA: sin buffer fresco en 350 ms el nivel es 0 —
+antes, si la fuente moría, el último valor se quedaba pegado pareciendo señal.
+
+⚠️ **El formato CAMBIA entre arranques.** Medido el mismo día: unas veces
+`float32 flags=0x29`, otras `int24 flags=0x14` sobre el MISMO micro. Por eso hay
+que leer el formato de CADA buffer y jamás cachearlo ni asumirlo.
+
+Verificación: 0.87 clavado (rango 0.02 en 20 s) → **0.0000 en silencio y
+subiendo con sonido real** (rango 0.05 con pings a través de las bocinas).
+
+### 2. Pesaba 15x lo que OBS — bitrate promedio en vez de calidad constante
+
+Comparación directa, mismo contenido, ambas apps grabando a la vez esa mañana:
+
+| | Duración | Peso | Bitrate |
+|---|---|---|---|
+| OBS/Streamlabs | 41.7 min | 334 MB | 0.93 Mbps |
+| SFCast Estudio | 50 min | ~6 GB | ~16 Mbps |
+
+**Raíz (tres sumandos):**
+
+1. `ProgramSink` fijaba `AVVideoAverageBitRateKey = w·h·fps·0.12` = **7.5 Mbps**
+   a 1080p30. OBS no usa bitrate promedio: usa CQP/CRF. En captura de pantalla
+   el bitrate promedio es el peor modo posible — paga lo mismo por una pantalla
+   quieta que por una llena de movimiento.
+2. `camera.mov` salía por `AVCaptureMovieFileOutput` con preset `.high` y **sin
+   bitrate fijado**: escribía a lo que se le antojaba (medido: 8.3 Mbps, y con
+   cámara buena sube).
+3. Se escribían **tres archivos a la vez** y **nada consumía dos de ellos**: el
+   worker del VPS solo glob-ea `seg-*.mp4`; SFStudio y la skill de edición no
+   tocan los raws.
+
+**Fix:** calidad constante (`AVVideoQualityKey`) + GOP largo (5 s) en el
+programa; bitrate explícito en el raw de cámara; y los RAW **apagados por
+default** (migración única, avisada en la UI, reversible con un clic en
+Salidas). Además el panel de Salidas ahora muestra el peso proyectado en GB/hora
+y el log imprime MB y Mbps por archivo al cerrar — el costo dejó de ser
+invisible. El `Transcoder` gana una compuerta previa: si el archivo ya está por
+debajo del objetivo, no lo re-encodea (sería quemar tiempo y degradar imagen
+para no ahorrar un byte).
+
+Verificación: **0.82 Mbps** (contra 0.93 de OBS) con texto haciendo scroll en
+pantalla. 50 minutos pasan de ~6 GB a ~310 MB.
+
+### 3. La pantalla se congelaba a mitad — y nadie se enteraba
+
+**Raíz:** `SCStream(filter:configuration:delegate: nil)`. Sin delegate,
+`didStopWithError` nunca llega. Y como el compositor pinta SIEMPRE el último
+frame guardado, un stream muerto se ve **idéntico** a uno vivo. El "comparador"
+que existía solo detectaba la fuente que jamás entregó un frame, nunca la que
+dejó de entregarlos. Agravante: el disco lleno mata los writers a mitad y
+tampoco había guardia.
+
+**El sensor correcto — y el falso positivo que hubo que corregir.** El primer
+intento midió la edad del último frame: 10 reenganches en 45 s con la Mac en
+reposo. Obvio en retrospectiva: **SCK no manda frames nuevos si la pantalla no
+cambia**, y una pantalla quieta está perfectamente sana. La pregunta correcta no
+es "¿la imagen cambió?" sino **"¿el stream sigue hablando?"**, y se responde con
+dos canales independientes: el callback de video (llega también con frames
+`.idle`) y el tap de audio del mismo stream (late aunque la pantalla no cambie —
+fue justo el delator del incidente real). Silencio en AMBOS más de 5 s = muerto.
+
+**Fix:** `SCStreamDelegate` conectado + `StreamHealth` (latido de los dos
+canales) + watchdog a 1 Hz que reengancha solo; si estaba grabando el raw de
+pantalla, continúa en `screen-002.mp4` y el corte queda en el manifest.
+`queueDepth` 5 → 8 (guardamos un frame fuera del callback: con 5 el pool de SCK
+se queda sin sitio bajo carga y deja de entregar en silencio). Guardias de
+disco: 5 GB para arrancar, aviso a 3 GB, y **auto-stop a 1.2 GB** — mejor una
+grabación buena de 40 min que una corrupta de 50. Latido cada 15 s en el log con
+estado de stream, audio, frames, drops y disco. Y alarma VISIBLE en la ventana.
+
+Verificación (`--studiobench N --killstream`, que mata el stream a propósito):
+
+```
+16:47:11  QA: matando el stream de pantalla a propósito
+16:47:15  ❤︎ 15s — stream:4.4s-mudo … sys:mudo
+16:47:16  PANTALLA CONGELADA — 5.6s mudo. Reenganchando…
+16:47:16  captura de pantalla reenganchada
+16:47:30  ❤︎ 30s — stream:0.0s-mudo … sys:ok   (frames 451→902, 0 drops)
+```
+
+Detección en 5.6 s, recuperación en menos de 1 s, y el programa siguió grabando.
+
+### Lo que hay que quedarse de esto
+
+**Un órgano sin sensor se ve igual de sano que uno vivo.** Los tres bugs
+sobrevivieron por lo mismo: la app no medía su propia salida. No decía cuánto
+pesaba, no decía si el stream respiraba, y el vúmetro "medía" sin que nadie
+comparara nunca su lectura contra una segunda fuente. Por eso los fixes no son
+solo el parche: son los tres sensores (peso por archivo, latido del stream,
+nivel con caducidad) más los modos de QA que los ejercen.
+
+### QA nuevo
+
+```bash
+open -W /Applications/SFCast.app --args --studiobench 45              # peso + mic + salud
+open -W /Applications/SFCast.app --args --studiobench 30 --killstream # prueba la recuperación
+```

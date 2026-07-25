@@ -91,15 +91,18 @@ struct StudioScene: Codable, Identifiable, Equatable {
 /// - raw de pantalla y cámara = caso A (Screen Studio "extract raw files")
 /// - programa compuesto = caso B (OBS Source Record)
 struct StudioOutputs: Codable, Equatable {
-    var rawScreen = true
-    var rawCamera = true
+    /// Los RAW arrancan APAGADOS (25 jul): son la opción "capas estilo Screen
+    /// Studio" para reeditar, pero NADA en el pipeline los lee todavía y cuestan
+    /// casi 9x lo que el programa. Se prenden cuando haya quien los use.
+    var rawScreen = false
+    var rawCamera = false
     var program = true
 
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        rawScreen = try c.decodeIfPresent(Bool.self, forKey: .rawScreen) ?? true
-        rawCamera = try c.decodeIfPresent(Bool.self, forKey: .rawCamera) ?? true
+        rawScreen = try c.decodeIfPresent(Bool.self, forKey: .rawScreen) ?? false
+        rawCamera = try c.decodeIfPresent(Bool.self, forKey: .rawCamera) ?? false
         program = try c.decodeIfPresent(Bool.self, forKey: .program) ?? true
     }
 }
@@ -124,23 +127,83 @@ enum StudioCanvasMode: String, Codable, CaseIterable {
     }
 }
 
-/// Calidad del programa compuesto (bits por píxel por frame, ancla del repo:
-/// el bitrate SIEMPRE escala por píxeles o Retina sale borroso).
+/// Calidad del programa compuesto.
+///
+/// ⚠️ El default (`media`) es CALIDAD CONSTANTE, como OBS/Streamlabs — NO
+/// bitrate promedio. Es la diferencia entre 334 MB y 6 GB por la misma hora de
+/// grabación (medición del 25 jul, mismo contenido, ambas apps a la vez). En
+/// captura de pantalla el bitrate promedio es el peor modo posible: paga el
+/// mismo precio por una pantalla quieta que por una llena de movimiento.
+/// `master` queda como escape para quien SÍ quiera el bitrate fijo alto.
 enum StudioQuality: String, Codable, CaseIterable {
     case alta, media, baja
     var label: String {
         switch self {
         case .alta: return "Alta (master)"
-        case .media: return "Media"
-        case .baja: return "Baja (ligera)"
+        case .media: return "Media (recomendada)"
+        case .baja: return "Ligera (YouTube)"
         }
     }
+    /// true = CQ (calidad constante, el archivo pesa según lo que pasa en
+    /// pantalla); false = bitrate promedio fijo.
+    var usesConstantQuality: Bool { self != .alta }
+    /// 0-1 para `AVVideoQualityKey`. 0.62 ≈ CQP ~23 de OBS en pantalla.
+    var constantQuality: Double {
+        switch self {
+        case .alta: return 0.80
+        case .media: return 0.62
+        case .baja: return 0.48
+        }
+    }
+    /// Solo se usa cuando `usesConstantQuality == false`.
     var bitsPerPxFrame: Double {
         switch self {
-        case .alta: return 0.16
-        case .media: return 0.12
-        case .baja: return 0.08
+        case .alta: return 0.10
+        case .media: return 0.04
+        case .baja: return 0.025
         }
+    }
+    /// Bitrate del RAW de cámara (camera.mov). Antes NO se fijaba: el
+    /// AVCaptureMovieFileOutput con preset `.high` escribe a lo que se le antoja
+    /// (decenas de Mbps con una cámara buena) y era el segundo tragón del disco.
+    var cameraRawKbps: Int {
+        switch self {
+        case .alta: return 10_000
+        case .media: return 5_000    // HEVC 1080p30 a 5 Mbps = master de sobra
+        case .baja: return 3_000
+        }
+    }
+
+    /// Mbps MEDIDOS del programa a 1080p30 (bench 25 jul, pantalla con texto en
+    /// movimiento — el peor caso). Sirve para ESTIMAR el peso antes de grabar:
+    /// que el costo se vea ANTES, no cuando el disco truena.
+    var programMbpsAt1080p30: Double {
+        switch self {
+        case .alta: return 2.40
+        case .media: return 0.90
+        case .baja: return 0.55
+        }
+    }
+}
+
+/// Estimación de peso de una sesión. No es exacta (el encoder es de calidad
+/// constante: gasta según lo que pase en pantalla), pero pone un número donde
+/// antes no había ninguno.
+enum WeightEstimate {
+    /// SCRecordingOutput no expone bitrate; 1.42 Mbps @1080p30 es lo MEDIDO.
+    static let screenRawMbpsAt1080p30: Double = 1.42
+
+    static func mbps(config: StudioConfig, width: Int, height: Int, fps: Int) -> Double {
+        let scale = (Double(width * height) / (1920.0 * 1080.0)) * (Double(fps) / 30.0)
+        var total = 0.16   // audio (2 pistas AAC 160k)
+        if config.outputs.program { total += config.programQuality.programMbpsAt1080p30 * scale }
+        if config.outputs.rawScreen { total += screenRawMbpsAt1080p30 * scale }
+        if config.outputs.rawCamera { total += Double(config.programQuality.cameraRawKbps) / 1000.0 }
+        return total
+    }
+
+    static func gbPerHour(config: StudioConfig, width: Int, height: Int, fps: Int) -> Double {
+        mbps(config: config, width: width, height: height, fps: fps) * 3600 / 8 / 1000
     }
 }
 
@@ -157,6 +220,11 @@ struct StudioConfig: Codable {
     /// false = la ventana del Estudio es INVISIBLE en capturas/grabaciones
     /// (estilo OBS, default); true = ventana normal, sale en screenshots.
     var windowCapturable = false
+    /// Migración única del 25 jul: apagar los RAW por default. Motivo: NADA los
+    /// consumía (el worker del VPS solo glob-ea `seg-*.mp4`, SFStudio y la skill
+    /// de edición no los tocan) y entre los dos costaban ~6.9 Mbps de los ~7.8
+    /// que pesaba una sesión. Se avisa en la UI y siguen a un clic en Salidas.
+    var weightFixApplied = false
 
     static let file = AppSettings.dir.appendingPathComponent("scenes.json")
 
@@ -176,7 +244,12 @@ struct StudioConfig: Codable {
         canvasMode = try c.decodeIfPresent(StudioCanvasMode.self, forKey: .canvasMode) ?? .native
         programQuality = try c.decodeIfPresent(StudioQuality.self, forKey: .programQuality) ?? .media
         windowCapturable = try c.decodeIfPresent(Bool.self, forKey: .windowCapturable) ?? false
+        weightFixApplied = try c.decodeIfPresent(Bool.self, forKey: .weightFixApplied) ?? false
     }
+
+    /// true si `load()` acaba de aplicar la migración de peso (la UI lo avisa
+    /// UNA vez: apagar salidas del usuario en silencio sería peor que el bug).
+    static private(set) var weightFixJustApplied = false
 
     static func load() -> StudioConfig {
         if let data = try? Data(contentsOf: file),
@@ -184,6 +257,17 @@ struct StudioConfig: Codable {
            !cfg.scenes.isEmpty {
             if cfg.activeSceneID == nil || !cfg.scenes.contains(where: { $0.id == cfg.activeSceneID }) {
                 cfg.activeSceneID = cfg.scenes.first?.id
+            }
+            if !cfg.weightFixApplied {
+                cfg.weightFixApplied = true
+                if cfg.outputs.rawScreen || cfg.outputs.rawCamera {
+                    cfg.outputs.rawScreen = false
+                    cfg.outputs.rawCamera = false
+                    Self.weightFixJustApplied = true
+                    Log.info("Estudio: migración de peso — RAW de pantalla y cámara apagados "
+                             + "(nada los consumía; eran ~6.9 de los ~7.8 Mbps). Reactivables en Salidas.")
+                }
+                cfg.save()
             }
             return cfg
         }

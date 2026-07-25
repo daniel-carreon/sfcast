@@ -74,6 +74,18 @@ enum Transcoder {
         let dur0 = info?.duration
         let isCamera = url.pathExtension.lowercased() == "mov"
         let kbps = targetBitrate(base: baseKbps, width: info?.width, height: info?.height, isCamera: isCamera)
+        // COMPUERTA PREVIA (25 jul): desde que el Estudio graba en calidad
+        // constante, el programa ya sale ~0.8 Mbps — por debajo del objetivo del
+        // compresor. Re-encodear eso solo quema tiempo y DEGRADA la imagen para
+        // no ahorrar un byte. Si ya está por debajo del objetivo, no se toca.
+        if let d = dur0, d > 0.5 {
+            let currentKbps = Double(size0) * 8 / d / 1000
+            if currentKbps <= Double(kbps) * 1.05 {
+                Log.info(String(format: "Transcoder: %@ ya está en %.0f kbps (objetivo %d) — se deja tal cual",
+                                url.lastPathComponent, currentKbps, kbps))
+                return nil
+            }
+        }
         // El temporal vive FUERA de sessionDir a propósito: rsync sube el
         // directorio entero, y un .part suelto ahí acabaría en el VPS. Conserva
         // la extensión del original: ffmpeg elige el contenedor por ella y el

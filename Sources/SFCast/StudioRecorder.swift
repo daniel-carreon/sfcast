@@ -24,9 +24,40 @@ final class StudioRecorder {
     private var activeOutputs = StudioOutputs()
     private var wroteScreen = false
     private var wroteCamera = false
+    /// Archivos extra de raw de pantalla si hubo que reenganchar a mitad.
+    private var screenRawFiles: [String] = []
+    private var health: Task<Void, Never>?
+    private var lowDiskWarned = false
 
     var isRecording: Bool { state == .recording }
     var elapsed: TimeInterval { state == .recording ? Date().timeIntervalSince(startedAt) : 0 }
+
+    /// Avisos hacia la UI (disco, congelada, auto-stop).
+    var onAlert: ((String, Bool) -> Void)?
+    /// Lo llama el health monitor si el disco se acaba: hay que DETENER.
+    var onEmergencyStop: (() -> Void)?
+
+    // MARK: - guardias de disco
+
+    /// Sin esto, "Disk Full" mata los writers a mitad y te quedas con archivos
+    /// truncados sin una sola advertencia (lo que pasó el 25 jul: 6 GB en 50
+    /// min llenaron el disco y camera.mov murió con `Disk Full` a los 43 min).
+    static let minFreeBytesToStart: Int64 = 5 * 1_000_000_000    // 5 GB
+    static let warnFreeBytes: Int64 = 3 * 1_000_000_000          // 3 GB
+    static let stopFreeBytes: Int64 = 1_200_000_000              // 1.2 GB
+
+    static func freeBytes() -> Int64 {
+        let url = AppSettings.recordingsDir
+        if let v = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+           let b = v.volumeAvailableCapacityForImportantUsage { return b }
+        if let a = try? FileManager.default.attributesOfFileSystem(forPath: url.path),
+           let b = (a[.systemFreeSize] as? NSNumber)?.int64Value { return b }
+        return .max
+    }
+
+    static func gb(_ bytes: Int64) -> String {
+        String(format: "%.1f GB", Double(bytes) / 1_000_000_000)
+    }
 
     /// Arranca la grabación con el set de salidas configurado. Devuelve error
     /// legible si NINGUNA salida pudo activarse (jamás grabar "nada" en silencio).
@@ -36,6 +67,14 @@ final class StudioRecorder {
         guard RecordingController.shared.state == .idle else {
             throw NSError(domain: "SFCast", code: 10, userInfo: [
                 NSLocalizedDescriptionKey: "Hay una grabación Loom en curso. Deténla antes de grabar en el Estudio."])
+        }
+        // PREFLIGHT de disco: mejor no arrancar que morir a los 43 minutos.
+        let free = Self.freeBytes()
+        guard free >= Self.minFreeBytesToStart else {
+            throw NSError(domain: "SFCast", code: 12, userInfo: [
+                NSLocalizedDescriptionKey:
+                    "Solo quedan \(Self.gb(free)) libres en el disco. Libera espacio antes de grabar "
+                    + "(mínimo \(Self.gb(Self.minFreeBytesToStart)))."])
         }
         videoID = makeVideoID()
         startedAt = Date()
@@ -48,16 +87,28 @@ final class StudioRecorder {
         }
 
         var activated: [String] = []
+        screenRawFiles = []
+        lowDiskWarned = false
         if config.outputs.rawScreen && engine.screenAvailable {
             do {
                 try engine.attachScreenRecording(url: sessionDir.appendingPathComponent("screen.mp4"))
                 wroteScreen = true
+                screenRawFiles = ["screen.mp4"]
                 activated.append("screen.mp4")
             } catch {
                 Log.error("Estudio: raw de pantalla no arrancó: \(error.localizedDescription)")
             }
         }
+        // Si el motor reengancha la pantalla a mitad, el raw sigue en un archivo
+        // NUEVO. El corte queda en el manifest — no se pierde ni se disimula.
+        engine.onNeedNewScreenRawURL = { [weak self] in
+            guard let self, let dir = self.sessionDir else { return nil }
+            let name = String(format: "screen-%03d.mp4", self.screenRawFiles.count + 1)
+            self.screenRawFiles.append(name)
+            return dir.appendingPathComponent(name)
+        }
         if config.outputs.rawCamera && engine.cameraAvailable {
+            engine.setCameraRawBitrate(kbps: config.programQuality.cameraRawKbps)
             engine.startCameraMovie(url: sessionDir.appendingPathComponent("camera.mov"))
             wroteCamera = true
             activated.append("camera.mov")
@@ -67,7 +118,7 @@ final class StudioRecorder {
                                 width: Int(engine.canvasSize.width),
                                 height: Int(engine.canvasSize.height),
                                 fps: engine.fps,
-                                bitsPerPxFrame: config.programQuality.bitsPerPxFrame)
+                                quality: config.programQuality)
             if s.prepare() {
                 sink = s
                 engine.sink.set(s)
@@ -82,7 +133,50 @@ final class StudioRecorder {
                 NSLocalizedDescriptionKey: "Ninguna salida pudo activarse (¿permisos de pantalla/cámara?)."])
         }
         state = .recording
-        Log.info("Estudio: grabando \(videoID) → [\(activated.joined(separator: ", "))]")
+        Log.info("Estudio: grabando \(videoID) → [\(activated.joined(separator: ", "))] "
+                 + "calidad=\(config.programQuality.rawValue) libre=\(Self.gb(free))")
+        startHealthMonitor(engine: engine)
+    }
+
+    // MARK: - health monitor (el latido que faltaba)
+
+    /// Cada 15s: deja rastro en el log de si la cosa está VIVA (frames de
+    /// pantalla nuevos, audio fresco, disco) y actúa cuando no. El 25 jul una
+    /// sesión grabó 50 minutos congelada y el log no dijo NADA hasta el cierre.
+    private func startHealthMonitor(engine: StudioEngine) {
+        health?.cancel()
+        health = Task { @MainActor [weak self] in
+            var ticks = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                guard let self, self.state == .recording else { return }
+                ticks += 1
+                let free = Self.freeBytes()
+                let fresh = engine.levels.fresh()
+                let st = self.sink?.snapshot()
+                let beats = engine.screenHealth.beats()
+                Log.info(String(format: "Estudio ❤︎ %ds — stream:%.1fs-mudo (v=%d a=%d) imagen:%@ "
+                                + "mic:%@ sys:%@ frames:%d drops:%d libre:%@",
+                                Int(self.elapsed), engine.screenHealth.silence(),
+                                beats.video, beats.audio,
+                                engine.screenFrozen ? "CONGELADA" : "ok",
+                                fresh.mic ? "ok" : "MUDO", fresh.system ? "ok" : "mudo",
+                                st?.videoFrames ?? 0, st?.droppedFrames ?? 0, Self.gb(free)))
+                if free < Self.stopFreeBytes {
+                    Log.error("Estudio: DISCO CASI LLENO (\(Self.gb(free))) — deteniendo para salvar lo grabado")
+                    self.onAlert?("Disco casi lleno (\(Self.gb(free))) — detuve la grabación para no corromperla", true)
+                    notify("SFCast", "Disco casi lleno: detuve la grabación para salvarla.")
+                    self.onEmergencyStop?()
+                    return
+                }
+                if free < Self.warnFreeBytes && !self.lowDiskWarned {
+                    self.lowDiskWarned = true
+                    Log.error("Estudio: disco bajo (\(Self.gb(free)))")
+                    self.onAlert?("Disco bajo: \(Self.gb(free)) libres", true)
+                    notify("SFCast", "Disco bajo (\(Self.gb(free))). Considera detener y liberar espacio.")
+                }
+            }
+        }
     }
 
     /// El switch de escena EN VIVO queda en el timeline (va al manifest).
@@ -97,6 +191,8 @@ final class StudioRecorder {
     func stop(engine: StudioEngine, config: StudioConfig) async -> URL? {
         guard state == .recording else { return nil }
         state = .stopping
+        health?.cancel(); health = nil
+        engine.onNeedNewScreenRawURL = nil
         let duration = Date().timeIntervalSince(startedAt)
         let dir = sessionDir!
         let id = videoID
@@ -114,7 +210,10 @@ final class StudioRecorder {
 
         // 3) manifest con probe real de cada archivo (duración/dimensiones)
         var outputs: [StudioManifest.OutputFile] = []
-        for (role, name) in [("screen", "screen.mp4"), ("camera", "camera.mov"), ("program", "seg-001.mp4")] {
+        var probe: [(String, String)] = screenRawFiles.map { ("screen", $0) }
+        if probe.isEmpty { probe = [("screen", "screen.mp4")] }
+        probe += [("camera", "camera.mov"), ("program", "seg-001.mp4")]
+        for (role, name) in probe {
             let url = dir.appendingPathComponent(name)
             guard FileManager.default.fileExists(atPath: url.path) else { continue }
             var out = StudioManifest.OutputFile(role: role, file: name)
@@ -168,6 +267,23 @@ final class StudioRecorder {
         state = .idle
         wroteScreen = false
         wroteCamera = false
+        // Contabilidad de PESO en el log: sin esto no hay forma de notar que una
+        // grabación pesa 15x lo que debería hasta que el disco truena.
+        var total: Int64 = 0
+        var parts: [String] = []
+        for out in outputs {
+            let p = dir.appendingPathComponent(out.file).path
+            let size = ((try? FileManager.default.attributesOfItem(atPath: p))?[.size] as? NSNumber)?.int64Value ?? 0
+            total += size
+            let mbps = duration > 1 ? Double(size) * 8 / duration / 1_000_000 : 0
+            parts.append(String(format: "%@ %.0f MB (%.2f Mbps)", out.file, Double(size) / 1_000_000, mbps))
+        }
+        let totalMbps = duration > 1 ? Double(total) * 8 / duration / 1_000_000 : 0
+        Log.info(String(format: "Estudio: PESO %.1f min → %.0f MB total (%.2f Mbps) — %@",
+                        duration / 60, Double(total) / 1_000_000, totalMbps, parts.joined(separator: " · ")))
+        if engine.screenRestarts > 0 {
+            Log.error("Estudio: hubo \(engine.screenRestarts) reenganche(s) de pantalla en esta sesión")
+        }
         Log.info("Estudio: sesión \(id) guardada en \(dir.path)")
         return dir
     }
@@ -204,35 +320,52 @@ final class ProgramSink: @unchecked Sendable {
     private var stats = Stats()
     private var audioErrorLogged = false
 
-    private let bitsPerPxFrame: Double
+    private let quality: StudioQuality
 
-    init(url: URL, width: Int, height: Int, fps: Int, bitsPerPxFrame: Double = 0.12) {
+    init(url: URL, width: Int, height: Int, fps: Int, quality: StudioQuality = .media) {
         self.url = url
         // dimensiones pares (HEVC lo exige)
         self.width = width - (width % 2)
         self.height = height - (height % 2)
         self.fps = fps
-        self.bitsPerPxFrame = bitsPerPxFrame
+        self.quality = quality
     }
 
-    /// Crea el writer con video HEVC (bitrate escalado por PÍXELES — invariante
-    /// del repo: bitrate fijo sin escalar = borroso en Retina) + 2 pistas AAC:
-    /// track 1 mic (voz), track 2 audio del sistema. Separadas a propósito
-    /// (estilo Screen Studio): editables por separado; los players tocan la 1.
+    /// Crea el writer con video HEVC + 2 pistas AAC: track 1 mic (voz), track 2
+    /// audio del sistema. Separadas a propósito (estilo Screen Studio):
+    /// editables por separado; los players tocan la 1.
+    ///
+    /// ⚠️ CALIDAD CONSTANTE, NO BITRATE FIJO (fix 25 jul). Antes se fijaba
+    /// `AVVideoAverageBitRateKey = w·h·fps·0.12` ⇒ 7.5 Mbps a 1080p30 y el
+    /// encoder GASTA ESOS BITS aunque la pantalla esté quieta. Medición real del
+    /// mismo contenido a la misma hora: OBS 41.7 min = 334 MB (0.93 Mbps) vs
+    /// SFCast ≈ 6 GB. OBS no usa bitrate promedio: usa CQP/CRF. Aquí lo mismo,
+    /// vía `AVVideoQualityKey` (calidad constante HEVC, Apple silicon) + GOP
+    /// largo: una pantalla quieta pasa a costar casi nada y una con movimiento
+    /// sube sola. Sin esto, cualquier otro ahorro es maquillaje.
     func prepare() -> Bool {
         do {
             try? FileManager.default.removeItem(at: url)
             let w = try AVAssetWriter(outputURL: url, fileType: .mp4)
-            // bits/px/frame configurable (Ajustes → Calidad); 0.12 ≈ 8 Mbps @1080p30.
-            let bitrate = Int(Double(width * height * fps) * bitsPerPxFrame)
+            var compression: [String: Any] = [
+                AVVideoExpectedSourceFrameRateKey: fps,
+                // GOP largo: el default de AVAssetWriter mete keyframes muy
+                // seguido y en captura de pantalla eso solo son bytes tirados.
+                AVVideoMaxKeyFrameIntervalKey: fps * 5,
+                AVVideoMaxKeyFrameIntervalDurationKey: 5.0,
+                AVVideoAllowFrameReorderingKey: false,
+            ]
+            if quality.usesConstantQuality {
+                compression[AVVideoQualityKey] = quality.constantQuality
+            } else {
+                compression[AVVideoAverageBitRateKey] =
+                    Int(Double(width * height * fps) * quality.bitsPerPxFrame)
+            }
             let videoSettings: [String: Any] = [
                 AVVideoCodecKey: AVVideoCodecType.hevc,
                 AVVideoWidthKey: width,
                 AVVideoHeightKey: height,
-                AVVideoCompressionPropertiesKey: [
-                    AVVideoAverageBitRateKey: bitrate,
-                    AVVideoExpectedSourceFrameRateKey: fps,
-                ],
+                AVVideoCompressionPropertiesKey: compression,
             ]
             let vin = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
             vin.expectsMediaDataInRealTime = true
@@ -316,6 +449,11 @@ final class ProgramSink: @unchecked Sendable {
             audioErrorLogged = true
             Log.error("ProgramSink: append de audio falló (\(writer.error?.localizedDescription ?? "?")) — el video sigue")
         }
+    }
+
+    /// Stats en vivo para el health monitor.
+    func snapshot() -> Stats {
+        lock.lock(); defer { lock.unlock() }; return stats
     }
 
     /// Snapshot síncrono para finish() (NSLock no debe cruzar contexto async).

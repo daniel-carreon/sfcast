@@ -579,11 +579,21 @@ final class RecordingController {
 final class CamFileDelegate: NSObject, AVCaptureFileOutputRecordingDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var _finished = false
+    private var _error: String?
+    /// El Estudio también usa este delegate: sin etiqueta, sus errores se
+    /// loggeaban como "camOnly" y mandaban el diagnóstico al lado equivocado
+    /// (el `Disk Full` del 25 jul era del raw de cámara del ESTUDIO).
+    private let label: String
+    init(label: String = "camOnly") { self.label = label }
+
     var finished: Bool { lock.lock(); defer { lock.unlock() }; return _finished }
+    var failure: String? { lock.lock(); defer { lock.unlock() }; return _error }
 
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL,
                     from connections: [AVCaptureConnection], error: Error?) {
-        if let error { Log.error("camOnly segmento: \(error.localizedDescription)") }
-        lock.lock(); _finished = true; lock.unlock()
+        if let error {
+            Log.error("\(label) — \(outputFileURL.lastPathComponent): \(error.localizedDescription)")
+        }
+        lock.lock(); _finished = true; _error = error?.localizedDescription; lock.unlock()
     }
 }

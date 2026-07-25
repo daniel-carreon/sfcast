@@ -27,6 +27,11 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     @Published var starved: Set<StudioSourceKind> = []
     @Published var lastSessionDir: URL?
     @Published var recordError: String?
+    /// Alarma VISIBLE del Estudio (congelada / disco / reenganche). Es lo que
+    /// faltaba el 25 jul: la pantalla se congeló y la app no dijo nada.
+    @Published var alert: String?
+    @Published var alertCritical = false
+    @Published var freeDiskNote: String?
 
     var testMode = false          // --studiotest: ventana capturable
     private var window: NSWindow?
@@ -58,7 +63,22 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
             engine.onPreviewSurface = { [weak self] surface in
                 self?.previewView?.display(surface: surface)
             }
+            engine.onAlert = { [weak self] msg, critical in
+                self?.raiseAlert(msg, critical: critical)
+            }
+            recorder.onAlert = { [weak self] msg, critical in
+                self?.raiseAlert(msg, critical: critical)
+            }
+            recorder.onEmergencyStop = { [weak self] in
+                guard let self, self.recorder.isRecording else { return }
+                self.toggleRecord()
+            }
             Task { await engine.start(config: config); pullEngineStatus() }
+        }
+        if StudioConfig.weightFixJustApplied {
+            raiseAlert("Apagué los RAW de pantalla y cámara: nada los usaba y eran ~9x el peso "
+                       + "del programa. Están a un clic en Salidas si los quieres.",
+                       critical: false, sticky: true)
         }
         startMeters()
     }
@@ -151,6 +171,74 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         exit(0)
     }
 
+    /// QA de PESO (`--studiobench N`): graba N segundos con la config REAL de
+    /// Daniel (sus escenas, sus salidas, su calidad) y reporta MB y Mbps por
+    /// archivo. Existe porque el bug del 25 jul (6 GB donde OBS hace 334 MB) era
+    /// invisible sin una medición: la app nunca decía cuánto pesaba lo que
+    /// escribía. Ahora el número se mide, no se supone.
+    func runBench(seconds: Int) async {
+        testMode = true
+        AudioMath.traceAudio = true
+        open()
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        print("BENCH canvas=\(Int(engine.canvasSize.width))x\(Int(engine.canvasSize.height))@\(engine.fps) "
+              + "calidad=\(config.programQuality.rawValue) cq=\(config.programQuality.usesConstantQuality) "
+              + "pantalla=\(engine.screenAvailable) camara=\(engine.cameraAvailable) "
+              + "salidas=[raw:\(config.outputs.rawScreen) cam:\(config.outputs.rawCamera) prog:\(config.outputs.program)]")
+        guard engine.screenAvailable else {
+            print("BENCH_FAIL sin-permiso-de-pantalla")
+            exit(3)
+        }
+        do {
+            try recorder.start(engine: engine, config: config, activeScene: activeScene)
+            isRecording = true
+        } catch {
+            print("BENCH_FAIL start: \(error.localizedDescription)")
+            exit(1)
+        }
+        // Movimiento real en pantalla: sin esto medimos un caso irreal (una
+        // pantalla 100% quieta comprime a casi nada en CUALQUIER encoder).
+        // De paso muestreamos el vúmetro: el bug de la línea fija solo se ve si
+        // uno MIRA el valor crudo a lo largo del tiempo.
+        var micMin: Float = 1, micMax: Float = 0, micSum: Float = 0, micN = 0
+        let killAt = CommandLine.arguments.contains("--killstream") ? (seconds * 5) / 3 : -1
+        for i in 0..<(seconds * 5) {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            if i == killAt { await engine.simulateStreamDeath() }
+            let l = engine.levels.get().mic
+            micMin = min(micMin, l); micMax = max(micMax, l); micSum += l; micN += 1
+            if i % 10 == 0 { selectScene(config.scenes[(i / 10) % config.scenes.count].id) }
+        }
+        print(String(format: "BENCH_MIC min=%.4f max=%.4f avg=%.4f muestras=%d rango=%.4f",
+                     micMin, micMax, micSum / Float(max(micN, 1)), micN, micMax - micMin))
+        Log.info(String(format: "BENCH_MIC min=%.4f max=%.4f avg=%.4f rango=%.4f",
+                        micMin, micMax, micSum / Float(max(micN, 1)), micMax - micMin))
+        let beats = engine.screenHealth.beats()
+        let silence = engine.screenHealth.silence()
+        let dir = await recorder.stop(engine: engine, config: config)
+        isRecording = false
+        guard let dir else { print("BENCH_FAIL sin-sesion"); exit(1) }
+        print(String(format: "BENCH_SALUD latidos video=%d audio=%d silencio=%.2fs reenganches=%d congelada=%@",
+                     beats.video, beats.audio, silence, engine.screenRestarts,
+                     engine.screenFrozen ? "SI" : "no"))
+        let files = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).sorted()
+        var total: Int64 = 0
+        for f in files where f.hasSuffix(".mp4") || f.hasSuffix(".mov") {
+            let p = (dir.path as NSString).appendingPathComponent(f)
+            let size = ((try? FileManager.default.attributesOfItem(atPath: p))?[.size] as? NSNumber)?.int64Value ?? 0
+            total += size
+            print(String(format: "BENCH_FILE %@ %.1f MB %.2f Mbps",
+                         f, Double(size) / 1_000_000, Double(size) * 8 / Double(seconds) / 1_000_000))
+        }
+        print(String(format: "BENCH_TOTAL %.1f MB en %ds = %.2f Mbps → %.2f GB/hora",
+                     Double(total) / 1_000_000, seconds,
+                     Double(total) * 8 / Double(seconds) / 1_000_000,
+                     Double(total) / Double(seconds) * 3600 / 1_000_000_000))
+        print("BENCH_DIR \(dir.path)")
+        await engine.stop()
+        exit(0)
+    }
+
     private func writeFramePNG(name: String) {
         guard let pb = engine.snapshotProgramFrame() else {
             print("STUDIOTEST_WARN sin frame de programa para \(name)")
@@ -208,9 +296,39 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     // MARK: - estado del motor / meters
 
     private func pullEngineStatus() {
-        screenOK = engine.screenAvailable
+        screenOK = engine.screenAvailable && !engine.screenFrozen
         cameraOK = engine.cameraAvailable
         starved = engine.starvedSources
+        if engine.screenFrozen { starved.insert(.screen) }
+    }
+
+    /// Peso proyectado con la config actual — el número que faltaba.
+    var weightHint: String {
+        let gbh = WeightEstimate.gbPerHour(config: config,
+                                           width: Int(engine.canvasSize.width),
+                                           height: Int(engine.canvasSize.height),
+                                           fps: engine.fps)
+        return String(format: "≈ %.1f GB por hora (%.0f MB por 10 min)", gbh, gbh * 1000 / 6)
+    }
+
+    var weightHeavy: Bool {
+        WeightEstimate.gbPerHour(config: config,
+                                 width: Int(engine.canvasSize.width),
+                                 height: Int(engine.canvasSize.height),
+                                 fps: engine.fps) > 1.5
+    }
+
+    /// Sube una alarma a la UI. Las críticas se quedan hasta que la situación
+    /// se cure; las buenas se borran solas.
+    func raiseAlert(_ message: String, critical: Bool, sticky: Bool? = nil) {
+        alert = message
+        alertCritical = critical
+        if !(sticky ?? critical) {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                if self.alert == message { self.alert = nil }
+            }
+        }
     }
 
     private var tick = 0
@@ -228,6 +346,11 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                 if self.isRecording { self.elapsed = self.recorder.elapsed }
                 self.tick += 1
                 if self.tick % 45 == 0 { self.engine.retryScreenIfNeeded() }   // ~3s
+                if self.tick % 150 == 0 {                                       // ~10s
+                    let free = StudioRecorder.freeBytes()
+                    self.freeDiskNote = free < StudioRecorder.minFreeBytesToStart
+                        ? "Disco: \(StudioRecorder.gb(free)) libres" : nil
+                }
             }
         }
     }
@@ -628,6 +751,8 @@ struct StudioRootView: View {
     var body: some View {
         VStack(spacing: 10) {
             topBar
+            if let msg = c.alert { alertBanner(msg, critical: c.alertCritical) }
+            else if let disk = c.freeDiskNote { alertBanner(disk, critical: true) }
             StudioPreviewView()
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(StudioSkin.panelBorder))
@@ -653,6 +778,24 @@ struct StudioRootView: View {
                 .keyboardShortcut("d", modifiers: .command)
                 .hidden()
         )
+    }
+
+    /// Barra de alarma: si la pantalla se congela o el disco se acaba, se ve.
+    /// El silencio era el bug de fondo del 25 jul, no un detalle de UI.
+    private func alertBanner(_ msg: String, critical: Bool) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: critical ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+            Text(msg).font(.system(size: 12, weight: .medium))
+            Spacer()
+            Button {
+                c.alert = nil
+            } label: { Image(systemName: "xmark").font(.system(size: 9)) }
+                .buttonStyle(.plain)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background((critical ? Color.red : Color.green).opacity(0.85))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     private var topBar: some View {
@@ -1135,15 +1278,20 @@ struct OutputsPanel: View {
     var body: some View {
         PanelBox(title: "Salidas") {
             VStack(alignment: .leading, spacing: 7) {
-                outputToggle("Pantalla (raw)", "screen.mp4", available: c.screenOK, isOn: Binding(
+                outputToggle("Pantalla (raw)", "screen.mp4 · pesado", available: c.screenOK, isOn: Binding(
                     get: { c.config.outputs.rawScreen },
                     set: { c.config.outputs.rawScreen = $0; c.config.save() }))
-                outputToggle("Cámara (raw)", "camera.mov", available: c.cameraOK, isOn: Binding(
+                outputToggle("Cámara (raw)", "camera.mov · pesado", available: c.cameraOK, isOn: Binding(
                     get: { c.config.outputs.rawCamera },
                     set: { c.config.outputs.rawCamera = $0; c.config.save() }))
                 outputToggle("Programa", "compuesto + escenas", available: true, isOn: Binding(
                     get: { c.config.outputs.program },
                     set: { c.config.outputs.program = $0; c.config.save() }))
+                // EL COSTO A LA VISTA. El bug del 25 jul (6 GB en 50 min) vivió
+                // porque nada en la app decía nunca cuánto iba a pesar.
+                Text(c.weightHint)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(c.weightHeavy ? .orange : StudioSkin.dim)
                 Spacer()
                 HStack {
                     Button {

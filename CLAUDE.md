@@ -39,7 +39,7 @@ rm -rf /Applications/SFCast.app && cp -R dist/SFCast.app /Applications/   # inst
 ./infra/deploy.sh               # sube el worker al VPS y reinicia el servicio
 ```
 
-## Modo Estudio (v2.0, 22 jul 2026)
+## Modo Estudio (v2.4, 25 jul 2026)
 
 Estudio multi-escena estilo OBS/piel Screen Studio, ADITIVO sobre el Loom:
 `StudioModel.swift` (escenas/fuentes, scenes.json) · `StudioEngine.swift`
@@ -47,8 +47,20 @@ Estudio multi-escena estilo OBS/piel Screen Studio, ADITIVO sobre el Loom:
 (doble salida: screen.mp4 + camera.mov raw, seg-001.mp4 programa con 2 pistas
 AAC, manifest.json = contrato con SFStudio/edición agéntica) ·
 `StudioWindow.swift` (vista desktop SwiftUI + `--studiotest`). Decisiones y
-gotchas: `DECISIONS.md` §v2.0. QA: `open -W /Applications/SFCast.app --args
---studiotest 8` (SIEMPRE via open — TCC se atribuye al proceso responsable).
+gotchas: `DECISIONS.md` §v2.0–§v2.4. QA (SIEMPRE via `open` — TCC se atribuye al
+proceso responsable, no al binario):
+
+```bash
+open -W /Applications/SFCast.app --args --studiotest 8                 # E2E compositor/escenas
+open -W /Applications/SFCast.app --args --studiobench 45               # PESO por archivo + mic + salud
+open -W /Applications/SFCast.app --args --studiobench 30 --killstream  # mata el stream: prueba la recuperación
+```
+
+Los tres bugs de la sesión real del 25 jul (mixer clavado, 15x el peso de OBS,
+pantalla congelada 50 min) y sus raíces medidas están en `DECISIONS.md` §v2.4.
+Resumen operativo: el programa sale a **~0.8 Mbps** (OBS hace 0.93), los RAW van
+**apagados por default** (nada los consumía) y hay watchdog del stream +
+guardias de disco con auto-stop.
 
 ## Invariantes que NO se tocan
 
@@ -63,6 +75,22 @@ gotchas: `DECISIONS.md` §v2.0. QA: `open -W /Applications/SFCast.app --args
    cdhash del binario). Es esperado, no un bug.
 5. **La grabación siempre queda a salvo en local** (`~/Movies/SFCast/{id}/`) aunque la
    subida falle. `--partial` reanuda.
+
+5b. **Todo órgano de captura lleva SENSOR, y el sensor se ejerce en QA** (v2.4).
+   Los tres bugs del 25 jul sobrevivieron porque la app no medía su propia
+   salida: no decía cuánto pesaba, no decía si el stream respiraba, y el vúmetro
+   nunca se contrastó contra una segunda fuente. Reglas que salieron de ahí:
+   - Un `SCStream` SIEMPRE lleva delegate. Sin él, uno muerto se ve idéntico a
+     uno vivo (el compositor recicla el último frame).
+   - La vida del stream se mide por **latido de callbacks**, jamás por "¿cambió
+     la imagen?" — una pantalla quieta es legítima y SCK deja de mandar frames.
+   - El **formato de audio se lee de CADA buffer y el ancho del contenedor se
+     MIDE** (`bytes / (frames · canales)`). El mismo micro sale `float32` o
+     `int24 alineado alto` según el arranque; asumir int16 fue el bug del mixer.
+   - Video de pantalla se codifica en **calidad constante**, nunca a bitrate
+     promedio (es la diferencia entre 334 MB y 6 GB por la misma hora).
+   - Nada que escriba a disco arranca sin **preflight de espacio** ni corre sin
+     auto-stop: mejor 40 min buenos que 50 corruptos.
 6. **Destino local vs VPS** (toggle del micropanel, `autoUpload` en settings.json, v1.7):
    ON = sube al VPS al terminar (lo de siempre); OFF = SOLO guarda en local, sin subir.
    Se empuja luego con "↑ subir" del Historial. El push posterior NO comprime en sitio

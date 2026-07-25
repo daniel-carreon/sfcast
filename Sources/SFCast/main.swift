@@ -29,6 +29,13 @@ let studioTestSeconds: Int? = {
     return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 8
 }()
 
+/// QA de PESO (`--studiobench N`): graba N segundos con la config REAL y
+/// reporta MB/Mbps por archivo. El comparador del tamaño (ver runBench).
+let studioBenchSeconds: Int? = {
+    guard let i = cliArgs.firstIndex(of: "--studiobench") else { return nil }
+    return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 60
+}()
+
 /// QA del compresor (`--compresstest <dir>`): corre Transcoder sobre una COPIA
 /// del directorio dado y reporta antes/después. Existe porque comprimir es lo
 /// único del flujo que toca el MP4 en sitio: quiero poder probar el camino real
@@ -134,7 +141,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusBar.setup()
         Log.info("SFCast arriba (demo=\(demo.map(String.init) ?? "no") selftest=\(selftest.map(String.init) ?? "no"))")
-        if let seconds = studioTestSeconds {
+        if let seconds = studioBenchSeconds {
+            Task { @MainActor in await StudioController.shared.runBench(seconds: seconds) }
+        } else if let seconds = studioTestSeconds {
             Task { @MainActor in await StudioController.shared.runTest(seconds: seconds) }
         } else if let seconds = paneltest {
             Task { @MainActor in await runPanelTest(seconds: seconds) }

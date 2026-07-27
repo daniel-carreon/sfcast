@@ -689,20 +689,23 @@ async function run() {
           if (/\.(png|jpe?g|webp|gif)$/i.test(f)) extras.push(path.join(dir, f));
         }
       } catch { /* sin post-media/: el post va solo con la portada */ }
+      // ⚠️ la PORTADA no va en media_urls: el embed del video ya la pinta. Duplicarla se ve
+      // como error. En media_urls van solo los frames del proceso (post-media/).
       if (!flags.dryRun) {
-        for (const f of [coverPath, ...extras].filter(Boolean)) {
+        for (const f of extras.filter(Boolean)) {
           try {
             mediaUrls.push(await uploadThumbToMedia(env, f, L.video_id));
           } catch (e) { out(`⚠ imagen no subida al post (${path.basename(f)}): ${e.message}`); }
         }
-      } else if (coverPath) {
-        mediaUrls = [coverPath, ...extras];   // ensayo: solo para contarlas, no se sube nada
+      } else {
+        mediaUrls = extras;   // ensayo: solo para contarlas, no se sube nada
       }
 
       const post = await publishCommunityPost(env, {
         bodyMarkdown: draft.body,
         title: draft.title || pub.video?.titulo || null,
         videoUrl, trackedLink, mediaUrls,
+        videoEmbedUrl: videoUrl,   // se reproduce dentro del post, no manda a YouTube
         dryRun: !!flags.dryRun,
       });
       if (flags.dryRun) {

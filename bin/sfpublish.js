@@ -662,10 +662,23 @@ async function run() {
       const { files: tfiles } = await listThumbs(projectDir);
       const cover = pub.data?.thumbnail?.chosen || L.thumbnail || tfiles[0];
       const coverPath = cover ? await resolveThumb(projectDir, cover) : null;
-      if (coverPath && !flags.dryRun) {
-        try {
-          mediaUrls = [await uploadThumbToMedia(env, coverPath, L.video_id)];
-        } catch (e) { out(`⚠ miniatura no subida al post: ${e.message}`); }
+      // ...y detrás, lo que haya en post-media/ (por nombre): contar lo que construiste no es lo
+      // mismo que MOSTRARLO. Convención simple: imagen que cae ahí, imagen que va al post.
+      const extras = [];
+      try {
+        const dir = path.join(projectDir, 'post-media');
+        for (const f of (await fsp.readdir(dir)).sort()) {
+          if (/\.(png|jpe?g|webp|gif)$/i.test(f)) extras.push(path.join(dir, f));
+        }
+      } catch { /* sin post-media/: el post va solo con la portada */ }
+      if (!flags.dryRun) {
+        for (const f of [coverPath, ...extras].filter(Boolean)) {
+          try {
+            mediaUrls.push(await uploadThumbToMedia(env, f, L.video_id));
+          } catch (e) { out(`⚠ imagen no subida al post (${path.basename(f)}): ${e.message}`); }
+        }
+      } else if (coverPath) {
+        mediaUrls = [coverPath, ...extras];   // ensayo: solo para contarlas, no se sube nada
       }
 
       const post = await publishCommunityPost(env, {

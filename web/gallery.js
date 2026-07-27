@@ -36,6 +36,11 @@ export function initGallery(d) {
     const card = e.target.closest('.galCard');
     if (card) openItem(card.dataset.id);
   });
+  // las tarjetas son focusables (tabindex): Enter/Espacio las abre, como un enlace
+  $('galGrid').addEventListener('keydown', (e) => {
+    const card = e.target.closest('.galCard');
+    if (card && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openItem(card.dataset.id); }
+  });
   // delegación de la ficha: un solo listener para todo lo interactivo del expediente
   $('galDetail').addEventListener('click', onDetailClick);
   $('galDetail').addEventListener('input', (e) => {

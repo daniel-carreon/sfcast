@@ -15,6 +15,8 @@
 //
 // Vanilla, cero dependencias, cero build step — el espíritu del resto de web/.
 
+import { paintCopy, flashCopied } from './icons.js';
+
 const $ = (id) => document.getElementById(id);
 
 let deps = { toast: () => {}, escapeHtml: (s) => s, fmt: (s) => String(s) };
@@ -43,6 +45,7 @@ export function initGallery(d) {
   });
   // delegación de la ficha: un solo listener para todo lo interactivo del expediente
   $('galDetail').addEventListener('click', onDetailClick);
+  $('galLightbox').addEventListener('click', onLightboxClick);
   $('galDetail').addEventListener('input', (e) => {
     if (e.target.id === 'galPostBody') { dirty = true; markPostDirty(); }
     if (e.target.id === 'galTrFilter') renderTranscript(e.target.value.trim().toLowerCase());
@@ -50,7 +53,12 @@ export function initGallery(d) {
   return api;
 }
 
-const api = { toggle: toggleGallery, isOpen: () => !$('galleryPanel').hidden, hasFocus };
+const api = {
+  toggle: toggleGallery,
+  isOpen: () => !$('galleryPanel').hidden,
+  hasFocus,
+  isDirty: () => dirty,
+};
 
 /** ¿el foco está en un campo de texto de la galería? (el teclado global no debe robarle teclas) */
 function hasFocus() {
@@ -66,6 +74,7 @@ export function toggleGallery(force) {
   if (open) {
     load();
   } else {
+    closeLightbox();
     dirty = false;
     document.activeElement?.blur?.();
   }
@@ -96,6 +105,7 @@ function shortPath(p) {
 // ---------- rejilla ----------
 function showGrid() {
   if (dirty && !confirm('El post tiene cambios sin guardar. ¿Volver de todos modos?')) return;
+  closeLightbox();
   dirty = false;
   current = null;
   $('galDetail').hidden = true;
@@ -156,8 +166,9 @@ async function openItem(id, opts = {}) {
   }
 }
 
-// --- rail de secciones: prender/apagar columnas del expediente. Es preferencia de VISTA, no
-// cabina (mismo patrón que el rail del dossier ⌘Y). Persistido, y nunca se apagan todas.
+// --- barra HORIZONTAL de secciones (26→27 jul: era un rail vertical con el texto rotado; Daniel
+// la quiso acostada). Un chip por sección: prende/apaga y, si está prendida, la trae a la vista.
+// Es preferencia de VISTA, no cabina. Persistida, y nunca se apagan todas.
 const GAL_SECS = [
   { id: 'portada', label: 'Portada' },
   { id: 'texto', label: 'Texto' },
@@ -175,14 +186,78 @@ function applyGalView() {
   }
   const grid = document.querySelector('#galDetail .galDetGrid');
   if (grid) grid.dataset.cols = String(on.length);
-  for (const b of document.querySelectorAll('.galRailBtn')) b.classList.toggle('on', !!galView[b.dataset.sec]);
+  for (const b of document.querySelectorAll('.galSecBtn')) b.classList.toggle('on', !!galView[b.dataset.sec]);
   localStorage.setItem('sf.gal.view', JSON.stringify(galView));
 }
 function toggleSec(id) {
   const on = GAL_SECS.filter((s) => galView[s.id]);
   if (galView[id] && on.length === 1) { deps.toast('al menos una sección prendida'); return; }
+  // si ya está prendida pero NO cabe en la vista, el chip NAVEGA en vez de apagar
+  // (en pantallas anchas todas caben y el chip es puro toggle; en angostas es el navegador)
+  if (galView[id]) {
+    const sec = document.querySelector(`#galDetail .galSec[data-sec="${id}"]`);
+    const grid = document.querySelector('#galDetail .galDetGrid');
+    if (sec && grid) {
+      const s = sec.getBoundingClientRect(), g = grid.getBoundingClientRect();
+      if (s.right > g.right + 2 || s.left < g.left - 2 || s.top > g.bottom - 40 || s.bottom < g.top + 40) {
+        sec.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'start' });
+        return;
+      }
+    }
+  }
   galView[id] = !galView[id];
   applyGalView();
+}
+
+// --- lightbox: la miniatura a TAMAÑO REAL ---------------------------------------------------
+// Una miniatura de 200px de ancho no se puede juzgar: lo que decide si un título se lee en el feed
+// móvil es verla grande. La rejilla es para navegar; esto es para decidir.
+let lbList = [];   // archivos navegables (portada primero si no está entre las candidatas)
+let lbIdx = -1;
+
+const lbOpen = () => !$('galLightbox').hidden;
+
+function openLightbox(file) {
+  if (!current) return;
+  lbList = current.thumbs.slice();
+  if (current.cover && !lbList.includes(current.cover)) lbList.unshift(current.cover);
+  lbIdx = Math.max(0, lbList.indexOf(file));
+  $('galLightbox').hidden = false;
+  renderLightbox();
+}
+
+function closeLightbox() {
+  $('galLightbox').hidden = true;
+  $('glbImg').src = '';   // suelta la imagen grande de memoria
+  lbList = []; lbIdx = -1;
+}
+
+function lbStep(d) {
+  if (lbList.length < 2) return;
+  lbIdx = (lbIdx + d + lbList.length) % lbList.length;
+  renderLightbox();
+}
+
+function renderLightbox() {
+  const f = lbList[lbIdx];
+  if (!f) { closeLightbox(); return; }
+  const esPortada = f === current?.cover;
+  $('glbImg').src = `/gallery/thumb?id=${encodeURIComponent(current.id)}&f=${encodeURIComponent(f)}`;
+  $('glbImg').alt = f;
+  $('glbName').textContent = f;
+  $('glbCount').textContent = lbList.length > 1 ? `${lbIdx + 1} / ${lbList.length}` : '';
+  const btn = $('galLightbox').querySelector('[data-glb="cover"]');
+  btn.textContent = esPortada ? '✓ es la portada' : 'usar como portada';
+  btn.disabled = esPortada;
+  for (const n of $('galLightbox').querySelectorAll('.glbNav')) n.hidden = lbList.length < 2;
+}
+
+async function onLightboxClick(e) {
+  const act = e.target.closest('[data-glb]')?.dataset.glb;
+  if (act === 'close' || e.target.id === 'galLightbox') { closeLightbox(); return; }
+  if (act === 'prev') { lbStep(-1); return; }
+  if (act === 'next') { lbStep(1); return; }
+  if (act === 'cover') { const f = lbList[lbIdx]; await save({ cover: f }); renderLightbox(); }
 }
 
 /** Las dos fases en el header: qué falta y de quién es la pelota. */
@@ -213,6 +288,7 @@ function renderDetail(it) {
   const thumbs = it.thumbs.length
     ? it.thumbs.map((f) => `<figure class="galThumb${f === it.cover ? ' on' : ''}" data-thumb="${esc(f)}" title="click = usar como portada (va a YouTube y al post)">
          <img src="/gallery/thumb?id=${encodeURIComponent(it.id)}&f=${encodeURIComponent(f)}" alt="${esc(f)}" loading="lazy">
+         <button class="galZoom" data-big="${esc(f)}" title="verla a tamaño real">⤢</button>
          <figcaption>${esc(f)}</figcaption></figure>`).join('')
     : '<div class="galEmptyBlock">sin candidatas. Pídele a Levy 2-3 miniaturas (skill <b>youtube-thumbnails</b>).</div>';
 
@@ -248,13 +324,13 @@ function renderDetail(it) {
     </div>
 
     <div class="galDetBody">
-    <nav class="galRail" aria-label="secciones del expediente">
-      ${GAL_SECS.map((s) => `<button class="galRailBtn" data-sec="${s.id}" title="prender/apagar ${s.label}"><span class="galLed"></span>${s.label}</button>`).join('')}
+    <nav class="galSecBar" aria-label="secciones del expediente">
+      ${GAL_SECS.map((s) => `<button class="galSecBtn" data-sec="${s.id}" title="prende/apaga ${s.label} (si ya está, la trae a la vista)"><span class="galLed"></span>${s.label}</button>`).join('')}
     </nav>
     <div class="galDetGrid">
       <section class="galSec" data-sec="portada">
-        <h3>Portada</h3>
-        <div class="galCoverBig">${cover}</div>
+        <h3>Portada${it.cover ? `<button class="galMini" data-big="${esc(it.cover)}" title="verla a tamaño real (F)">⤢ ver grande</button>` : ''}</h3>
+        <div class="galCoverBig"${it.cover ? ` data-big="${esc(it.cover)}" title="click = verla a tamaño real"` : ''}>${cover}</div>
         <div class="galCoverName">${it.cover ? esc(it.cover) + (it.cover_chosen ? ' · elegida' : ' · automática (elige una abajo)') : ''}</div>
         <h3>Cuándo sale</h3>
         ${cuando}
@@ -264,22 +340,22 @@ function renderDetail(it) {
 
       <section class="galSec" data-sec="texto">
         <h3>Descripción ${it.description_source ? `<span class="galHmeta">${esc(it.description_source)}</span>` : ''}
-          <button class="galMini" data-copy="desc" title="copiar la descripción">copiar</button></h3>
+          ${it.description ? '<button class="galCopy" data-copy="desc" title="copiar la descripción"></button>' : ''}</h3>
         ${it.description
           ? `${chapters}<pre class="galDesc">${esc(it.description)}</pre>`
           : '<div class="galEmptyBlock">sin descripción. La escribe el agente: <code>sfpublish &lt;proyecto&gt; metadata</code>.</div>'}
         <h3>Títulos</h3>
         ${it.titles.length
-          ? it.titles.map((t) => `<div class="galTitle${t === it.titulo ? ' chosen' : ''}">${esc(t)}<span class="galHmeta">${t.length}/60</span></div>`).join('')
+          ? it.titles.map((t, i) => `<div class="galTitle${t === it.titulo ? ' chosen' : ''}">${esc(t)}<span class="galHmeta">${t.length}/60</span><button class="galCopy" data-copy="title" data-idx="${i}" title="copiar este título"></button></div>`).join('')
           : '<div class="galEmptyBlock">sin títulos generados.</div>'}
-        <h3>Keywords</h3>
+        <h3>Keywords${it.keywords.length ? '<button class="galCopy" data-copy="keywords" title="copiar las keywords"></button>' : ''}</h3>
         ${it.keywords.length
           ? `<div class="ppChips">${it.keywords.map((k) => `<span class="ppChip">${esc(k)}</span>`).join('')}</div>`
           : '<div class="galEmptyBlock">sin keywords.</div>'}
       </section>
 
       <section class="galSec" data-sec="transcript">
-        <h3>Transcript ${it.transcript.found ? `<span class="galHmeta">${it.transcript.words.toLocaleString('es-MX')} palabras · ${Math.round(it.transcript.duration / 60)} min · ${esc(it.transcript.source)}${it.transcript.cut === 'raw' ? ' · ⚠ RAW' : ''}</span>` : ''}</h3>
+        <h3>Transcript ${it.transcript.found ? `<span class="galHmeta">${it.transcript.words.toLocaleString('es-MX')} palabras · ${Math.round(it.transcript.duration / 60)} min · ${esc(it.transcript.source)}${it.transcript.cut === 'raw' ? ' · ⚠ RAW' : ''}</span><button class="galCopy" data-copy="transcript" title="copiar el transcript"></button>` : ''}</h3>
         ${it.transcript.found
           ? `<input id="galTrFilter" type="search" placeholder="buscar en el transcript…" autocomplete="off">
              <div id="galTranscript" class="galScroll"></div>`
@@ -289,6 +365,7 @@ function renderDetail(it) {
       <section class="galSec" data-sec="post">
         <h3>Post de comunidad
           <span class="galHmeta">${post.source ? esc(post.source) : ''}${post.seeded ? ' · sembrado del archivo' : ''}</span>
+          <button class="galCopy" data-copy="post" title="copiar el post"></button>
         </h3>
         <div class="galPostState ${approved ? 'ok' : 'wait'}" id="galPostState">${
           published ? `publicado en la comunidad ${esc(new Date(it.post_published_at).toLocaleString('es-MX'))}`
@@ -298,7 +375,6 @@ function renderDetail(it) {
         <div class="galPostBar">
           <button class="galBtn" data-act="save" ${published ? 'disabled' : ''}>Guardar</button>
           <button class="galBtn ${approved ? 'off' : 'primary'}" data-act="${approved ? 'unapprove' : 'approve'}" ${published ? 'disabled' : ''}>${approved ? 'Retirar aprobación' : 'Aprobar'}</button>
-          <button class="galMini" data-copy="post">copiar</button>
           <span class="galSaveHint" id="galSaveHint"></span>
         </div>
         <div class="galNote">aprobar <b>no publica</b>: deja el post listo. Lo publica <code>sfpublish watch</code> cuando YouTube confirma que el video ya es público (+${it.post_delay_min} min).</div>
@@ -306,8 +382,21 @@ function renderDetail(it) {
     </div>
     </div>`;
 
+  for (const b of $('galDetail').querySelectorAll('.galCopy')) paintCopy(b);
   applyGalView();
   if (it.transcript.found) renderTranscript('');
+}
+
+/** Lo que se lleva cada botón de copiar. El expediente es espejo, pero su contenido SE LLEVA. */
+function copyText(what, idx) {
+  if (what === 'desc') return current?.description || '';
+  if (what === 'keywords') return (current?.keywords || []).join(', ');
+  if (what === 'title') return current?.titles?.[idx] || '';
+  if (what === 'post') return $('galPostBody')?.value || '';
+  if (what === 'transcript') {
+    return (current?.transcript?.segments || []).map((s) => `${deps.fmt(s.t)}  ${s.text}`).join('\n');
+  }
+  return '';
 }
 
 function renderTranscript(q) {
@@ -327,15 +416,20 @@ function markPostDirty() {
 }
 
 async function onDetailClick(e) {
-  const rail = e.target.closest('.galRailBtn');
-  if (rail) { toggleSec(rail.dataset.sec); return; }
+  const secBtn = e.target.closest('.galSecBtn');
+  if (secBtn) { toggleSec(secBtn.dataset.sec); return; }
+  // ⤢ (o la portada) abre a tamaño real — antes que [data-thumb], que sí cambia la portada
+  const big = e.target.closest('[data-big]');
+  if (big) { e.stopPropagation(); openLightbox(big.dataset.big); return; }
   const copy = e.target.closest('[data-copy]');
   if (copy) {
     const what = copy.dataset.copy;
-    const text = what === 'desc' ? current?.description : $('galPostBody')?.value;
+    const text = copyText(what, +copy.dataset.idx);
+    if (!text) { deps.toast(`nada que copiar aún en ${what}`); return; }
     try {
-      await navigator.clipboard.writeText(text || '');
-      deps.toast(`${what === 'desc' ? 'descripción' : 'post'} copiado ✓`);
+      await navigator.clipboard.writeText(text);
+      deps.toast(`${what} copiado ✓`);
+      flashCopied(copy);
     } catch { deps.toast('no pude copiar (permiso del navegador)'); }
     return;
   }
@@ -380,6 +474,15 @@ async function save(patch) {
 /** Teclas propias de la galería. Devuelve true si la consumió (el teclado global se detiene). */
 export function galleryKey(e) {
   const k = e.key.toLowerCase();
+  // el lightbox está ENCIMA de todo: se lleva las teclas primero
+  if (lbOpen()) {
+    e.preventDefault();
+    if (k === 'escape' || k === 'f') closeLightbox();
+    else if (e.key === 'ArrowLeft') lbStep(-1);
+    else if (e.key === 'ArrowRight') lbStep(1);
+    else if (e.key === 'Enter') save({ cover: lbList[lbIdx] }).then(renderLightbox);
+    return true;
+  }
   if (hasFocus()) {
     // dentro del textarea: solo ⌘S guarda y Esc suelta el foco; el resto se escribe normal
     if ((e.metaKey || e.ctrlKey) && k === 's') {
@@ -397,6 +500,7 @@ export function galleryKey(e) {
     else if (!document.body.classList.contains('galleryOnly')) toggleGallery(false);
     return true;
   }
+  if (k === 'f' && current?.cover) { e.preventDefault(); openLightbox(current.cover); return true; }
   if (k === '/' && !$('galSearch').hidden) { e.preventDefault(); $('galSearch').focus(); return true; }
   return true; // la galería es un espejo a pantalla completa: nada llega al timeline de atrás
 }

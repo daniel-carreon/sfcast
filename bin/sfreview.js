@@ -128,6 +128,18 @@ try {
   srv = await startStatic(WEB, {
   port,
   routes: {
+    // Sello de build de web/: la pestaña lo consulta y se recarga sola cuando cambia.
+    // Sin esto, una pestaña abierta desde antes de un deploy sigue corriendo el JS viejo y
+    // parece que la app perdió features (pasó el 27 jul: el rail y las fases "desaparecieron").
+    '/api/version': async (req, res) => {
+      let stamp = 0;
+      for (const f of await fsp.readdir(WEB)) {
+        if (!/\.(js|css|html)$/.test(f)) continue;
+        const st = await fsp.stat(path.join(WEB, f));
+        stamp = Math.max(stamp, Math.floor(st.mtimeMs));
+      }
+      json(res, 200, { stamp });
+    },
     '/api/project': async (req, res) => {
       if (!projectDir) return json(res, 200, { gallery_only: true, name: 'Galería de Lanzamientos' });
       const fresh = JSON.parse(await fsp.readFile(path.join(projectDir, 'timeline.json'), 'utf8'));

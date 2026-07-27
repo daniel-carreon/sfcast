@@ -177,7 +177,21 @@
     <div id="galGrid"></div>
     <div id="galDetail" hidden></div>
   </div>
-  <footer id="galFoot">espejo AI-first: aquí se <b>mira</b> y se <b>aprueba</b>; el trabajo lo hace el agente conversando · <b>click</b> en una miniatura la vuelve portada · el post se edita y se aprueba aquí (aprobar ≠ publicar: sale solo cuando el video se hace público)</footer>
+  <footer id="galFoot">espejo AI-first: aquí se <b>mira</b> y se <b>aprueba</b>; el trabajo lo hace el agente conversando · <b>click</b> en una miniatura la vuelve portada · <b>⤢</b> o <b>F</b> la abre a pantalla completa · el post se edita y se aprueba aquí (aprobar ≠ publicar: sale solo cuando el video se hace público)</footer>
+
+  <!-- una miniatura se juzga a TAMAÑO REAL: la rejilla es para navegar, esto es para decidir -->
+  <div id="galLightbox" hidden>
+    <header id="glbBar">
+      <span id="glbName"></span>
+      <span id="glbCount"></span>
+      <button class="glbBtn" data-glb="cover">usar como portada</button>
+      <button class="glbBtn x" data-glb="close" title="cerrar (Esc)">✕</button>
+    </header>
+    <button class="glbNav" data-glb="prev" title="anterior (←)">‹</button>
+    <img id="glbImg" alt="">
+    <button class="glbNav next" data-glb="next" title="siguiente (→)">›</button>
+    <footer id="glbFoot">← → cambia de miniatura · <b>Enter</b> la vuelve portada · <b>Esc</b> cierra</footer>
+  </div>
 </div>
 
 <div id="modal" hidden>

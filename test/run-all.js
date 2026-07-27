@@ -27,7 +27,7 @@ function sh(cmd, args, opts = {}) {
   const files = ['bin/sfrender.js', 'bin/sfreview.js', 'bin/sfstudio-apply.js', 'bin/sfpublish.js',
     'lib/render.js', 'lib/static-server.js', 'lib/publish.js', 'lib/upload-youtube.js',
     'lib/gallery.js', 'lib/community-draft.js', 'lib/youtube-api.js',
-    'web/app.js', 'web/model.js', 'web/gallery.js',
+    'web/app.js', 'web/model.js', 'web/gallery.js', 'web/icons.js',
     'test/model.test.js', 'test/server.test.js', 'test/publish.test.js', 'test/gallery.test.js'];
   let bad = files.filter((f) => sh('node', ['--check', path.join(ROOT, f)]).code !== 0);
   report(`sintaxis (node --check x${files.length})`, bad.length === 0, bad.join(', '));
@@ -454,14 +454,14 @@ const galRoot = path.join(tmp, 'lanzamientos');
     const sinStepper = (await page.$$('#galDetail .ppStep')).length === 0;   // el stepper viejo se fue
     const sinLink = !/Link de atribución/.test(await page.$eval('#galDetail', (e) => e.textContent));
     const cols0 = await page.$eval('.galDetGrid', (e) => e.dataset.cols);
-    await page.click('.galRailBtn[data-sec="transcript"]');                  // apagar una sección
+    await page.click('.galSecBtn[data-sec="transcript"]');                  // apagar una sección
     const cols1 = await page.$eval('.galDetGrid', (e) => e.dataset.cols);
     const trOculto = await page.$eval('.galSec[data-sec="transcript"]', (e) => e.style.display === 'none');
-    for (const sec of ['portada', 'texto', 'post']) await page.click(`.galRailBtn[data-sec="${sec}"]`);
+    for (const sec of ['portada', 'texto', 'post']) await page.click(`.galSecBtn[data-sec="${sec}"]`);
     const ultimaViva = (await page.$$eval('#galDetail .galSec', (e) =>
       e.filter((x) => x.style.display !== 'none').length)) === 1;            // la última no se apaga
-    await page.click('.galRailBtn[data-sec="transcript"]');
-    for (const sec of ['portada', 'texto']) await page.click(`.galRailBtn[data-sec="${sec}"]`);
+    await page.click('.galSecBtn[data-sec="transcript"]');
+    for (const sec of ['portada', 'texto']) await page.click(`.galSecBtn[data-sec="${sec}"]`);
     const railOk = fases.length === 2 && fases[0] === '3/5' && fases[1] === '1/3' && faseItems === 8
       && sinStepper && sinLink && cols0 === '4' && cols1 === '3' && trOculto && ultimaViva;
     const nChaps = await page.$$eval('.galChapter', (els) => els.length);
@@ -479,6 +479,28 @@ const galRoot = path.join(tmp, 'lanzamientos');
     await page.waitForSelector('.galThumb[data-thumb="ab-02.png"].on', { timeout: 5000 });
     const pubTrasPortada = JSON.parse(await fsp.readFile(path.join(A, 'publish.json'), 'utf8'));
     const portadaOk = pubTrasPortada.data.thumbnail.chosen === 'ab-02.png';
+
+    // LIGHTBOX: una miniatura se juzga a tamaño real (⤢ abre · ← → navega · Enter la elige · Esc cierra)
+    await page.click('.galCoverBig');
+    await page.waitForSelector('#galLightbox:not([hidden])', { timeout: 5000 });
+    const lbAbre = await page.$eval('#glbCount', (e) => e.textContent);            // "2 / 2" (cover = ab-02)
+    const lbImgOk = await page.$eval('#glbImg', (e) => e.complete && e.naturalWidth > 0);
+    const lbYaEs = await page.$eval('[data-glb="cover"]', (e) => e.disabled);      // ya es la portada
+    await page.keyboard.press('ArrowLeft');
+    const lbNav = await page.$eval('#glbName', (e) => e.textContent);              // ab-01.png
+    await page.keyboard.press('Enter');                                            // elegirla desde aquí
+    await page.waitForFunction(() => document.querySelector('[data-glb="cover"]').disabled, { timeout: 5000 });
+    const pubTrasLb = JSON.parse(await fsp.readFile(path.join(A, 'publish.json'), 'utf8'));
+    await page.keyboard.press('ArrowRight');                                       // y devolver la portada
+    await page.click('[data-glb="cover"]');
+    await page.waitForFunction(() => document.querySelector('[data-glb="cover"]').disabled, { timeout: 5000 });
+    await page.keyboard.press('Escape');
+    await page.waitForSelector('#galLightbox', { state: 'hidden', timeout: 5000 });
+    const lbCierra = await page.$eval('#glbImg', (e) => !e.getAttribute('src'));   // suelta la imagen
+    const pubFinalLb = JSON.parse(await fsp.readFile(path.join(A, 'publish.json'), 'utf8'));
+    const lightboxOk = lbAbre === '2 / 2' && lbImgOk && lbYaEs && lbNav === 'ab-01.png'
+      && pubTrasLb.data.thumbnail.chosen === 'ab-01.png' && lbCierra
+      && pubFinalLb.data.thumbnail.chosen === 'ab-02.png';
 
     // POST: editar + aprobar → escrito en disco
     await page.fill('#galPostBody', 'Comunidad!\n\nTexto EDITADO desde la galería.');
@@ -514,16 +536,16 @@ const galRoot = path.join(tmp, 'lanzamientos');
     const sandboxOk = t1 === 404 && (await t2) === 404;
 
     await browser.close();
-    ok = gridOk && filtOk && honestoOk && fichaOk && railOk && trFiltOk && portadaOk && sucioOk
-      && guardadoOk && persisteOk && revocaOk && sandboxOk && errors.length === 0;
-    detail = `rejilla=${gridOk}(${nCards}) buscador=${filtOk} estado-honesto=${honestoOk} ficha=${fichaOk}(${nChaps}cap/${nSegs}seg/${nThumbs}thumb) fases+rail=${railOk}(${fases.join('/')}) buscaTr=${trFiltOk} portada=${portadaOk} guarda=${guardadoOk} PERSISTE=${persisteOk} revoca=${revocaOk} sandbox=${sandboxOk} consola=${errors.length} errores`;
+    ok = gridOk && filtOk && honestoOk && fichaOk && railOk && trFiltOk && portadaOk && lightboxOk
+      && sucioOk && guardadoOk && persisteOk && revocaOk && sandboxOk && errors.length === 0;
+    detail = `rejilla=${gridOk}(${nCards}) buscador=${filtOk} estado-honesto=${honestoOk} ficha=${fichaOk}(${nChaps}cap/${nSegs}seg/${nThumbs}thumb) fases+rail=${railOk}(${fases.join('/')}) buscaTr=${trFiltOk} portada=${portadaOk} lightbox=${lightboxOk} guarda=${guardadoOk} PERSISTE=${persisteOk} revoca=${revocaOk} sandbox=${sandboxOk} consola=${errors.length} errores`;
     if (errors.length) detail += ` :: ${errors.slice(0, 3).join(' | ')}`;
   } catch (e) {
     detail = e.message.split('\n')[0];
   } finally {
     srv.kill();
   }
-  report('galería ⌘⌥G humo Playwright (rejilla + ficha + 2 fases + rail + portada + post editable/aprobable con persistencia, 0 errores)', ok, detail);
+  report('galería ⌘⌥G humo Playwright (rejilla + ficha + 2 fases + rail + portada + lightbox + post editable/aprobable con persistencia, 0 errores)', ok, detail);
 }
 
 await fsp.rm(tmp, { recursive: true, force: true });

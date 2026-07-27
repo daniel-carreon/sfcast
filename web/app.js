@@ -11,6 +11,7 @@ import {
   keptSegments, outDuration, rawToOut, outToRaw,
 } from './model.js';
 import { initGallery, toggleGallery, galleryKey } from './gallery.js';
+import { ICON_COPY, paintCopy, flashCopied } from './icons.js';
 
 const $ = (id) => document.getElementById(id);
 const base = $('base');
@@ -101,11 +102,31 @@ function setSingleSel(key) {
 // Dos modos: SALA (un proyecto abierto, todo el timeline) y GALERÍA SOLA (`sfreview --gallery`,
 // sin proyecto: el catálogo a pantalla completa). ⌘⌥G abre la galería en los dos.
 let galleryOnly = false;
+// Una pestaña abierta desde antes de un deploy sigue corriendo el JS viejo: la app parece haber
+// PERDIDO features (el 27 jul "desaparecieron" el rail y las fases — era esto, no un bug de código).
+// El server sella web/ por mtime; aquí se compara cada 4s y la pestaña se pone al día sola.
+async function watchVersion() {
+  // la línea base se toma YA, no en el primer tick: si el deploy cae en esos segundos, un
+  // arranque perezoso adoptaría el sello nuevo como base y jamás detectaría el cambio
+  let seen = await fetch('/api/version').then((r) => r.json()).then((j) => j.stamp).catch(() => null);
+  setInterval(async () => {
+    try {
+      const { stamp } = await (await fetch('/api/version')).json();
+      if (seen === null) { seen = stamp; return; }
+      if (stamp === seen) return;
+      // con texto sin guardar NUNCA se recarga solo: se avisa y decide Daniel
+      if (gallery?.isDirty?.()) { toast('hay una versión nueva del panel · guarda y recarga (⌘R)'); seen = stamp; return; }
+      location.reload();
+    } catch { /* server caído: la pestaña sigue viva con lo que tiene */ }
+  }, 4000);
+}
+
 async function boot() {
   project = await (await fetch('/api/project')).json();
   $('projname').textContent = project.name || '';
   document.title = `SFStudio — ${project.name || 'Sala de Revisión'}`;
   gallery = initGallery({ toast, escapeHtml, fmt });
+  watchVersion();
 
   if (project.gallery_only) {
     galleryOnly = true;
@@ -1539,20 +1560,14 @@ applyPpView();
 
 // --- copiar: el dossier es espejo, pero lo que muestra se LLEVA (a YouTube, a Skool, a donde sea)
 // Iconos: Lucide (lucide.dev, ISC) — SVG inline oficial de `copy` y `check`; cero dependencias.
-const ICON_COPY = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
-const ICON_CHECK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
-for (const b of document.querySelectorAll('.ppCopy')) b.innerHTML = ICON_COPY;
+for (const b of document.querySelectorAll('.ppCopy')) paintCopy(b);
 
 async function ppCopy(text, what, btn = null) {
   if (!text) { toast(`nada que copiar aún en ${what}`); return; }
   try {
     await navigator.clipboard.writeText(text);
     toast(`${what} copiado ✓`);
-    if (btn) {
-      btn.innerHTML = ICON_CHECK;
-      btn.classList.add('ok');
-      setTimeout(() => { btn.innerHTML = ICON_COPY; btn.classList.remove('ok'); }, 1400);
-    }
+    if (btn) flashCopied(btn);
   } catch { toast('no pude copiar (permiso del navegador)'); }
 }
 $('copyTranscript').addEventListener('click', (e) =>

@@ -1778,7 +1778,7 @@ window.addEventListener('keydown', (e) => {
   // nunca dispararía. No pisa nada (⌘Y panel · ⌘E export · ⌘Z undo · S/A/D/Q/E/F/M sueltas).
   if ((e.metaKey || e.ctrlKey) && e.altKey && e.code === 'KeyG') {
     e.preventDefault();
-    toggleGallery();
+    if (gallery) toggleGallery();  // antes de boot() los listeners no están cableados
     return;
   }
   // galería abierta = espejo a pantalla completa: ella decide, nada llega al timeline de atrás

@@ -330,9 +330,11 @@ export function galleryKey(e) {
   }
   if (k === 'escape') {
     e.preventDefault();
-    if (!$('galDetail').hidden) showGrid(); else toggleGallery(false);
+    // en modo galería-sola no hay sala detrás: cerrar dejaría una pantalla en blanco
+    if (!$('galDetail').hidden) showGrid();
+    else if (!document.body.classList.contains('galleryOnly')) toggleGallery(false);
     return true;
   }
-  if (k === '/' ) { e.preventDefault(); $('galSearch').focus(); return true; }
+  if (k === '/' && !$('galSearch').hidden) { e.preventDefault(); $('galSearch').focus(); return true; }
   return true; // la galería es un espejo a pantalla completa: nada llega al timeline de atrás
 }

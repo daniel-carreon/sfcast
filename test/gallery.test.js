@@ -8,7 +8,7 @@ import os from 'node:os';
 import {
   defaultRoots, makeId, resolveId, scanRoots, launchState, postState, coverThumb,
   parseTextTranscript, parseChapters, extractDescription, extractPostBody,
-  listThumbs, readCard, readDossier, applyGalleryPatch,
+  listThumbs, resolveThumb, readCard, readDossier, applyGalleryPatch,
 } from '../lib/gallery.js';
 
 // ---------- raíces e identidad ----------
@@ -135,6 +135,20 @@ test('listThumbs: ignora las `_*` (fuentes de trabajo, no candidatas)', async ()
   const { dir, files } = await listThumbs(A);
   assert.equal(dir, 'thumbs');
   assert.deepEqual(files, ['a.png', 'b.png']);
+  await fsp.rm(tmp, { recursive: true, force: true });
+});
+
+test('resolveThumb: encuentra la portada en thumbs/ O thumbnails/, y rechaza traversal', async () => {
+  const { tmp, A } = await fixture();
+  // el proyecto tiene thumbs/; simulamos uno que además usa thumbnails/ (lo escribe el auto-chain)
+  await fsp.mkdir(path.join(A, 'thumbnails'), { recursive: true });
+  await fsp.writeFile(path.join(A, 'thumbnails', 'portada.png'), 'x');
+  assert.equal(await resolveThumb(A, 'a.png'), path.join(A, 'thumbs', 'a.png'));
+  assert.equal(await resolveThumb(A, 'portada.png'), path.join(A, 'thumbnails', 'portada.png'));
+  assert.equal(await resolveThumb(A, 'no-existe.png'), null);
+  for (const malo of ['../publish.json', 'sub/a.png', '..', '', null]) {
+    assert.equal(await resolveThumb(A, malo), null, `debió rechazar: ${malo}`);
+  }
   await fsp.rm(tmp, { recursive: true, force: true });
 });
 

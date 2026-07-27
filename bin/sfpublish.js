@@ -17,7 +17,7 @@ import {
   slugFromYoutubeId, slugFromProjectName, parseTranscript, findMentions,
   checklistGate, nextSlots, communityPost, applyEdl,
 } from '../lib/publish.js';
-import { listThumbs, extractPostBody } from '../lib/gallery.js';
+import { listThumbs, extractPostBody, resolveThumb } from '../lib/gallery.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -544,9 +544,10 @@ async function run() {
       const { dir: tsub, files: tfiles } = await listThumbs(projectDir);
       const chosen = pub.data?.thumbnail?.chosen;
       if (!thumbPath && chosen) {
-        if (tfiles.includes(chosen)) thumbPath = path.join(projectDir, tsub, chosen);
-        else if (chosen.includes('/')) thumbPath = path.resolve(chosen);
-        else out(`⚠ la portada elegida "${chosen}" ya no está en el proyecto`);
+        // mira thumbs/ Y thumbnails/: la portada pudo quedar en la carpeta que no es la de
+        // las candidatas mostradas. Un nombre con `/` = ruta explícita (uso avanzado).
+        thumbPath = chosen.includes('/') ? path.resolve(chosen) : await resolveThumb(projectDir, chosen);
+        if (!thumbPath) out(`⚠ la portada elegida "${chosen}" ya no está en el proyecto`);
       }
       if (!thumbPath && tfiles.length) thumbPath = path.join(projectDir, tsub, tfiles[0]);
       if (thumbPath) {
@@ -632,11 +633,12 @@ async function run() {
       // la MISMA cara que el video: la portada elegida en la galería va al post (pedido de Daniel).
       // En dry-run NO se sube (subir al bucket ya es escribir; un ensayo no escribe nada).
       let mediaUrls = [];
-      const { dir: tsub, files: tfiles } = await listThumbs(projectDir);
+      const { files: tfiles } = await listThumbs(projectDir);
       const cover = pub.data?.thumbnail?.chosen || L.thumbnail || tfiles[0];
-      if (cover && tfiles.includes(cover) && !flags.dryRun) {
+      const coverPath = cover ? await resolveThumb(projectDir, cover) : null;
+      if (coverPath && !flags.dryRun) {
         try {
-          mediaUrls = [await uploadThumbToMedia(env, path.join(projectDir, tsub, cover), L.video_id)];
+          mediaUrls = [await uploadThumbToMedia(env, coverPath, L.video_id)];
         } catch (e) { out(`⚠ miniatura no subida al post: ${e.message}`); }
       }
 

@@ -63,7 +63,7 @@ const galRoot = path.join(tmp, 'lanzamientos');
     log: [],
     data: {
       metadata: { description: 'CTA https://saasfactory.so/go/vid-galeria\n\n00:00 Intro\n02:30 Cierre',
-        titles: ['Lanzamiento completo de humo'], keywords: ['humo'] },
+        titles: ['Lanzamiento completo de humo', 'Segundo título candidato'], keywords: ['humo'] },
       launch: { video_id: 'AAAAAAAAAAA', publish_at: manana, title: 'Lanzamiento completo de humo',
         thumbnail: 'ab-01.png', post_delay_min: 5, post_status: 'sin-aprobar' },
       post_draft: { title: 'Lanzamiento completo de humo', body: 'Comunidad!\n\nCuerpo original del post.',
@@ -464,11 +464,31 @@ const galRoot = path.join(tmp, 'lanzamientos');
     for (const sec of ['portada', 'texto']) await page.click(`.galSecBtn[data-sec="${sec}"]`);
     const railOk = fases.length === 2 && fases[0] === '3/5' && fases[1] === '1/3' && faseItems === 8
       && sinStepper && sinLink && cols0 === '4' && cols1 === '3' && trOculto && ultimaViva;
-    const nChaps = await page.$$eval('.galChapter', (els) => els.length);
+    // los capítulos NO se pintan aparte: viven dentro del texto de la descripción (pintarlos
+    // arriba era la misma lista dos veces). Se comprueba que estén ahí y que el bloque murió.
+    const descTx = await page.$eval('#galDescBody', (el) => el.value);
+    const nChaps = (descTx.match(/^\d+:\d+ /gm) || []).length;
+    const sinBloqueChaps = (await page.$$('.galChapter')).length === 0;
     const nSegs = await page.$$eval('#galTranscript .ppSeg', (els) => els.length);
     const nThumbs = await page.$$eval('.galThumb', (els) => els.length);
     const coverName = await page.$eval('.galCoverName', (el) => el.textContent);
-    const fichaOk = nChaps === 2 && nSegs === 6 && nThumbs === 2 && /ab-01\.png/.test(coverName);
+    const fichaOk = nChaps === 2 && sinBloqueChaps && nSegs === 6 && nThumbs === 2 && /ab-01\.png/.test(coverName);
+
+    // TÍTULOS = SELECT (click = ese sale a YouTube) y DESCRIPCIÓN editable a mano
+    await page.fill('#galDescBody', 'Descripción RETOCADA a mano.\n\n00:00 Intro\n02:30 Cierre');
+    const descSucio = await page.$eval('#galDescHint', (el) => /sin guardar/.test(el.textContent));
+    await page.click('.galTitle[data-titulo="Segundo título candidato"]');
+    await page.waitForFunction(() =>
+      document.querySelector('.galTitle.chosen')?.dataset.titulo === 'Segundo título candidato', null, { timeout: 5000 });
+    const pubTitulo = JSON.parse(await fsp.readFile(path.join(A, 'publish.json'), 'utf8'));
+    // el repintado por elegir título NO puede comerse la descripción a medio escribir
+    const sobreviveOk = /RETOCADA a mano/.test(await page.$eval('#galDescBody', (el) => el.value));
+    await page.click('[data-act="save-desc"]');
+    await page.waitForFunction(() =>
+      /guardado/.test(document.querySelector('#galDescHint').textContent), null, { timeout: 5000 });
+    const pubDesc = JSON.parse(await fsp.readFile(path.join(A, 'publish.json'), 'utf8'));
+    const editableOk = pubTitulo.video.titulo === 'Segundo título candidato'
+      && descSucio && sobreviveOk && /RETOCADA a mano/.test(pubDesc.data.metadata.description);
     // transcript navegable: el buscador filtra los segmentos
     await page.fill('#galTrFilter', 'frase 3');
     const trFiltOk = (await page.$$('#galTranscript .ppSeg')).length === 1;
@@ -536,16 +556,16 @@ const galRoot = path.join(tmp, 'lanzamientos');
     const sandboxOk = t1 === 404 && (await t2) === 404;
 
     await browser.close();
-    ok = gridOk && filtOk && honestoOk && fichaOk && railOk && trFiltOk && portadaOk && lightboxOk
+    ok = gridOk && filtOk && honestoOk && fichaOk && editableOk && railOk && trFiltOk && portadaOk && lightboxOk
       && sucioOk && guardadoOk && persisteOk && revocaOk && sandboxOk && errors.length === 0;
-    detail = `rejilla=${gridOk}(${nCards}) buscador=${filtOk} estado-honesto=${honestoOk} ficha=${fichaOk}(${nChaps}cap/${nSegs}seg/${nThumbs}thumb) fases+rail=${railOk}(${fases.join('/')}) buscaTr=${trFiltOk} portada=${portadaOk} lightbox=${lightboxOk} guarda=${guardadoOk} PERSISTE=${persisteOk} revoca=${revocaOk} sandbox=${sandboxOk} consola=${errors.length} errores`;
+    detail = `rejilla=${gridOk}(${nCards}) buscador=${filtOk} estado-honesto=${honestoOk} ficha=${fichaOk}(${nChaps}cap-en-desc/${nSegs}seg/${nThumbs}thumb) editable=${editableOk} fases+rail=${railOk}(${fases.join('/')}) buscaTr=${trFiltOk} portada=${portadaOk} lightbox=${lightboxOk} guarda=${guardadoOk} PERSISTE=${persisteOk} revoca=${revocaOk} sandbox=${sandboxOk} consola=${errors.length} errores`;
     if (errors.length) detail += ` :: ${errors.slice(0, 3).join(' | ')}`;
   } catch (e) {
-    detail = e.message.split('\n')[0];
+    detail = e.message.split('\n')[0] + ' @@ ' + (e.stack || '').split('\n').slice(1, 2).join('');
   } finally {
     srv.kill();
   }
-  report('galería ⌘⌥G humo Playwright (rejilla + ficha + 2 fases + rail + portada + lightbox + post editable/aprobable con persistencia, 0 errores)', ok, detail);
+  report('galería ⌘⌥G humo Playwright (rejilla + ficha + 2 fases + barra + portada + lightbox + título-select + descripción y post editables con persistencia, 0 errores)', ok, detail);
 }
 
 await fsp.rm(tmp, { recursive: true, force: true });

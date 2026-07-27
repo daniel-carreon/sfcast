@@ -699,16 +699,30 @@ body.galleryOnly #galClose { display: none; } /* sin sala detrás no hay a dónd
   color: var(--sf); font: 700 10.5px/1.6 "SF Mono", Menlo, monospace;
   font-variant-numeric: tabular-nums; flex-shrink: 0; min-width: 44px;
 }
-.galDesc {
-  white-space: pre-wrap; word-break: break-word; user-select: text;
-  font-family: inherit; font-size: 11.5px; line-height: 1.65; color: var(--dim); max-height: 320px; overflow-y: auto;
-  background: #0c0c11; border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px;
+/* la descripción se EDITA a mano (detalles mínimos: una coma, un link). Misma piel que el post. */
+#galDescBody {
+  width: 100%; height: 340px; resize: vertical; background: #0c0c11; color: var(--text);
+  border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; user-select: text;
+  font-family: inherit; font-size: 11.5px; line-height: 1.65;
 }
+#galDescBody:focus { border-color: var(--sf); outline: none; }
+/* títulos = SELECT: click en uno y ese es el que sale a YouTube */
 .galTitle {
-  font-size: 12px; color: var(--dim); padding: 5px 0; display: flex; gap: 8px; align-items: center;
-  border-bottom: 1px solid #16161c; user-select: text;
+  font-size: 12px; color: var(--dim); padding: 6px 8px; display: flex; gap: 9px; align-items: center;
+  border-bottom: 1px solid #16161c; user-select: text; cursor: pointer; border-radius: 6px;
+  transition: background .14s, color .14s;
 }
+.galTitle:hover { background: #15151b; color: var(--text); }
 .galTitle .galHmeta { margin-left: auto; }
+.galTitleTx { min-width: 0; }
+.galRadio {
+  width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid #33333d; flex-shrink: 0;
+  transition: border-color .14s, box-shadow .14s;
+}
+.galTitle.chosen .galRadio {
+  border-color: var(--sf); background: radial-gradient(circle, var(--sf) 0 45%, transparent 46%);
+  box-shadow: 0 0 7px rgba(255,145,1,.55);
+}
 .galTitle.chosen { color: var(--text); font-weight: 700; }
 .galLinkState { font-size: 11px; user-select: text; word-break: break-all; }
 .galLinkState.ok { color: #3fbf5a; }

@@ -47,7 +47,8 @@ export function initGallery(d) {
   $('galDetail').addEventListener('click', onDetailClick);
   $('galLightbox').addEventListener('click', onLightboxClick);
   $('galDetail').addEventListener('input', (e) => {
-    if (e.target.id === 'galPostBody') { dirty = true; markPostDirty(); }
+    if (e.target.id === 'galPostBody') { dirty = true; markDirty('galSaveHint'); }
+    if (e.target.id === 'galDescBody') { dirty = true; markDirty('galDescHint'); }
     if (e.target.id === 'galTrFilter') renderTranscript(e.target.value.trim().toLowerCase());
   });
   return api;
@@ -300,9 +301,8 @@ function renderDetail(it) {
        ${L.video_id ? `<a class="galLink" href="https://youtu.be/${esc(L.video_id)}" target="_blank" rel="noopener">youtu.be/${esc(L.video_id)}</a>` : ''}`
     : `<div class="galEmptyBlock">sin fecha todavía. La programa el agente:<br><code>sfpublish &lt;proyecto&gt; launch --at "2026-07-27 11:00"</code></div>`;
 
-  const chapters = it.chapters.length
-    ? `<div class="galChapters">${it.chapters.map((c) => `<div class="galChapter"><span class="galT">${deps.fmt(c.t)}</span><span>${esc(c.label)}</span></div>`).join('')}</div>`
-    : '';
+  // (los capítulos NO se pintan aparte: ya viven dentro del texto de la descripción, que es lo
+  //  que de verdad se pega en YouTube. Pintarlos arriba era la misma lista dos veces.)
 
   const post = it.post || {};
   const approved = !!post.approved_at;
@@ -342,11 +342,15 @@ function renderDetail(it) {
         <h3>Descripción ${it.description_source ? `<span class="galHmeta">${esc(it.description_source)}</span>` : ''}
           ${it.description ? '<button class="galCopy" data-copy="desc" title="copiar la descripción"></button>' : ''}</h3>
         ${it.description
-          ? `${chapters}<pre class="galDesc">${esc(it.description)}</pre>`
+          ? `<textarea id="galDescBody" spellcheck="false">${esc(it.description)}</textarea>
+             <div class="galPostBar">
+               <button class="galBtn" data-act="save-desc">Guardar</button>
+               <span class="galSaveHint" id="galDescHint"></span>
+             </div>`
           : '<div class="galEmptyBlock">sin descripción. La escribe el agente: <code>sfpublish &lt;proyecto&gt; metadata</code>.</div>'}
-        <h3>Títulos</h3>
+        <h3>Títulos <span class="galHmeta">click = ese sale a YouTube</span></h3>
         ${it.titles.length
-          ? it.titles.map((t, i) => `<div class="galTitle${t === it.titulo ? ' chosen' : ''}">${esc(t)}<span class="galHmeta">${t.length}/60</span><button class="galCopy" data-copy="title" data-idx="${i}" title="copiar este título"></button></div>`).join('')
+          ? it.titles.map((t, i) => `<div class="galTitle${t === it.titulo ? ' chosen' : ''}" data-titulo="${esc(t)}" title="elegir este título"><span class="galRadio"></span><span class="galTitleTx">${esc(t)}</span><span class="galHmeta">${t.length}/60</span><button class="galCopy" data-copy="title" data-idx="${i}" title="copiar este título"></button></div>`).join('')
           : '<div class="galEmptyBlock">sin títulos generados.</div>'}
         <h3>Keywords${it.keywords.length ? '<button class="galCopy" data-copy="keywords" title="copiar las keywords"></button>' : ''}</h3>
         ${it.keywords.length
@@ -410,8 +414,8 @@ function renderTranscript(q) {
     : '<div class="galEmptyBlock">nada coincide.</div>';
 }
 
-function markPostDirty() {
-  const h = $('galSaveHint');
+function markDirty(hintId) {
+  const h = $(hintId);
   if (h) { h.textContent = 'sin guardar'; h.className = 'galSaveHint warn'; }
 }
 
@@ -435,16 +439,20 @@ async function onDetailClick(e) {
   }
   const thumb = e.target.closest('[data-thumb]');
   if (thumb) { await save({ cover: thumb.dataset.thumb }); return; }
+  const titulo = e.target.closest('[data-titulo]');
+  if (titulo) { await save({ titulo: titulo.dataset.titulo }); return; }
   const btn = e.target.closest('[data-act]');
   if (!btn || btn.disabled) return;
+  if (btn.dataset.act === 'save-desc') await save({ description: $('galDescBody').value });
   if (btn.dataset.act === 'save') await save({ post_body: $('galPostBody').value });
   if (btn.dataset.act === 'approve') await save({ post_body: $('galPostBody').value, post_approved: true });
   if (btn.dataset.act === 'unapprove') await save({ post_approved: false });
 }
 
 /** Escribe el patch en publish.json del proyecto y repinta con lo que el server devolvió. */
-async function save(patch) {
+async function save(patch, hintId = 'galSaveHint') {
   if (!current) return;
+  if (patch.description !== undefined) hintId = 'galDescHint';
   try {
     const r = await fetch(`/api/gallery/item?id=${encodeURIComponent(current.id)}`, {
       method: 'POST',
@@ -456,17 +464,34 @@ async function save(patch) {
     dirty = false;
     current = j.item;
     const scroll = document.querySelector('#galDetail .galDetGrid')?.scrollTop || 0;
+    // guardar UNA cosa repinta la ficha entera; lo que Daniel esté escribiendo en OTRO campo no
+    // se puede perder en el repintado (elegir un título borraba la descripción a medio editar)
+    const enVuelo = [];
+    for (const [id, campo] of [['galDescBody', 'description'], ['galPostBody', 'post_body']]) {
+      const el = $(id);
+      if (el && patch[campo] === undefined && el.value !== (id === 'galDescBody' ? j.item.description : j.item.post?.body)) {
+        enVuelo.push([id, el.value, el === document.activeElement, el.selectionStart, el.selectionEnd]);
+      }
+    }
     renderDetail(j.item);
+    for (const [id, val, teníaFoco, a, b2] of enVuelo) {
+      const el = $(id);
+      if (!el) continue;
+      el.value = val;
+      dirty = true;
+      markDirty(id === 'galDescBody' ? 'galDescHint' : 'galSaveHint');
+      if (teníaFoco) { el.focus(); el.setSelectionRange(a, b2); }
+    }
     const g = document.querySelector('#galDetail .galDetGrid');
     if (g) g.scrollTop = scroll;   // guardar no debe brincar la vista al inicio
 
-    const h = $('galSaveHint');
+    const h = $(hintId);
     if (h) { h.textContent = j.changed.length ? `guardado · ${j.changed.join(' · ')}` : 'sin cambios'; h.className = 'galSaveHint ok'; }
     // la tarjeta de la rejilla ya no refleja la verdad: refrescar el catálogo en segundo plano
     fetch('/api/gallery').then((x) => x.json()).then((g) => { items = g.items || items; }).catch(() => {});
   } catch (err) {
     deps.toast(`no se guardó: ${err.message}`);
-    const h = $('galSaveHint');
+    const h = $(hintId);
     if (h) { h.textContent = `error: ${err.message}`; h.className = 'galSaveHint bad'; }
   }
 }
@@ -487,7 +512,8 @@ export function galleryKey(e) {
     // dentro del textarea: solo ⌘S guarda y Esc suelta el foco; el resto se escribe normal
     if ((e.metaKey || e.ctrlKey) && k === 's') {
       e.preventDefault();
-      save({ post_body: $('galPostBody')?.value ?? '' });
+      if (document.activeElement.id === 'galDescBody') save({ description: document.activeElement.value });
+      else save({ post_body: $('galPostBody')?.value ?? '' });
       return true;
     }
     if (k === 'escape') { document.activeElement.blur(); return true; }

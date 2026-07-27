@@ -171,3 +171,46 @@ test('post de comunidad: SOLO texto, con título y sin markup raro', () => {
   assert.match(txt, /Claude Code cambió mi forma/);
   assert.equal(typeof txt, 'string');
 });
+
+// ---------- markdown → HTML del feed de comunidad ----------
+// El renderer del producto (PostCardContent) ya estiliza p/strong/em/a/img/ul/ol/li/h2/h3/
+// blockquote/pre/code. El converter debe emitir ESO y nada más: una etiqueta que la plataforma
+// no pinte sale peor que el markdown crudo.
+test('markdown de comunidad: encabezados, listas, cita, código y links', async () => {
+  const { mdToTiptapHtml } = await import('../lib/community-draft.js');
+  const h = mdToTiptapHtml([
+    '## Titulo', '', 'Con **negrita**, *cursiva* y `codigo`.', '',
+    '- uno', '- dos', '', '1. primero', '2. segundo', '', '> citado', '',
+    '```', 'npm test', '```', '', '🔹 bullet emoji', '🔹 otro', '', '### Sub',
+  ].join('\n'));
+  assert.match(h, /<h2>Titulo<\/h2>/);
+  assert.match(h, /<h3>Sub<\/h3>/);
+  assert.match(h, /<strong>negrita<\/strong>/);
+  assert.match(h, /<em>cursiva<\/em>/);
+  assert.match(h, /<code>codigo<\/code>/);
+  assert.match(h, /<ul><li>uno<\/li><li>dos<\/li><\/ul>/);
+  assert.match(h, /<ol><li>primero<\/li><li>segundo<\/li><\/ol>/);
+  assert.match(h, /<blockquote><p>citado<\/p><\/blockquote>/);
+  assert.match(h, /<pre><code>npm test<\/code><\/pre>/);
+  // los bullets con emoji NO son lista: son texto, y se conservan con <br>
+  assert.match(h, /<p>🔹 bullet emoji<br>🔹 otro<\/p>/);
+  // cero markdown crudo sobreviviente
+  assert.ok(!/(^|>)#{2,3}\s/.test(h), 'quedaron ## sin convertir');
+  assert.ok(!/\*\*/.test(h), 'quedaron ** sin convertir');
+});
+
+test('markdown de comunidad: links, imagenes y el punto final que NO es parte de la URL', async () => {
+  const { mdToTiptapHtml } = await import('../lib/community-draft.js');
+  const h = mdToTiptapHtml('Ve a [la caja](https://saasfactory.so/free) o https://youtu.be/abc.\n\n![alt](https://x/y.png)');
+  assert.match(h, /<a href="https:\/\/saasfactory\.so\/free" target="_blank" rel="noopener">la caja<\/a>/);
+  assert.match(h, /<a href="https:\/\/youtu\.be\/abc"[^>]*>https:\/\/youtu\.be\/abc<\/a>\./);
+  assert.match(h, /<img src="https:\/\/x\/y\.png" alt="alt">/);
+});
+
+test('markdown de comunidad: el HTML del post real de Opus 5 no trae basura', async () => {
+  const { mdToTiptapHtml } = await import('../lib/community-draft.js');
+  const h = mdToTiptapHtml('Comunidad!\n\n**Ahora lo incómodo.**\n\n🔹 Warp → una terminal\n\nPD: ¿qué construyen? 🤣');
+  assert.match(h, /<p>Comunidad!<\/p>/);
+  assert.match(h, /<p><strong>Ahora lo incómodo\.<\/strong><\/p>/);
+  assert.ok(!/&amp;(amp|lt|gt);/.test(h), 'doble escapado');
+});

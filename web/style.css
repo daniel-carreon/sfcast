@@ -804,3 +804,37 @@ body.galleryOnly #galClose { display: none; } /* sin sala detrás no hay a dónd
   grid-column: 1 / -1; color: #46464f; font-size: 10.5px; padding: 8px 0 2px; cursor: default;
 }
 #glbFoot b { color: var(--dim); }
+
+/* el post RENDERIZADO como lo verá la comunidad (toggle "ver render").
+   Las clases replican lo que PostCardContent estiliza en el producto: si aquí se ve bien,
+   allá se ve bien. */
+.galPostRender {
+  background: #0c0c11; border: 1px solid var(--line); border-radius: 7px;
+  padding: 14px 16px; max-height: 460px; overflow-y: auto; user-select: text;
+  font-size: 12.5px; line-height: 1.6; color: var(--text);
+}
+.galPostRender p { margin: 0 0 12px; }
+.galPostRender p:last-child { margin-bottom: 0; }
+.galPostRender strong { font-weight: 700; }
+.galPostRender em { font-style: italic; }
+.galPostRender a { color: var(--sf); text-decoration: underline; text-underline-offset: 2px; word-break: break-all; }
+.galPostRender ul, .galPostRender ol { margin: 10px 0; padding-left: 20px; }
+.galPostRender ul { list-style: disc; }
+.galPostRender ol { list-style: decimal; }
+.galPostRender li { margin: 3px 0; }
+.galPostRender h2 { font-size: 15px; font-weight: 700; margin: 16px 0 7px; }
+.galPostRender h3 { font-size: 13.5px; font-weight: 700; margin: 14px 0 6px; }
+.galPostRender blockquote {
+  border-left: 3px solid rgba(255,145,1,.5); padding-left: 12px; margin: 10px 0;
+  color: var(--dim); font-style: italic;
+}
+.galPostRender pre {
+  background: rgba(0,0,0,.35); border-radius: 7px; padding: 10px 12px; margin: 10px 0;
+  overflow-x: auto; font: 11px/1.5 "SF Mono", Menlo, monospace;
+}
+.galPostRender code {
+  background: rgba(255,255,255,.09); padding: 1px 5px; border-radius: 4px;
+  font: 11px/1.4 "SF Mono", Menlo, monospace;
+}
+.galPostRender pre code { background: none; padding: 0; }
+.galPostRender img { max-width: 100%; border-radius: 7px; margin: 8px 0; display: block; }

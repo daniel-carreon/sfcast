@@ -213,6 +213,11 @@ function toggleSec(id) {
 // --- lightbox: la miniatura a TAMAÑO REAL ---------------------------------------------------
 // Una miniatura de 200px de ancho no se puede juzgar: lo que decide si un título se lee en el feed
 // móvil es verla grande. La rejilla es para navegar; esto es para decidir.
+// El post se escribe en markdown pero la comunidad lo ve RENDERIZADO. Este toggle enseña
+// exactamente lo que van a ver — con el MISMO converter del publicador (viene en post.html),
+// no con una segunda implementación que mentiría.
+let postPreview = false;
+
 let lbList = [];   // archivos navegables (portada primero si no está entre las candidatas)
 let lbIdx = -1;
 
@@ -369,15 +374,18 @@ function renderDetail(it) {
       <section class="galSec" data-sec="post">
         <h3>Post de comunidad
           <span class="galHmeta">${post.source ? esc(post.source) : ''}${post.seeded ? ' · sembrado del archivo' : ''}</span>
+          <button class="galMini" data-act="preview" title="ver el post como lo verá la comunidad (P)">${postPreview ? 'editar' : 'ver render'}</button>
           <button class="galCopy" data-copy="post" title="copiar el post"></button>
         </h3>
         <div class="galPostState ${approved ? 'ok' : 'wait'}" id="galPostState">${
           published ? `publicado en la comunidad ${esc(new Date(it.post_published_at).toLocaleString('es-MX'))}`
           : approved ? `APROBADO ${esc(new Date(post.approved_at).toLocaleString('es-MX'))} · sale solo cuando el video se haga público`
           : 'borrador · nadie lo ve todavía'}</div>
-        <textarea id="galPostBody" spellcheck="false" ${published ? 'readonly' : ''} placeholder="el post que sale a la comunidad cuando el video se publique…">${esc(post.body || '')}</textarea>
+        ${postPreview
+          ? `<div class="galPostRender">${post.html || '<i>sin texto</i>'}</div>`
+          : `<textarea id="galPostBody" spellcheck="false" ${published ? 'readonly' : ''} placeholder="el post que sale a la comunidad cuando el video se publique…">${esc(post.body || '')}</textarea>`}
         <div class="galPostBar">
-          <button class="galBtn" data-act="save" ${published ? 'disabled' : ''}>Guardar</button>
+          <button class="galBtn" data-act="save" ${published || postPreview ? 'disabled' : ''}>Guardar</button>
           <button class="galBtn ${approved ? 'off' : 'primary'}" data-act="${approved ? 'unapprove' : 'approve'}" ${published ? 'disabled' : ''}>${approved ? 'Retirar aprobación' : 'Aprobar'}</button>
           <span class="galSaveHint" id="galSaveHint"></span>
         </div>
@@ -443,9 +451,16 @@ async function onDetailClick(e) {
   if (titulo) { await save({ titulo: titulo.dataset.titulo }); return; }
   const btn = e.target.closest('[data-act]');
   if (!btn || btn.disabled) return;
+  if (btn.dataset.act === 'preview') {
+    // al salir del preview NO se pierde lo escrito: se guarda antes de cambiar de vista
+    if (!postPreview && dirty && $('galPostBody')) await save({ post_body: $('galPostBody').value });
+    postPreview = !postPreview;
+    renderDetail(current);
+    return;
+  }
   if (btn.dataset.act === 'save-desc') await save({ description: $('galDescBody').value });
   if (btn.dataset.act === 'save') await save({ post_body: $('galPostBody').value });
-  if (btn.dataset.act === 'approve') await save({ post_body: $('galPostBody').value, post_approved: true });
+  if (btn.dataset.act === 'approve') await save({ post_body: $('galPostBody')?.value ?? current?.post?.body ?? '', post_approved: true });
   if (btn.dataset.act === 'unapprove') await save({ post_approved: false });
 }
 

@@ -551,13 +551,19 @@ async function run() {
       const env = await loadEnv();
       const { getAccessToken, setThumbnail, scheduleVideo, verifyScheduled } = await import('../lib/youtube-api.js');
 
+      // SIN --at = VESTIR sin programar: título, descripción, tags y miniatura quedan puestos y el
+      // video sigue privado sin fecha. Programar es una acción hacia afuera y la fecha solo la da
+      // Daniel; que falte no puede impedir dejar el video listo.
       const at = flags.at;
-      if (!at) throw new Error('falta --at "YYYY-MM-DD HH:MM" (hora local de México, o ISO con offset)');
       // "2026-07-27 11:00" → ISO con offset de México; con offset explícito se respeta tal cual
-      const iso = /[zZ]|[+-]\d{2}:?\d{2}$/.test(at) ? at : `${at.replace(' ', 'T')}:00-06:00`.replace(/:00:00-06:00$/, ':00-06:00');
+      const iso = at
+        ? (/[zZ]|[+-]\d{2}:?\d{2}$/.test(at) ? at : `${at.replace(' ', 'T')}:00-06:00`.replace(/:00:00-06:00$/, ':00-06:00'))
+        : null;
 
       const videoUrl = flags.youtubeUrl || pub.video?.youtube_url ||
-        (pub.video?.youtube_id ? `https://youtu.be/${pub.video.youtube_id}` : null);
+        (pub.video?.youtube_id ? `https://youtu.be/${pub.video.youtube_id}` : null) ||
+        pub.data?.launch?.video_id && `https://youtu.be/${pub.data.launch.video_id}` ||
+        pub.data?.post_draft?.video_url || null;
       if (!videoUrl) throw new Error('no hay video: pasa --youtube-url o corre upload antes');
       const videoId = ytId(videoUrl);
 
@@ -593,8 +599,16 @@ async function run() {
       }, token);
 
       // 3) verificar contra YouTube (evidencia, no fe)
-      const v = await verifyScheduled(env, videoId, iso, token);
-      if (!v.ok) throw new Error(`YouTube no confirmó la programación (publishAt=${v.publishAt})`);
+      if (iso) {
+        const v = await verifyScheduled(env, videoId, iso, token);
+        if (!v.ok) throw new Error(`YouTube no confirmó la programación (publishAt=${v.publishAt})`);
+      } else {
+        const { getVideo } = await import('../lib/youtube-api.js');
+        const v = await getVideo(env, videoId, token);
+        if (v.snippet?.title !== sched.title) throw new Error(`YouTube no confirmó el título (quedó "${v.snippet?.title}")`);
+        out(`✓ vestido y PRIVADO sin fecha: "${v.snippet.title}" · ${(v.snippet.description || '').length} chars de descripción · ${(v.snippet.tags || []).length} tags`);
+        out('  falta SOLO tu hora:  sfpublish <proyecto> launch --at "2026-07-28 11:00"');
+      }
 
       // el post ya sabe a qué video apunta (el [LINK_VIDEO] se rellena al publicarlo)
       if (pub.data.post_draft && !pub.data.post_draft.video_url) {
@@ -603,18 +617,22 @@ async function run() {
       const pd = pub.data?.post_draft;
       pub.data.launch = {
         video_id: videoId,
-        publish_at: sched.publishAt,
-        title: v.title,
+        publish_at: sched.publishAt || null,
+        title: sched.title,
         thumbnail: thumbPath ? path.basename(thumbPath) : null,
         post_delay_min: Number(flags.postDelay || 5),
         post_status: pd?.approved_at ? 'aprobado' : pd?.body ? 'sin-aprobar' : 'sin-draft',
       };
-      setStage(pub, 'schedule', 'done', `programado ${sched.publishAt} · miniatura ${thumbPath ? 'OK' : 'FALTA'}`);
+      setStage(pub, 'schedule', iso ? 'done' : 'running',
+        iso ? `programado ${sched.publishAt} · miniatura ${thumbPath ? 'OK' : 'FALTA'}`
+            : `vestido y privado SIN fecha · miniatura ${thumbPath ? 'OK' : 'FALTA'} · falta el --at de Daniel`);
       await savePublish(projectDir, pub);
 
-      out(`✓ programado: ${v.publishAt}`);
-      out(`  título: ${v.title}`);
-      out(`  privacidad: ${v.privacyStatus} (YouTube lo publica solo a esa hora)`);
+      if (iso) {
+        out(`✓ programado: ${sched.publishAt}`);
+        out(`  título: ${sched.title}`);
+        out(`  privacidad: ${sched.privacyStatus} (YouTube lo publica solo a esa hora)`);
+      }
       out({
         aprobado: `  post de comunidad: APROBADO, sale ${pub.data.launch.post_delay_min} min después de que el video esté público`,
         'sin-aprobar': '  ⚠ el post está armado pero SIN APROBAR: apruébalo en la galería (⌘⌥G) o no sale',

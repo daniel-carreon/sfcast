@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  STAGES, newPublish, setStage, slugFromYoutubeId, slugFromProjectName,
+  STAGES, newPublish, setStage, slugFromYoutubeId, slugFromProjectName, trackedUrl,
   parseTranscript, findMentions, checklistGate, nextSlots, communityPost,
   edlMapper, applyEdl, segmentTranscript,
 } from '../lib/publish.js';
@@ -16,10 +16,10 @@ function words(frase, t0 = 0) {
 const DEFAULTS = { madeForKids: false };
 
 function goodPub() {
-  const pub = newPublish('vid-test');
+  const pub = newPublish('ab12cd');
   pub.video.titulo = 'Claude Code cambió mi forma de construir SaaS';
   pub.data.metadata = {
-    description: '🚀 Únete: https://saasfactory.so/go/vid-test\n\nEn este video que aprende como los agentes para tu SaaS con IA.\n\n🕒 TIMESTAMPS:\n00:00 Intro\n05:30 El sistema\n12:00 Cierre\n\n#SaaS',
+    description: '🚀 Únete: https://saasfactory.so/ab12cd\n\nEn este video que aprende como los agentes para tu SaaS con IA.\n\n🕒 TIMESTAMPS:\n00:00 Intro\n05:30 El sistema\n12:00 Cierre\n\n#SaaS',
     titles: ['Claude Code cambió mi forma de construir SaaS'],
     keywords: ['claude code', 'saas', 'ia', 'agentes', 'automatizacion'],
     summary: 'resumen',
@@ -36,7 +36,7 @@ test('checklist: gate ABIERTO con metadata completa', () => {
 test('checklist: gate CERRADO — título >60, sin /go/ arriba, pocas keywords', () => {
   const pub = goodPub();
   pub.video.titulo = 'x'.repeat(61);
-  pub.data.metadata.description = 'linea uno\nlinea dos\nhttps://saasfactory.so/go/vid-test\n00:00 a\n01:00 b y este video que aprende como para los';
+  pub.data.metadata.description = 'linea uno\nlinea dos\nhttps://saasfactory.so/ab12cd\n00:00 a\n01:00 b y este video que aprende como para los';
   pub.data.metadata.keywords = ['a', 'b'];
   const { checks, pass } = checklistGate(pub, DEFAULTS);
   assert.equal(pass, false);
@@ -89,8 +89,17 @@ test('mentions: dos menciones se ordenan por t', () => {
   assert.equal(found[1].video_id, 'AAA');
 });
 
-test('slugs: youtube id con underscore y nombre de proyecto', () => {
-  assert.equal(slugFromYoutubeId('AbC_dEf1234'), 'vid-abc-def1234');
+test('slugs: el link corto son los ULTIMOS 6 del id (minusculas, sin guion bajo)', () => {
+  // el CHECK `slug_format` de tracked_links solo acepta [a-z0-9-]: el `_` NO es cosmetico
+  assert.equal(slugFromYoutubeId('0U4SfWOY2_k'), 'woy2-k');   // el video del Opus 5, con `_`
+  assert.equal(slugFromYoutubeId('AbC_dEf1234'), 'ef1234');
+  assert.equal(slugFromYoutubeId('BG8nBcVG0EM'), 'cvg0em');
+  for (const id of ['0U4SfWOY2_k', 'AbC_dEf1234', 'BG8nBcVG0EM', '-Ma6LbLhrZs']) {
+    const s = slugFromYoutubeId(id);
+    assert.equal(s.length, 6, `${id} → ${s}`);
+    assert.match(s, /^[a-z0-9-]{6}$/, `${id} → ${s} debe pasar el CHECK slug_format`);
+  }
+  assert.equal(trackedUrl('woy2-k'), 'https://saasfactory.so/woy2-k');   // sin /go/, sin vid-
   assert.equal(slugFromProjectName('video-final-5-practica'), 'vid-final-5-practica');
   assert.equal(slugFromProjectName('Mi Video Ñoño!!'), 'vid-mi-video-nono');
 });

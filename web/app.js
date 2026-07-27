@@ -1724,13 +1724,13 @@ function renderPublish(j) {
     tbox.appendChild(el);
   });
 
-  // descripción completa, con el /go/ resaltado; estado del link junto al header
+  // descripción completa, con el link de atribución resaltado; estado del link junto al header
   const desc = md.description || '';
   $('ppDesc').innerHTML = desc
-    ? escapeHtml(desc).replace(/(https?:\/\/\S*\/go\/[a-z0-9-]+)/g, '<span class="ppGo">$1</span>')
+    ? escapeHtml(desc).replace(/(https?:\/\/\S*saasfactory\.so\/(?:go\/[a-z0-9-]+|[a-z0-9-]{6}))(?![a-z0-9-])/g, '<span class="ppGo">$1</span>')
     : '<div class="ppEmptyBlock">sin descripción aún.</div>';
   const link = pub.data?.link;
-  $('ppLinkState').textContent = link ? (link.verified ? `/go/ verificado ✓ ${link.status} + cookies` : `/go/ SIN verificar (${link.status})`) : '';
+  $('ppLinkState').textContent = link ? (link.verified ? `link verificado ✓ ${link.status} + cookies` : `link SIN verificar (${link.status})`) : '';
   $('ppLinkState').className = 'ppHmeta ' + (link?.verified ? 'ok' : link ? 'bad' : '');
 
   // keywords + post

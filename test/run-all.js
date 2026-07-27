@@ -58,11 +58,11 @@ const galRoot = path.join(tmp, 'lanzamientos');
   await fsp.mkdir(B, { recursive: true });
   const manana = new Date(Date.now() + 36 * 3600 * 1000).toISOString();
   await fsp.writeFile(path.join(A, 'publish.json'), JSON.stringify({
-    video: { slug: 'vid-galeria', titulo: 'Lanzamiento completo de humo' },
+    video: { slug: 'gal123', titulo: 'Lanzamiento completo de humo' },
     stages: { metadata: { status: 'done', evidence: 'ok', updated_at: new Date().toISOString() } },
     log: [],
     data: {
-      metadata: { description: 'CTA https://saasfactory.so/go/vid-galeria\n\n00:00 Intro\n02:30 Cierre',
+      metadata: { description: 'CTA https://saasfactory.so/gal123\n\n00:00 Intro\n02:30 Cierre',
         titles: ['Lanzamiento completo de humo', 'Segundo título candidato'], keywords: ['humo'] },
       launch: { video_id: 'AAAAAAAAAAA', publish_at: manana, title: 'Lanzamiento completo de humo',
         thumbnail: 'ab-01.png', post_delay_min: 5, post_status: 'sin-aprobar' },
@@ -141,7 +141,7 @@ const galRoot = path.join(tmp, 'lanzamientos');
   const projDir = path.join(ROOT, 'demo', 'project-916');
   // fixtures del dossier ⌘Y: publish.json + transcript word-level + 2 thumbs (se limpian al final)
   const pubFixture = {
-    video: { slug: 'vid-humo', titulo: 'Título elegido de humo' },
+    video: { slug: 'humo12', titulo: 'Título elegido de humo' },
     stages: {
       metadata: { status: 'done', evidence: 'metadata de humo', updated_at: new Date().toISOString() },
       link: { status: 'done', evidence: '/go/vid-humo ✓ 307 · cookies vivas', updated_at: new Date().toISOString() },
@@ -151,11 +151,11 @@ const galRoot = path.join(tmp, 'lanzamientos');
     log: [],
     data: {
       metadata: {
-        description: 'CTA: https://saasfactory.so/go/vid-humo\n\n00:00 Intro\n01:00 Cierre',
+        description: 'CTA: https://saasfactory.so/humo12\n\n00:00 Intro\n01:00 Cierre',
         titles: ['Título elegido de humo', 'Alternativa B', 'Alternativa C'],
         keywords: ['humo', 'prueba'],
       },
-      link: { url: 'https://saasfactory.so/go/vid-humo', verified: true, status: 307 },
+      link: { url: 'https://saasfactory.so/humo12', verified: true, status: 307 },
       mentions: [{ t: 1.2, video_id: 'XX', titulo: 'Video previo', frase_detectada: 'frase de humo' }],
     },
   };
@@ -346,7 +346,7 @@ const galRoot = path.join(tmp, 'lanzamientos');
     // copiar: la descripción del fixture debe llegar al clipboard
     await page.click('#copyDesc');
     const clip = await page.evaluate(() => navigator.clipboard.readText()).catch(() => '');
-    const copyOk = /\/go\/vid-humo/.test(clip);
+    const copyOk = /saasfactory\.so\/humo12/.test(clip);
     await page.keyboard.press('y');
     const panelHidden = await page.$eval('#publishPanel', (el) => el.hidden);
     // ⌘⌥G: la GALERÍA abre ENCIMA de la sala y vuelve. Se manda por CODE porque en macOS

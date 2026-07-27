@@ -14,7 +14,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   STAGES, newPublish, setStage, loadPublish, savePublish,
-  slugFromYoutubeId, slugFromProjectName, parseTranscript, findMentions,
+  slugFromYoutubeId, slugFromProjectName, trackedUrl, parseTranscript, findMentions,
   checklistGate, nextSlots, communityPost, applyEdl,
 } from '../lib/publish.js';
 import { listThumbs, extractPostBody, resolveThumb, computeTranscriptFor } from '../lib/gallery.js';
@@ -25,7 +25,7 @@ function usage(code = 1) {
   process.stderr.write(`uso: sfpublish <proyecto-dir> <etapa> [opciones]
 etapas:
   init        crea publish.json (esqueleto de etapas)
-  metadata    descripción/títulos/keywords + link /go/ verificado.
+  metadata    descripción/títulos/keywords + link corto verificado (saasfactory.so/<slug>).
               DEFAULT del flujo: el AGENTE la escribe leyendo el transcript y la entrega con
               --from <json> ({description,titles,keywords,summary}). Sin --from usa la
               Description Machine del producto (Gemini via OpenRouter) — camino automático/cron.
@@ -46,7 +46,7 @@ etapas:
   connect     abre el navegador del perfil para loguear Google (ritual de 1 vez)
   status      imprime el estado de publish.json
 opciones:
-  --youtube-url <url>   URL de YouTube ya existente (slug vid-<id> como el producto)
+  --youtube-url <url>   URL de YouTube ya existente (el slug = los ULTIMOS 6 de su id)
   --slug <slug>         fuerza el slug del tracked link
   --transcript <path>   transcript word-level JSON (default: autodetecta edit/transcripts/*.json)
   --from <path>         (metadata) JSON escrito por el agente — se salta la generación con Gemini
@@ -134,10 +134,10 @@ async function ensureTrackedLink(env, slug, title, campaign) {
 }
 
 // verificación EN VIVO del redirect limpio + cookies de atribución (curl real = la evidencia).
-// OJO: el apex saasfactory.so → www es un 308 de Vercel SIN cookies; el route /go/ vive en www,
-// así que se verifica contra www directo (el CTA público sigue siendo saasfactory.so/go/<slug>).
+// OJO: el apex saasfactory.so → www es un 308 de Vercel SIN cookies; el resolver vive en www,
+// así que se verifica contra www directo (el CTA público sigue siendo saasfactory.so/<slug>).
 function verifyGoLink(slug) {
-  const url = `https://www.saasfactory.so/go/${slug}`;
+  const url = `https://www.saasfactory.so/${slug}`;
   const r = spawnSync('curl', ['-sI', '-o', '/dev/null', '-w', '%{http_code} %{redirect_url}', url], { encoding: 'utf8', timeout: 20000 });
   const head = spawnSync('curl', ['-sI', url], { encoding: 'utf8', timeout: 20000 });
   const status = parseInt((r.stdout || '').split(' ')[0], 10);
@@ -332,7 +332,7 @@ async function run() {
     case 'metadata': {
       const env = await loadEnv();
       const slug = pub.video.slug;
-      const trackedLinkUrl = `https://saasfactory.so/go/${slug}`;
+      const trackedLinkUrl = trackedUrl(slug);
 
       // 0) si viene --from (el DEFAULT del flujo: la escribe el AGENTE), VALIDAR ANTES de
       //    cualquier efecto — un JSON malformado no debe dejar link creado ni etapa corrupta
@@ -415,7 +415,7 @@ async function run() {
       const slug = pub.video.slug;
       const campaign = flags.youtubeUrl ? ytId(flags.youtubeUrl) : path.basename(projectDir);
       const link = await ensureTrackedLink(env, slug, `YT: ${(pub.video.titulo || path.basename(projectDir)).substring(0, 80)}`, campaign);
-      const trackedLinkUrl = `https://saasfactory.so/go/${slug}`;
+      const trackedLinkUrl = trackedUrl(slug);
       const v = verifyGoLink(slug);
       const linkOk = v.status >= 300 && v.status < 400 && v.hasAttribution;
       setStage(pub, 'link', linkOk ? 'done' : 'error',
@@ -654,7 +654,7 @@ async function run() {
       const { publishCommunityPost, uploadThumbToMedia } = await import('../lib/community-draft.js');
       const videoUrl = draft.video_url || `https://youtu.be/${L.video_id}`;
       const trackedLink = pub.data?.link?.url ||
-        (pub.video?.slug ? `https://saasfactory.so/go/${pub.video.slug}` : null);
+        (pub.video?.slug ? trackedUrl(pub.video.slug) : null);
 
       // la MISMA cara que el video: la portada elegida en la galería va al post (pedido de Daniel).
       // En dry-run NO se sube (subir al bucket ya es escribir; un ensayo no escribe nada).

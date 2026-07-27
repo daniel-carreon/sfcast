@@ -138,7 +138,7 @@ function renderGrid() {
 // ---------- ficha ----------
 async function openItem(id, opts = {}) {
   if (!opts.keepScroll && dirty && !confirm('El post tiene cambios sin guardar. ¿Salir de todos modos?')) return;
-  const scroll = opts.keepScroll ? $('galDetail').scrollTop : 0;
+  const scroll = opts.keepScroll ? (document.querySelector('#galDetail .galDetGrid')?.scrollTop || 0) : 0;
   try {
     const j = await (await fetch(`/api/gallery/item?id=${encodeURIComponent(id)}`)).json();
     if (j.error) throw new Error(j.error);
@@ -149,10 +149,59 @@ async function openItem(id, opts = {}) {
     $('galBack').hidden = false;
     $('galSearch').hidden = true;
     renderDetail(j);
-    $('galDetail').scrollTop = scroll;
+    const g = document.querySelector('#galDetail .galDetGrid');
+    if (g) g.scrollTop = scroll;
   } catch (e) {
     deps.toast(`no pude abrir la ficha: ${e.message}`);
   }
+}
+
+// --- rail de secciones: prender/apagar columnas del expediente. Es preferencia de VISTA, no
+// cabina (mismo patrón que el rail del dossier ⌘Y). Persistido, y nunca se apagan todas.
+const GAL_SECS = [
+  { id: 'portada', label: 'Portada' },
+  { id: 'texto', label: 'Texto' },
+  { id: 'transcript', label: 'Transcript' },
+  { id: 'post', label: 'Post' },
+];
+let galView = (() => {
+  const def = { portada: true, texto: true, transcript: true, post: true };
+  try { return { ...def, ...JSON.parse(localStorage.getItem('sf.gal.view') || '{}') }; } catch { return def; }
+})();
+function applyGalView() {
+  const on = GAL_SECS.filter((s) => galView[s.id]);
+  for (const sec of document.querySelectorAll('#galDetail .galSec')) {
+    sec.style.display = galView[sec.dataset.sec] ? '' : 'none';
+  }
+  const grid = document.querySelector('#galDetail .galDetGrid');
+  if (grid) grid.dataset.cols = String(on.length);
+  for (const b of document.querySelectorAll('.galRailBtn')) b.classList.toggle('on', !!galView[b.dataset.sec]);
+  localStorage.setItem('sf.gal.view', JSON.stringify(galView));
+}
+function toggleSec(id) {
+  const on = GAL_SECS.filter((s) => galView[s.id]);
+  if (galView[id] && on.length === 1) { deps.toast('al menos una sección prendida'); return; }
+  galView[id] = !galView[id];
+  applyGalView();
+}
+
+/** Las dos fases en el header: qué falta y de quién es la pelota. */
+function renderFases(it) {
+  const esc = deps.escapeHtml;
+  return `<div class="galFases">${it.fases.map((f) => {
+    const hechos = f.items.filter((i) => i.ok).length;
+    const completa = hechos === f.items.length;
+    return `<section class="galFase${completa ? ' completa' : ''}">
+      <header><span class="galFaseN">${f.n}</span>
+        <span class="galFaseT">${esc(f.titulo)}</span>
+        <span class="galFaseDe">${esc(f.de)}</span>
+        <span class="galFaseCnt">${hechos}/${f.items.length}</span></header>
+      <div class="galFaseItems">${f.items.map((i) => `
+        <span class="galFaseItem ${i.ok ? 'ok' : 'falta'}" title="${esc(i.ok ? (i.detalle || 'listo') : i.falta)}">
+          ${i.ok ? '✓' : '·'} ${esc(i.label)}${i.detalle && i.ok ? `<b>${esc(i.detalle)}</b>` : ''}
+        </span>`).join('')}</div>
+    </section>`;
+  }).join('<span class="galFaseFlecha">→</span>')}</div>`;
 }
 
 function renderDetail(it) {
@@ -179,28 +228,31 @@ function renderDetail(it) {
     ? `<div class="galChapters">${it.chapters.map((c) => `<div class="galChapter"><span class="galT">${deps.fmt(c.t)}</span><span>${esc(c.label)}</span></div>`).join('')}</div>`
     : '';
 
-  const gate = Object.entries(it.stages || {}).map(([k, v]) =>
-    `<span class="ppStep ${v.status}" title="${esc(v.evidence || v.status)}">${esc(k)}</span>`).join('');
-
   const post = it.post || {};
   const approved = !!post.approved_at;
   const published = !!it.post_published_at;
 
   $('galDetail').innerHTML = `
-    <div class="galDetTop">
-      <div>
-        <h2>${esc(it.titulo || it.name)}</h2>
-        <div class="galDetSub">${esc(it.name)}${it.slug ? ` · ${esc(it.slug)}` : ''} · <span class="galPath">${esc(shortPath(it.dir))}</span></div>
+    <div class="galDetHead">
+      <div class="galDetTop">
+        <div>
+          <h2>${esc(it.titulo || it.name)}</h2>
+          <div class="galDetSub">${esc(it.name)}${it.slug ? ` · ${esc(it.slug)}` : ''} · <span class="galPath">${esc(shortPath(it.dir))}</span></div>
+        </div>
+        <div class="galChips">
+          <span class="galChip ${it.launch?.tone}">${esc(it.launch?.label)}</span>
+          <span class="galChip ${post.tone}">${esc(post.label)}</span>
+        </div>
       </div>
-      <div class="galChips">
-        <span class="galChip ${it.launch?.tone}">${esc(it.launch?.label)}</span>
-        <span class="galChip ${post.tone}">${esc(post.label)}</span>
-      </div>
+      ${renderFases(it)}
     </div>
-    <div class="galStepper">${gate}</div>
 
+    <div class="galDetBody">
+    <nav class="galRail" aria-label="secciones del expediente">
+      ${GAL_SECS.map((s) => `<button class="galRailBtn" data-sec="${s.id}" title="prender/apagar ${s.label}"><span class="galLed"></span>${s.label}</button>`).join('')}
+    </nav>
     <div class="galDetGrid">
-      <section class="galSec">
+      <section class="galSec" data-sec="portada">
         <h3>Portada</h3>
         <div class="galCoverBig">${cover}</div>
         <div class="galCoverName">${it.cover ? esc(it.cover) + (it.cover_chosen ? ' · elegida' : ' · automática (elige una abajo)') : ''}</div>
@@ -210,7 +262,7 @@ function renderDetail(it) {
         <div class="galThumbs">${thumbs}</div>
       </section>
 
-      <section class="galSec">
+      <section class="galSec" data-sec="texto">
         <h3>Descripción ${it.description_source ? `<span class="galHmeta">${esc(it.description_source)}</span>` : ''}
           <button class="galMini" data-copy="desc" title="copiar la descripción">copiar</button></h3>
         ${it.description
@@ -224,10 +276,9 @@ function renderDetail(it) {
         ${it.keywords.length
           ? `<div class="ppChips">${it.keywords.map((k) => `<span class="ppChip">${esc(k)}</span>`).join('')}</div>`
           : '<div class="galEmptyBlock">sin keywords.</div>'}
-        ${it.link ? `<h3>Link de atribución</h3><div class="galLinkState ${it.link.verified ? 'ok' : 'bad'}">${esc(it.link.url)} — ${it.link.verified ? `verificado ✓ ${it.link.status}` : `SIN verificar (${it.link.status})`}</div>` : ''}
       </section>
 
-      <section class="galSec">
+      <section class="galSec" data-sec="transcript">
         <h3>Transcript ${it.transcript.found ? `<span class="galHmeta">${it.transcript.words.toLocaleString('es-MX')} palabras · ${Math.round(it.transcript.duration / 60)} min · ${esc(it.transcript.source)}${it.transcript.cut === 'raw' ? ' · ⚠ RAW' : ''}</span>` : ''}</h3>
         ${it.transcript.found
           ? `<input id="galTrFilter" type="search" placeholder="buscar en el transcript…" autocomplete="off">
@@ -235,7 +286,7 @@ function renderDetail(it) {
           : '<div class="galEmptyBlock">sin transcript en el proyecto.</div>'}
       </section>
 
-      <section class="galSec">
+      <section class="galSec" data-sec="post">
         <h3>Post de comunidad
           <span class="galHmeta">${post.source ? esc(post.source) : ''}${post.seeded ? ' · sembrado del archivo' : ''}</span>
         </h3>
@@ -252,8 +303,10 @@ function renderDetail(it) {
         </div>
         <div class="galNote">aprobar <b>no publica</b>: deja el post listo. Lo publica <code>sfpublish watch</code> cuando YouTube confirma que el video ya es público (+${it.post_delay_min} min).</div>
       </section>
+    </div>
     </div>`;
 
+  applyGalView();
   if (it.transcript.found) renderTranscript('');
 }
 
@@ -274,6 +327,8 @@ function markPostDirty() {
 }
 
 async function onDetailClick(e) {
+  const rail = e.target.closest('.galRailBtn');
+  if (rail) { toggleSec(rail.dataset.sec); return; }
   const copy = e.target.closest('[data-copy]');
   if (copy) {
     const what = copy.dataset.copy;
@@ -306,9 +361,11 @@ async function save(patch) {
     if (!r.ok || j.ok === false) throw new Error(j.error || `HTTP ${r.status}`);
     dirty = false;
     current = j.item;
-    const scroll = $('galDetail').scrollTop;
+    const scroll = document.querySelector('#galDetail .galDetGrid')?.scrollTop || 0;
     renderDetail(j.item);
-    $('galDetail').scrollTop = scroll;
+    const g = document.querySelector('#galDetail .galDetGrid');
+    if (g) g.scrollTop = scroll;   // guardar no debe brincar la vista al inicio
+
     const h = $('galSaveHint');
     if (h) { h.textContent = j.changed.length ? `guardado · ${j.changed.join(' · ')}` : 'sin cambios'; h.className = 'galSaveHint ok'; }
     // la tarjeta de la rejilla ya no refleja la verdad: refrescar el catálogo en segundo plano

@@ -17,7 +17,7 @@ import {
   slugFromYoutubeId, slugFromProjectName, parseTranscript, findMentions,
   checklistGate, nextSlots, communityPost, applyEdl,
 } from '../lib/publish.js';
-import { listThumbs, extractPostBody, resolveThumb } from '../lib/gallery.js';
+import { listThumbs, extractPostBody, resolveThumb, computeTranscriptFor } from '../lib/gallery.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -186,6 +186,23 @@ async function loadTranscriptCut(dir) {
   return { ...tr, path: tPath, cut };
 }
 
+/**
+ * Transcript TOLERANTE para las etapas que solo necesitan LEER el texto (metadata).
+ * `loadTranscriptCut` exige word-level JSON porque `mentions` necesita timestamps por palabra;
+ * pero un proyecto puede traer solo el TRANSCRIPT-*.txt con timestamps que deja la imprenta, y
+ * ahí morir con "no encontré transcript" es falso: el texto SÍ está. Cae a ese .txt, y solo si
+ * tampoco hay nada devuelve null (el llamador decide si eso es fatal).
+ */
+async function loadTranscriptLoose(dir) {
+  try { return await loadTranscriptCut(dir); } catch { /* sin word-level: seguimos buscando */ }
+  const tr = await computeTranscriptFor([dir]);
+  if (!tr.found) return null;
+  return {
+    words: [], text: tr.segments.map((s) => s.text).join(' '),
+    duration: tr.duration, path: tr.file, cut: `texto (${tr.file})`,
+  };
+}
+
 async function getPub() {
   let pub = await loadPublish(projectDir);
   if (!pub) {
@@ -339,8 +356,17 @@ async function run() {
       setStage(pub, 'metadata', 'running', flags.from ? 'metadata del agente en validación…' : 'generando con el system prompt del producto…');
       await savePublish(projectDir, pub);
 
-      const tr = await loadTranscriptCut(projectDir);
-      out(`transcript: ${tr.path} (${tr.words.length} palabras, ${Math.round(tr.duration / 60)} min, corte ${tr.cut})`);
+      const tr = await loadTranscriptLoose(projectDir);
+      if (!tr && !md) {
+        throw new Error(`no encontré transcript en ${projectDir} y no me diste --from: sin texto no hay metadata. ` +
+          'Pásalo con --transcript, o escribe la metadata tú y entrégala con --from.');
+      }
+      if (tr) {
+        const n = tr.words.length || tr.text.split(/\s+/).length;
+        out(`transcript: ${tr.path} (${n} palabras, ${Math.round(tr.duration / 60)} min, corte ${tr.cut})`);
+      } else {
+        out('sin transcript en el proyecto — no importa: la metadata la escribiste tú (--from)');
+      }
 
       // 1) tracked link idempotente (el CTA de la descripción usa el link real)
       const campaign = flags.youtubeUrl ? ytId(flags.youtubeUrl) : path.basename(projectDir);

@@ -560,19 +560,76 @@ body.galleryOnly #galClose { display: none; } /* sin sala detrás no hay a dónd
 .galChip.idle { color: #55555f; }
 
 /* ── ficha (expediente del lanzamiento) ── */
-#galDetail { flex: 1; overflow-y: auto; padding: 18px 20px 28px; }
+/* head fijo (identidad + LAS DOS FASES) · body = rail vertical + rejilla de secciones que scrollea */
+#galDetail { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.galDetHead { flex-shrink: 0; padding: 16px 20px 12px; border-bottom: 1px solid var(--line); background: #0c0c11; }
+.galDetBody { flex: 1; min-height: 0; display: flex; }
 .galDetTop { display: flex; align-items: flex-start; gap: 18px; flex-wrap: wrap; }
 .galDetTop h2 { font-size: 18px; font-weight: 800; line-height: 1.25; }
 .galDetSub { color: var(--dim); font-size: 11px; margin-top: 4px; }
 .galPath { font-family: "SF Mono", Menlo, monospace; color: #46464f; }
 .galDetTop .galChips { margin-left: auto; }
-.galStepper { display: flex; gap: 5px; flex-wrap: wrap; margin: 12px 0 16px; }
+
+/* ── LAS DOS FASES: el contrato de Daniel, no las 9 etapas internas del pipeline ── */
+.galFases { display: flex; align-items: stretch; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+.galFase {
+  flex: 1; min-width: 300px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 9px; padding: 9px 12px 11px;
+}
+.galFase.completa { border-color: #234a2c; background: #0d150f; }
+.galFase > header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 7px; }
+.galFaseN {
+  width: 17px; height: 17px; border-radius: 50%; background: var(--sf); color: #0a0a0c;
+  font-size: 10px; font-weight: 800; display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0; align-self: center;
+}
+.galFase.completa .galFaseN { background: #3fbf5a; }
+.galFaseT { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .14em; }
+.galFaseDe { color: #55555f; font-size: 10.5px; }
+.galFaseCnt { margin-left: auto; color: var(--dim); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.galFaseItems { display: flex; flex-wrap: wrap; gap: 5px; }
+.galFaseItem {
+  font-size: 10.5px; padding: 3px 8px; border-radius: 20px; border: 1px solid var(--line);
+  color: #55555f; display: inline-flex; align-items: baseline; gap: 5px; max-width: 100%;
+}
+.galFaseItem.ok { color: #9fd8ab; border-color: #234a2c; background: #101a12; }
+.galFaseItem.falta { color: var(--sf); border-color: #4a3410; }
+.galFaseItem b {
+  color: var(--text); font-weight: 600; max-width: 190px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.galFaseFlecha { color: #3a3a44; align-self: center; font-size: 15px; }
+
+/* ── rail vertical: prende/apaga secciones del expediente (preferencia de vista, no cabina) ── */
+.galRail {
+  width: 46px; flex-shrink: 0; background: var(--panel); border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 10px; padding: 14px 0; align-items: center;
+}
+.galRailBtn {
+  writing-mode: vertical-rl; transform: rotate(180deg);
+  background: none; border: 1px solid var(--line); border-radius: 16px; cursor: pointer;
+  color: #55555f; font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .12em;
+  padding: 10px 5px; display: flex; align-items: center; gap: 7px; transition: color .15s, border-color .15s;
+}
+.galRailBtn .galLed {
+  width: 7px; height: 7px; border-radius: 50%; background: #2a2a33; flex-shrink: 0;
+  transition: background .15s, box-shadow .15s;
+}
+.galRailBtn.on { color: var(--text); border-color: #234a2c; }
+.galRailBtn.on .galLed { background: #3fbf5a; box-shadow: 0 0 7px rgba(63,191,90,.8); }
+.galRailBtn:hover { color: var(--text); }
+
 .galDetGrid {
-  display: grid; gap: 18px;
+  flex: 1; min-width: 0; overflow-y: auto; padding: 18px 20px 28px;
+  display: grid; gap: 18px; align-items: start;
   grid-template-columns: minmax(280px, 340px) minmax(320px, 1.2fr) minmax(260px, .9fr) minmax(300px, 1.1fr);
 }
-@media (max-width: 1500px) { .galDetGrid { grid-template-columns: minmax(260px, 320px) 1fr 1fr; } }
-@media (max-width: 1080px) { .galDetGrid { grid-template-columns: 1fr; } }
+/* con secciones apagadas el resto se reparte el ancho (y una sola va a ancho de lectura) */
+.galDetGrid[data-cols="3"] { grid-template-columns: minmax(280px, 340px) 1.15fr 1fr; }
+.galDetGrid[data-cols="2"] { grid-template-columns: 1fr 1fr; }
+.galDetGrid[data-cols="1"] { grid-template-columns: minmax(0, 1080px); justify-content: center; }
+@media (max-width: 1500px) { .galDetGrid, .galDetGrid[data-cols="3"] { grid-template-columns: minmax(260px, 320px) 1fr 1fr; } }
+@media (max-width: 1080px) { .galDetGrid, .galDetGrid[data-cols="3"], .galDetGrid[data-cols="2"] { grid-template-columns: 1fr; } }
 .galSec {
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
   padding: 14px 16px 16px; min-width: 0;

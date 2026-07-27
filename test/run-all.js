@@ -448,6 +448,22 @@ const galRoot = path.join(tmp, 'lanzamientos');
     // la ficha COMPLETA: capítulos, transcript, miniaturas y el post
     await page.click('.galCard[data-id="r0/2026-09-01-lanzamiento-completo"]');
     await page.waitForSelector('#galPostBody', { timeout: 5000 });
+    // LAS DOS FASES (el contrato de Daniel, no las 9 etapas internas) + el RAIL de secciones
+    const fases = await page.$$eval('.galFase .galFaseCnt', (e) => e.map((x) => x.textContent));
+    const faseItems = await page.$$eval('.galFaseItem', (e) => e.length);
+    const sinStepper = (await page.$$('#galDetail .ppStep')).length === 0;   // el stepper viejo se fue
+    const sinLink = !/Link de atribución/.test(await page.$eval('#galDetail', (e) => e.textContent));
+    const cols0 = await page.$eval('.galDetGrid', (e) => e.dataset.cols);
+    await page.click('.galRailBtn[data-sec="transcript"]');                  // apagar una sección
+    const cols1 = await page.$eval('.galDetGrid', (e) => e.dataset.cols);
+    const trOculto = await page.$eval('.galSec[data-sec="transcript"]', (e) => e.style.display === 'none');
+    for (const sec of ['portada', 'texto', 'post']) await page.click(`.galRailBtn[data-sec="${sec}"]`);
+    const ultimaViva = (await page.$$eval('#galDetail .galSec', (e) =>
+      e.filter((x) => x.style.display !== 'none').length)) === 1;            // la última no se apaga
+    await page.click('.galRailBtn[data-sec="transcript"]');
+    for (const sec of ['portada', 'texto']) await page.click(`.galRailBtn[data-sec="${sec}"]`);
+    const railOk = fases.length === 2 && fases[0] === '3/5' && fases[1] === '1/3' && faseItems === 8
+      && sinStepper && sinLink && cols0 === '4' && cols1 === '3' && trOculto && ultimaViva;
     const nChaps = await page.$$eval('.galChapter', (els) => els.length);
     const nSegs = await page.$$eval('#galTranscript .ppSeg', (els) => els.length);
     const nThumbs = await page.$$eval('.galThumb', (els) => els.length);
@@ -498,16 +514,16 @@ const galRoot = path.join(tmp, 'lanzamientos');
     const sandboxOk = t1 === 404 && (await t2) === 404;
 
     await browser.close();
-    ok = gridOk && filtOk && honestoOk && fichaOk && trFiltOk && portadaOk && sucioOk && guardadoOk
-      && persisteOk && revocaOk && sandboxOk && errors.length === 0;
-    detail = `rejilla=${gridOk}(${nCards}) buscador=${filtOk} estado-honesto=${honestoOk} ficha=${fichaOk}(${nChaps}cap/${nSegs}seg/${nThumbs}thumb) buscaTr=${trFiltOk} portada=${portadaOk} guarda=${guardadoOk} PERSISTE=${persisteOk} revoca=${revocaOk} sandbox=${sandboxOk} consola=${errors.length} errores`;
+    ok = gridOk && filtOk && honestoOk && fichaOk && railOk && trFiltOk && portadaOk && sucioOk
+      && guardadoOk && persisteOk && revocaOk && sandboxOk && errors.length === 0;
+    detail = `rejilla=${gridOk}(${nCards}) buscador=${filtOk} estado-honesto=${honestoOk} ficha=${fichaOk}(${nChaps}cap/${nSegs}seg/${nThumbs}thumb) fases+rail=${railOk}(${fases.join('/')}) buscaTr=${trFiltOk} portada=${portadaOk} guarda=${guardadoOk} PERSISTE=${persisteOk} revoca=${revocaOk} sandbox=${sandboxOk} consola=${errors.length} errores`;
     if (errors.length) detail += ` :: ${errors.slice(0, 3).join(' | ')}`;
   } catch (e) {
     detail = e.message.split('\n')[0];
   } finally {
     srv.kill();
   }
-  report('galería ⌘⌥G humo Playwright (rejilla + ficha + portada + post editable/aprobable con persistencia, 0 errores)', ok, detail);
+  report('galería ⌘⌥G humo Playwright (rejilla + ficha + 2 fases + rail + portada + post editable/aprobable con persistencia, 0 errores)', ok, detail);
 }
 
 await fsp.rm(tmp, { recursive: true, force: true });

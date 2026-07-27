@@ -10,6 +10,7 @@ import {
   splitItemAt, trimItemTo, removeItemsInsideRange,
   keptSegments, outDuration, rawToOut, outToRaw,
 } from './model.js';
+import { initGallery, toggleGallery, galleryKey } from './gallery.js';
 
 const $ = (id) => document.getElementById(id);
 const base = $('base');
@@ -53,6 +54,7 @@ document.addEventListener('pointerdown', (e) => {
 });
 
 let project = null;
+let gallery = null;      // API de la galería (⌘⌥G); se inicializa en boot()
 let state = newState();
 const undoStack = [];
 const redoStack = [];
@@ -96,10 +98,22 @@ function setSingleSel(key) {
 }
 
 // ---------- carga ----------
+// Dos modos: SALA (un proyecto abierto, todo el timeline) y GALERÍA SOLA (`sfreview --gallery`,
+// sin proyecto: el catálogo a pantalla completa). ⌘⌥G abre la galería en los dos.
+let galleryOnly = false;
 async function boot() {
   project = await (await fetch('/api/project')).json();
   $('projname').textContent = project.name || '';
   document.title = `SFStudio — ${project.name || 'Sala de Revisión'}`;
+  gallery = initGallery({ toast, escapeHtml, fmt });
+
+  if (project.gallery_only) {
+    galleryOnly = true;
+    document.body.classList.add('galleryOnly');
+    document.title = 'SFStudio — Galería de Lanzamientos';
+    toggleGallery(true);
+    return; // sin timeline que montar: la sala no existe en este modo
+  }
 
   base.src = '/media/' + project.base.src;
   base.preservesPitch = true; // 2x con TONO NORMAL (nativo; la razón #1 de los parches a HF muere aquí)
@@ -195,7 +209,7 @@ function layoutStage() {
   stage.style.width = `${Math.floor(w)}px`;
   stage.style.height = `${Math.floor(h)}px`;
 }
-window.addEventListener('resize', () => { if (project) { layoutStage(); fitTimeline(false); renderTimeline(); } });
+window.addEventListener('resize', () => { if (project && !galleryOnly) { layoutStage(); fitTimeline(false); renderTimeline(); } });
 
 // ---------- overlays (mount/unmount por ventana de tiempo: cada webm-alpha cuesta 2 decoders) ----------
 const WINDOW = 3;
@@ -1760,7 +1774,17 @@ function toast(msg) {
 // S/A/D operan sobre el COMPONENTE SELECCIONADO; sin selección, el default es la línea base.
 window.addEventListener('keydown', (e) => {
   if (!project) return;
-  if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+  // ⌘⌥G = GALERÍA. Se compara e.code y NO e.key: en macOS ⌥+g produce "©" y un switch por letra
+  // nunca dispararía. No pisa nada (⌘Y panel · ⌘E export · ⌘Z undo · S/A/D/Q/E/F/M sueltas).
+  if ((e.metaKey || e.ctrlKey) && e.altKey && e.code === 'KeyG') {
+    e.preventDefault();
+    toggleGallery();
+    return;
+  }
+  // galería abierta = espejo a pantalla completa: ella decide, nada llega al timeline de atrás
+  if (gallery?.isOpen()) { galleryKey(e); return; }
+  if (galleryOnly) return; // sin sala que operar en este modo
+  if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
   const t = base.currentTime || 0;
   const frame = 1 / (project.fps || 30);
   const k = e.key.toLowerCase();

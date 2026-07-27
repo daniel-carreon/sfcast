@@ -26,23 +26,61 @@ function sh(cmd, args, opts = {}) {
 {
   const files = ['bin/sfrender.js', 'bin/sfreview.js', 'bin/sfstudio-apply.js', 'bin/sfpublish.js',
     'lib/render.js', 'lib/static-server.js', 'lib/publish.js', 'lib/upload-youtube.js',
-    'web/app.js', 'web/model.js',
-    'test/model.test.js', 'test/server.test.js', 'test/publish.test.js'];
+    'lib/gallery.js', 'lib/community-draft.js', 'lib/youtube-api.js',
+    'web/app.js', 'web/model.js', 'web/gallery.js',
+    'test/model.test.js', 'test/server.test.js', 'test/publish.test.js', 'test/gallery.test.js'];
   let bad = files.filter((f) => sh('node', ['--check', path.join(ROOT, f)]).code !== 0);
   report(`sintaxis (node --check x${files.length})`, bad.length === 0, bad.join(', '));
 }
 
 // ── 2. unit tests: modelo de trims + server (traversal/CORS) + publish (gate/menciones/slots)
+//        + galería (sandbox de ids, estado del lanzamiento, patch sobre publish.json)
 {
-  const r = sh('node', ['--test', 'test/model.test.js', 'test/server.test.js', 'test/publish.test.js']);
+  const r = sh('node', ['--test', 'test/model.test.js', 'test/server.test.js', 'test/publish.test.js',
+    'test/gallery.test.js']);
   const pass = /# pass (\d+)/.exec(r.out)?.[1];
   const fail = /# fail (\d+)/.exec(r.out)?.[1];
-  report(`modelo + server + publish (node --test)`, r.code === 0 && fail === '0', `${pass} pass / ${fail} fail`);
+  report(`modelo + server + publish + galería (node --test)`, r.code === 0 && fail === '0', `${pass} pass / ${fail} fail`);
 }
 
 // ── 3. humo sfrender: card-smoke 320x180 @0.5s = 15 frames exactos
 const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'sfstudio-test-'));
 const smokeOut = path.join(tmp, 'smoke.mp4');
+
+// ── fixture de la GALERÍA: dos "lanzamientos" en una raíz de mentiras (uno completo con fecha
+// programada y post; otro a medio hacer, para probar el estado honesto). Se pasa con --roots
+// para NUNCA escanear el disco real en un test.
+const galRoot = path.join(tmp, 'lanzamientos');
+{
+  const A = path.join(galRoot, '2026-09-01-lanzamiento-completo');
+  const B = path.join(galRoot, '2026-09-02-a-medias');
+  await fsp.mkdir(path.join(A, 'thumbs'), { recursive: true });
+  await fsp.mkdir(B, { recursive: true });
+  const manana = new Date(Date.now() + 36 * 3600 * 1000).toISOString();
+  await fsp.writeFile(path.join(A, 'publish.json'), JSON.stringify({
+    video: { slug: 'vid-galeria', titulo: 'Lanzamiento completo de humo' },
+    stages: { metadata: { status: 'done', evidence: 'ok', updated_at: new Date().toISOString() } },
+    log: [],
+    data: {
+      metadata: { description: 'CTA https://saasfactory.so/go/vid-galeria\n\n00:00 Intro\n02:30 Cierre',
+        titles: ['Lanzamiento completo de humo'], keywords: ['humo'] },
+      launch: { video_id: 'AAAAAAAAAAA', publish_at: manana, title: 'Lanzamiento completo de humo',
+        thumbnail: 'ab-01.png', post_delay_min: 5, post_status: 'sin-aprobar' },
+      post_draft: { title: 'Lanzamiento completo de humo', body: 'Comunidad!\n\nCuerpo original del post.',
+        source: 'fixture', updated_at: new Date().toISOString(), approved_at: null },
+    },
+  }));
+  for (const [f, c] of [['ab-01.png', 'orange'], ['ab-02.png', 'purple']]) {
+    sh('ffmpeg', ['-nostdin', '-y', '-loglevel', 'error', '-f', 'lavfi', '-i', `color=c=${c}:s=64x36`,
+      '-frames:v', '1', path.join(A, 'thumbs', f)]);
+  }
+  await fsp.writeFile(path.join(A, 'TRANSCRIPT-master.txt'),
+    Array.from({ length: 6 }, (_, i) => `[00:0${i}.00] frase ${i} del máster`).join('\n'));
+  // el "a medias": publish.json recién nacido, sin nada. Debe aparecer con estado honesto.
+  await fsp.writeFile(path.join(B, 'publish.json'), JSON.stringify({
+    video: { slug: 'vid-a-medias', titulo: '' }, stages: {}, log: [], data: {},
+  }));
+}
 {
   const r = sh('node', ['bin/sfrender.js', 'demo/card-smoke', '-o', smokeOut, '--quiet']);
   let frames = null;
@@ -133,7 +171,8 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     sh('ffmpeg', ['-nostdin', '-y', '-loglevel', 'error', '-f', 'lavfi', '-i', `color=c=${color}:s=64x36`, '-frames:v', '1',
       path.join(projDir, 'thumbs', name)]);
   }
-  const srv = spawn('node', [path.join(ROOT, 'bin', 'sfreview.js'), projDir, '--port', String(PORT)], { stdio: 'ignore' });
+  const srv = spawn('node', [path.join(ROOT, 'bin', 'sfreview.js'), projDir, '--port', String(PORT),
+    '--roots', galRoot], { stdio: 'ignore' });
   let ok = false, detail = '';
   try {
     // esperar server
@@ -310,9 +349,20 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     const copyOk = /\/go\/vid-humo/.test(clip);
     await page.keyboard.press('y');
     const panelHidden = await page.$eval('#publishPanel', (el) => el.hidden);
+    // ⌘⌥G: la GALERÍA abre ENCIMA de la sala y vuelve. Se manda por CODE porque en macOS
+    // ⌥+g produce "©" y un handler por e.key jamás dispararía.
+    await page.keyboard.press('Meta+Alt+KeyG');
+    await page.waitForSelector('#galleryPanel:not([hidden])', { timeout: 5000 });
+    await page.waitForSelector('.galCard', { timeout: 8000 });
+    const galCards = await page.$$eval('.galCard', (els) => els.length);
+    await page.keyboard.press('Meta+Alt+KeyG');
+    const galClosed = await page.$eval('#galleryPanel', (el) => el.hidden);
+    // la SALA sigue igual detrás: mismas costuras, mismos assets, mismo trim
+    const salaIntacta = (await page.$$('.cutSeam')).length === 2 && (await page.$$('.clipItem')).length > 0;
+    const galToggleOk = galCards === 2 && galClosed && salaIntacta;
     const panelOk = nSteps >= 9 && nTitles === 3 && /elegido de humo/i.test(chosenTx) && goHl >= 1
       && nSegs >= 2 && nThumbs === 3 && !injected && nMents === 1 && trHidden && gridCols2 && soloOk
-      && copyOk && panelHidden;
+      && copyOk && panelHidden && galToggleOk;
     // waveform API: proyecto demo sin audio → peaks [] es la respuesta válida
     const wf = await fetch(`http://127.0.0.1:${PORT}/api/waveform`);
     const wj = await wf.json();
@@ -339,7 +389,7 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     const baseGestureOk = rangeSelOk && rangeDelOk && ctxOk && audioSepOk;
     await browser.close();
     ok = fixesOk && waveOk && panelOk && itemsOk && baseGestureOk && errors.length === 0 && /corte/.test(trimTitle);
-    detail = `seam="${trimTitle.slice(0, 40)}…" fixes=${fixesOk} wave=${waveOk} panel=${panelOk} items=${itemsOk} baseSel/borra/audioSep=${baseGestureOk} (drag/trim/supr/⌥rango/rango-base/sep-audio/QE/F/vista) consola=${errors.length} errores`;
+    detail = `seam="${trimTitle.slice(0, 40)}…" fixes=${fixesOk} wave=${waveOk} panel=${panelOk} items=${itemsOk} baseSel/borra/audioSep=${baseGestureOk} ⌘⌥G=${galToggleOk} (drag/trim/supr/⌥rango/rango-base/sep-audio/QE/F/vista/galería) consola=${errors.length} errores`;
     if (errors.length) detail += ` :: ${errors.slice(0, 3).join(' | ')}`;
   } catch (e) {
     detail = e.message.split('\n')[0];
@@ -351,7 +401,113 @@ const smokeOut = path.join(tmp, 'smoke.mp4');
     await fsp.rm(path.join(projDir, 'transcripts'), { recursive: true, force: true });
     await fsp.rm(path.join(projDir, 'thumbs'), { recursive: true, force: true });
   }
-  report('sfreview humo Playwright (S/D + items drag/trim/supr/⌥rango + marcador + export + waveform + dossier ⌘Y, 0 errores)', ok, detail);
+  report('sfreview humo Playwright (S/D + items drag/trim/supr/⌥rango + marcador + export + waveform + dossier ⌘Y + galería ⌘⌥G, 0 errores)', ok, detail);
+}
+
+// ── 7. humo de la GALERÍA sola (`sfreview --gallery`): rejilla real, ficha completa, elegir
+//        portada y editar+aprobar el post con PERSISTENCIA verificada en publish.json y tras recargar
+{
+  const PORT = 3998;
+  const srv = spawn('node', [path.join(ROOT, 'bin', 'sfreview.js'), '--gallery', '--port', String(PORT),
+    '--roots', galRoot], { stdio: 'ignore' });
+  const A = path.join(galRoot, '2026-09-01-lanzamiento-completo');
+  let ok = false, detail = '';
+  try {
+    for (let i = 0; i < 40; i++) {
+      try { if ((await fetch(`http://127.0.0.1:${PORT}/api/gallery`)).ok) break; } catch { /* aún no */ }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    const { chromium } = await import('playwright');
+    const browser = await chromium.launch({ headless: true });
+    const bctx = await browser.newContext({ viewport: { width: 1600, height: 1000 } });
+    const page = await bctx.newPage();
+    const errors = [];
+    page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+    page.on('pageerror', (e) => errors.push(String(e)));
+    await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'load' });
+
+    // la galería arranca SOLA (sin sala) y pinta los dos lanzamientos con su estado honesto
+    await page.waitForSelector('.galCard', { timeout: 10000 });
+    const nCards = await page.$$eval('.galCard', (els) => els.length);
+    const chips = await page.$$eval('.galChip', (els) => els.map((e) => e.textContent).join(' | '));
+    const gridOk = nCards === 2 && /programado/.test(chips) && /en edición/.test(chips) && /sin post/.test(chips);
+    // buscador: filtra la rejilla
+    await page.fill('#galSearch', 'medias');
+    const filtOk = (await page.$$('.galCard')).length === 1;
+    await page.fill('#galSearch', '');
+
+    // el proyecto A MEDIAS abre sin romper nada ni inventar datos
+    await page.click('.galCard[data-id="r0/2026-09-02-a-medias"]');
+    await page.waitForSelector('#galDetail:not([hidden])', { timeout: 5000 });
+    const vacioTx = await page.$eval('#galDetail', (el) => el.textContent);
+    const honestoOk = /sin descripción/i.test(vacioTx) && /sin fecha todavía/i.test(vacioTx)
+      && /sin candidatas/i.test(vacioTx) && /sin transcript/i.test(vacioTx);
+    await page.click('#galBack');
+    await page.waitForSelector('#galGrid:not([hidden])', { timeout: 5000 });
+
+    // la ficha COMPLETA: capítulos, transcript, miniaturas y el post
+    await page.click('.galCard[data-id="r0/2026-09-01-lanzamiento-completo"]');
+    await page.waitForSelector('#galPostBody', { timeout: 5000 });
+    const nChaps = await page.$$eval('.galChapter', (els) => els.length);
+    const nSegs = await page.$$eval('#galTranscript .ppSeg', (els) => els.length);
+    const nThumbs = await page.$$eval('.galThumb', (els) => els.length);
+    const coverName = await page.$eval('.galCoverName', (el) => el.textContent);
+    const fichaOk = nChaps === 2 && nSegs === 6 && nThumbs === 2 && /ab-01\.png/.test(coverName);
+    // transcript navegable: el buscador filtra los segmentos
+    await page.fill('#galTrFilter', 'frase 3');
+    const trFiltOk = (await page.$$('#galTranscript .ppSeg')).length === 1;
+    await page.fill('#galTrFilter', '');
+
+    // PORTADA: click en la 2a candidata la vuelve portada, y queda escrita en publish.json
+    await page.click('.galThumb[data-thumb="ab-02.png"]');
+    await page.waitForSelector('.galThumb[data-thumb="ab-02.png"].on', { timeout: 5000 });
+    const pubTrasPortada = JSON.parse(await fsp.readFile(path.join(A, 'publish.json'), 'utf8'));
+    const portadaOk = pubTrasPortada.data.thumbnail.chosen === 'ab-02.png';
+
+    // POST: editar + aprobar → escrito en disco
+    await page.fill('#galPostBody', 'Comunidad!\n\nTexto EDITADO desde la galería.');
+    const sucioOk = await page.$eval('#galSaveHint', (el) => /sin guardar/.test(el.textContent));
+    await page.click('[data-act="approve"]');
+    await page.waitForSelector('[data-act="unapprove"]', { timeout: 5000 });
+    const pubTrasPost = JSON.parse(await fsp.readFile(path.join(A, 'publish.json'), 'utf8'));
+    const guardadoOk = /Texto EDITADO desde la galería/.test(pubTrasPost.data.post_draft.body)
+      && !!pubTrasPost.data.post_draft.approved_at;
+
+    // PERSISTENCIA REAL: recargar la página y volver a abrir la ficha
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForSelector('.galCard', { timeout: 10000 });
+    const chipsTras = await page.$$eval('.galChip', (els) => els.map((e) => e.textContent).join(' | '));
+    await page.click('.galCard[data-id="r0/2026-09-01-lanzamiento-completo"]');
+    await page.waitForSelector('#galPostBody', { timeout: 5000 });
+    const bodyTras = await page.$eval('#galPostBody', (el) => el.value);
+    const coverTras = await page.$eval('.galCoverName', (el) => el.textContent);
+    const persisteOk = /Texto EDITADO desde la galería/.test(bodyTras)
+      && /ab-02\.png/.test(coverTras) && /elegida/.test(coverTras)
+      && /post aprobado/.test(chipsTras)
+      && (await page.$('[data-act="unapprove"]')) !== null;
+
+    // editar DESPUÉS de aprobar revoca la firma (nadie aprueba a ciegas un texto que cambió)
+    await page.fill('#galPostBody', 'Comunidad!\n\nOtra cosa distinta.');
+    await page.click('[data-act="save"]');
+    await page.waitForSelector('[data-act="approve"]', { timeout: 5000 });
+    const revocaOk = await page.$eval('#galPostState', (el) => /borrador/.test(el.textContent));
+
+    // sandbox: no se puede salir de las raíces por el id ni por el nombre de archivo
+    const t1 = await (await fetch(`http://127.0.0.1:${PORT}/api/gallery/item?id=${encodeURIComponent('r0/../../etc')}`)).status;
+    const t2 = (await fetch(`http://127.0.0.1:${PORT}/gallery/thumb?id=r0/2026-09-01-lanzamiento-completo&f=${encodeURIComponent('../publish.json')}`)).status;
+    const sandboxOk = t1 === 404 && (await t2) === 404;
+
+    await browser.close();
+    ok = gridOk && filtOk && honestoOk && fichaOk && trFiltOk && portadaOk && sucioOk && guardadoOk
+      && persisteOk && revocaOk && sandboxOk && errors.length === 0;
+    detail = `rejilla=${gridOk}(${nCards}) buscador=${filtOk} estado-honesto=${honestoOk} ficha=${fichaOk}(${nChaps}cap/${nSegs}seg/${nThumbs}thumb) buscaTr=${trFiltOk} portada=${portadaOk} guarda=${guardadoOk} PERSISTE=${persisteOk} revoca=${revocaOk} sandbox=${sandboxOk} consola=${errors.length} errores`;
+    if (errors.length) detail += ` :: ${errors.slice(0, 3).join(' | ')}`;
+  } catch (e) {
+    detail = e.message.split('\n')[0];
+  } finally {
+    srv.kill();
+  }
+  report('galería ⌘⌥G humo Playwright (rejilla + ficha + portada + post editable/aprobable con persistencia, 0 errores)', ok, detail);
 }
 
 await fsp.rm(tmp, { recursive: true, force: true });

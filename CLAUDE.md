@@ -22,12 +22,13 @@ sistema (≥7; validado con 8.1) · Python 3 solo el adapter. Vanilla JS en la s
 ## Comandos
 
 ```bash
-npm test                                                  # EL comando de validación (8 checks, incluye humos Playwright)
+npm test                                                  # EL comando de validación (9 checks, incluye humos Playwright)
 node bin/sfrender.js <card-dir> -o out.mp4|out.webm|out.mov [--format mp4|webm|prores] [--fps N]
 python3 adapter/placed2timeline.py <proyecto>/design      # placed_events.json → sfreview_project/
-node bin/sfreview.js <project-dir> --port 3010            # la sala (background siempre; ⌘Y = panel publish)
+node bin/sfreview.js <project-dir> --port 3010            # la sala (background siempre; ⌘Y = panel publish · ⌘⌥G = galería)
+node bin/sfreview.js --gallery --port 3010                 # SOLO la galería de lanzamientos (sin proyecto abierto)
 node bin/sfstudio-apply.js <fixes.json> <master.mp4> [--dry-run] [-o out.mp4]
-node bin/sfpublish.js <proyecto> <etapa>                  # etapa 2: init|metadata|link|mentions|checklist|schedule|post|upload|connect|status
+node bin/sfpublish.js <proyecto> <etapa>                  # etapa 2: init|metadata|link|mentions|thumbs|checklist|schedule|post|launch|watch|upload|connect|status
 ```
 
 ## Invariantes (romperlos = romper la fábrica)
@@ -97,6 +98,41 @@ node bin/sfpublish.js <proyecto> <etapa>                  # etapa 2: init|metada
   el Chrome personal). PROHIBIDO publicar público / tocar videos existentes; `--test` sube el
   draft privado "[TEST SFPublish] borrar" y lo BORRA. Sin sesión → rama B honesta + `connect`.
 - `channel-defaults.json` = config repetible del canal (kids NO, idioma es, visibilidad private).
+
+## La GALERÍA DE LANZAMIENTOS (⌘⌥G, 26 jul 2026)
+
+El catálogo de TODOS los videos del pipeline, no solo el abierto: rejilla con la portada de cada
+lanzamiento y, a un clic, el expediente completo (metadata con capítulos, transcript navegable,
+miniaturas candidatas y el post de comunidad). `lib/gallery.js` = modelo puro (con unit tests);
+`web/gallery.js` = la vista; `bin/sfreview.js` sirve `/api/gallery`.
+
+- **Un lanzamiento = una carpeta con `publish.json`** bajo las RAÍCES (`--roots`, o
+  `SFSTUDIO_ROOTS`, o el default: `business-os/youtube/videos` + `agent-server/workspace/generated`).
+  El histórico del canal NO entra: solo lo que pasó por el pipeline.
+- **`publish.json` sigue siendo la fuente de verdad.** La galería lo lee y lo escribe (mismo
+  `savePublish` atómico que el CLI); no hay modelo paralelo. Los campos que agrega:
+  `data.thumbnail.chosen` (la portada) y `data.post_draft.{body,title,source,approved_at,updated_at}`.
+- **Atajo `⌘⌥G`, comparado por `e.code === 'KeyG'`**: en macOS ⌥+g produce `©` y un handler por
+  `e.key` jamás dispararía (gotcha pagado). No pisa ⌘Y/⌘E/⌘Z ni S/A/D/Q/E/F/M.
+- **Sandbox del id:** un proyecto se direcciona `r<idxRaíz>/<carpeta>` y SIEMPRE se resuelve contra
+  las raíces; nombres con `/`, `\` o `..` se rechazan. Lo mismo el `f=` de `/gallery/thumb`.
+- **Lo único editable de toda la app** son las dos decisiones que exigen criterio humano: cuál
+  miniatura es la portada y el texto+aprobación del post. Todo lo demás sigue siendo espejo.
+
+### El borrador del post ya NO vive en la BD del producto (cambio de diseño, 26 jul)
+
+Antes `post --draft` escribía en `posts` con `is_draft=true`. Eso disparó **1,702 notificaciones
+push** (el trigger solo chequeaba `is_draft` para el email; el push salía igual). Ahora:
+
+```
+sfpublish post --draft   → arma el borrador en publish.json (NADA toca la BD)
+galería ⌘⌥G              → Daniel lo edita y lo APRUEBA (aprobar ≠ publicar)
+sfpublish watch          → INSERT normal en posts cuando YouTube confirma público (+N min)
+```
+
+`watch` exige TRES condiciones: video público + minutos cumplidos + `approved_at`. Editar el texto
+después de aprobar REVOCA la aprobación (nadie firma un texto que cambió). `--dry-run` ensaya el
+camino completo sin escribir nada (ni el post ni la miniatura al bucket).
 
 ## Integración con la fábrica
 

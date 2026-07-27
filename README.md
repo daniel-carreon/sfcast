@@ -17,13 +17,18 @@ Plataforma de video de la casa SaaS Factory. La línea de producción completa e
 - **sfpublish** — CLI por etapas: `metadata` (descripción/títulos/keywords con el system prompt
   del producto + tracked link `/go/` idempotente verificado en vivo) · `mentions` (transcript ↔
   videos del canal → plan de tarjetas/end screen) · `checklist` (gate duro) · `schedule` (peak
-  hours) · `post` (anuncio, solo texto) · `upload` (agéntico a YouTube Studio, perfil persistente,
-  SIEMPRE draft privado) · `connect` (ritual de login de 1 vez).
+  hours) · `post --draft` (arma el anuncio en el proyecto) · `launch` (miniatura + metadata +
+  PROGRAMA el video) · `watch` (el lazo: publica el post cuando YouTube confirma que el video ya
+  es público) · `upload` (agéntico a YouTube Studio, SIEMPRE draft privado) · `connect`.
 - **Panel ⌘Y** — en la sala: espejo AI-first de `publish.json` (estado + evidencia + comando por
   etapa, cero forms). El agente ejecuta; el panel refleja.
+- **Galería ⌘⌥G** — el catálogo de TODOS los lanzamientos: rejilla con la portada de cada video y,
+  a un clic, el expediente completo (descripción con capítulos, transcript navegable, miniaturas
+  candidatas y el post de comunidad editable y aprobable). Se abre desde la sala, o sola con
+  `sfreview --gallery`. Es la superficie desde la que Daniel opera sus lanzamientos.
 
 ```bash
-npm install && npm test    # 8 checks: sintaxis, 25 unit tests, humos render/apply/sala+panel
+npm install && npm test    # 9 checks: sintaxis, 64 unit tests, humos render/apply/sala+panel+galería
 
 node bin/sfrender.js <card-dir> -o out.webm --format webm      # card → webm con ALPHA
 python3 adapter/placed2timeline.py <proyecto>/design           # fábrica → proyecto de revisión
@@ -32,6 +37,7 @@ node bin/sfstudio-apply.js fixes.json master.mp4 --dry-run     # cerrar el loop 
 
 node bin/sfpublish.js <proyecto> metadata                      # etapa 2: arranca la publicación
 node bin/sfpublish.js <proyecto> status                        # estado del pipeline post-edición
+node bin/sfreview.js --gallery --port 3010                     # la GALERÍA sola: todos los lanzamientos
 ```
 
 AI-first: la sala es para **ver, recortar fino y anotar**, el panel ⌘Y para **mirar el avance de

@@ -111,6 +111,7 @@
       <div class="hpRow"><span class="hpKeys"><kbd>F</kbd></span><span class="hpDesc">pantalla completa</span></div>
       <div class="hpRow"><span class="hpKeys"><kbd>⌘E</kbd></span><span class="hpDesc">exportar fixes.json</span></div>
       <div class="hpRow"><span class="hpKeys"><kbd>⌘Y</kbd></span><span class="hpDesc">panel de publicación</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>⌘⌥G</kbd></span><span class="hpDesc">galería de lanzamientos (todos los videos)</span></div>
     </section>
   </div>
 </div>
@@ -160,6 +161,23 @@
     </div>
   </div>
   <footer id="ppFoot">espejo AI-first: aquí se <b>mira</b> el lanzamiento; las etapas las corre el agente (las decisiones se toman conversando) · <b>Y</b> cierra · click en un <b>timestamp</b> = seek · <b>⇧click</b> = seek y ver el video</footer>
+</div>
+
+<!-- ⌘⌥G — la GALERÍA DE LANZAMIENTOS: el catálogo de todos los videos del pipeline -->
+<div id="galleryPanel" hidden>
+  <header id="galHead">
+    <span id="galBrand"><span class="sf">SF</span>GALERÍA</span>
+    <button id="galBack" hidden title="volver a la rejilla (Esc)">← lanzamientos</button>
+    <span id="galWhere"></span>
+    <input id="galSearch" type="search" placeholder="buscar lanzamiento…" autocomplete="off" spellcheck="false">
+    <span id="galCount"></span>
+    <button id="galClose" title="cerrar (⌘⌥G o Esc)">✕</button>
+  </header>
+  <div id="galBody">
+    <div id="galGrid"></div>
+    <div id="galDetail" hidden></div>
+  </div>
+  <footer id="galFoot">espejo AI-first: aquí se <b>mira</b> y se <b>aprueba</b>; el trabajo lo hace el agente conversando · <b>click</b> en una miniatura la vuelve portada · el post se edita y se aprueba aquí (aprobar ≠ publicar: sale solo cuando el video se hace público)</footer>
 </div>
 
 <div id="modal" hidden>

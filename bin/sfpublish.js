@@ -711,6 +711,17 @@ async function run() {
         break;
       }
 
+      if (post.alreadyPublished) {
+        // otro watcher (o el cron de la otra máquina) ya lo publicó: se adopta su id y se sale.
+        pub.data.post_published_at = post.publishedAt;
+        pub.data.post_published_id = post.id;
+        setStage(pub, 'post', 'done', `ya estaba publicado (${post.id}) — otro proceso ganó la carrera`);
+        setStage(pub, 'published', 'done', `video público + post fuera (${post.id})`);
+        await savePublish(projectDir, pub);
+        out(`· el post YA estaba en la comunidad (${post.id}) — no publiqué un duplicado`);
+        break;
+      }
+
       pub.data.post_published_at = new Date().toISOString();
       pub.data.post_published_id = post.id;
       setStage(pub, 'post', 'done', `publicado en la comunidad ${pub.data.post_published_at}`);

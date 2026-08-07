@@ -647,3 +647,61 @@ se graba — exactamente cuando el preview necesita a main libre).
 **Regla que deja:** un productor de UI a frecuencia fija JAMÁS hace
 `main.async` por evento — siempre pasa por una compuerta de "último gana".
 La cola de main no es un buffer de video.
+
+## v2.8 — El preview a 3 fps con la cámara sana: el vúmetro re-layouteaba la ventana entera (7 ago 2026)
+
+**Síntoma (Daniel, con la escena "Mi cámara solo" abierta):** el movimiento de
+la cámara en el preview se veía "como con muy pocos frames por segundo", desde
+el arranque, sin grabar siquiera. Sospecha natural: la cámara.
+
+**El diagnóstico se MIDIÓ, no se supuso (y las dos primeras hipótesis
+murieron):**
+- La ZV-E10 por USB entrega **29.84 fps reales** (probe firmado con la misma
+  config del Estudio: preset `.high`, conversión BGRA, discard de tardíos —
+  gap p50 33 ms, p95 41 ms, 0 drops). La hipótesis "USB 2.0 no da para 720p
+  NV12" quedó refutada por la medición.
+- El compositor compone a 30 fps con ~5 ms/frame a canvas 5K (`sample` de la
+  cola `studio.render`: 15% de un core) y el heartbeat lo confirma
+  (`frames:452` en 15 s, `drops:0`). La grabación siempre estuvo bien.
+- El main thread estaba al **99.7% en layout de SwiftUI** (2677 de 2685
+  muestras en `NSHostingView.beginTransaction → StackLayout.sizeThatFits`,
+  recursión de ~50 niveles). SFCast quemaba 105% de CPU con la ventana
+  abierta, sin grabar.
+
+**Raíz: los niveles del vúmetro eran `@Published` en el `StudioController`, a
+15 Hz.** Todos los paneles observan ese MISMO objeto vía `@EnvironmentObject`:
+cada asignación invalida la jerarquía completa, y un pase de layout de esta
+ventana cuesta ~60-70 ms (stacks anidados profundos). 15 Hz × 2 propiedades ×
+70 ms = main saturado permanente. Con la caída suave (`max(nivel, nivel·0.8)`)
+el valor cambiaba en CADA tick aunque hubiera silencio — y `@Published`
+dispara `objectWillChange` en cada asignación, cambie o no el valor. El
+`PreviewGate` (v2.7) hizo su trabajo exacto: tiró los frames que main no
+consumía. Por eso el preview iba a ~3 fps con TODO lo demás sano — v2.7 curó
+la bola de nieve de memoria, pero dejó la degradación **muda**. La ironía: el
+comentario de `startMeters` ya lo sabía ("a 15Hz cada asignación de @Published
+re-renderiza la jerarquía SwiftUI entera") — protegió `elapsed` y dejó el
+vúmetro publicando.
+
+**La cura, en dos frentes:**
+1. **El vúmetro salió de SwiftUI.** `MeterBarNSView`: la barra es un
+   `CAGradientLayer` que recibe el nivel DIRECTO desde el `meterTimer`, mismo
+   patrón que el preview (`registerMeter`, gemelo de `registerPreview`). Un
+   CALayer se actualiza en microsegundos; la jerarquía SwiftUI ya no se entera
+   de que existe audio. `freeDiskNote` también se gateó (asignaba nil→nil cada
+   10 s).
+2. **El SENSOR que faltaba (invariante 5b): fps medidos, a la vista.**
+   `PreviewGate` ahora cuenta entregados y tirados; `LatestFrameStore` ya
+   contaba frames por fuente. `engine.flowCounts()` expone los acumulados y
+   tres consumidores miden por delta: el **chip "cámara N · preview N fps"**
+   en la barra del Estudio (publica a ~1 Hz y SOLO si el número cambió; se
+   pone naranja si el preview va >5 fps detrás de la cámara, con help que
+   aclara que la grabación no se afecta), el **❤︎ del heartbeat**
+   (`cam:30fps prev:30fps(-0)`) y **STUDIOTEST_FLOW / BENCH_FLOW** en QA.
+
+**Reglas que deja:**
+- Nada que ocurra más de ~1 vez por segundo pasa por `@Published` de un
+  objeto que observe la ventana entera. Alta frecuencia = CALayer directo
+  (preview, vúmetro) o un publisher gateado por cambio de valor mostrado.
+- Toda compuerta que TIRA trabajo para degradar con gracia lleva contador, y
+  el contador se muestra. Degradar en silencio es cómo el 25 jul grabó 50 min
+  congelado y cómo este preview murió de hambre sin decirlo.

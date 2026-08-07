@@ -614,6 +614,16 @@ final class StudioEngine: NSObject {
         }
     }
 
+    /// Foto acumulada del FLUJO de frames: cámara entrando, preview saliendo.
+    /// Los consumidores (chip de fps, heartbeat, bench) miden fps por DELTA
+    /// entre dos fotos — el fps se mide contando frames, no se supone.
+    func flowCounts() -> StudioFlowCounts {
+        let p = previewGate.counts()
+        return StudioFlowCounts(camera: frames.count(.camera),
+                                previewDelivered: p.delivered,
+                                previewDropped: p.dropped)
+    }
+
     /// QA (--studiotest): compone UN frame del programa con el estado actual,
     /// para evidenciar el compositor/escena sin depender de screenshots del
     /// sistema (la ventana es sharingType=.none). Thread-safe vs el render loop.
@@ -918,6 +928,13 @@ final class Compositor: @unchecked Sendable {
     }
 }
 
+/// Contadores acumulados del flujo de frames (ver `flowCounts()`).
+struct StudioFlowCounts {
+    var camera = 0
+    var previewDelivered = 0
+    var previewDropped = 0
+}
+
 // MARK: - cajas thread-safe (los hilos de captura/render no tocan MainActor)
 
 /// Coalescing REAL del preview — máximo UN hop a main en vuelo, siempre con el
@@ -931,12 +948,14 @@ final class PreviewGate: @unchecked Sendable {
     private let lock = NSLock()
     private var latest: IOSurface?
     private var inFlight = false
+    private var delivered = 0
+    private var dropped = 0
     /// Deja el frame nuevo (el anterior no consumido se libera AQUÍ, no en una
     /// cola). Devuelve true si toca agendar el hop (no hay otro en vuelo).
     func offer(_ s: IOSurface) -> Bool {
         lock.lock(); defer { lock.unlock() }
         latest = s
-        if inFlight { return false }
+        if inFlight { dropped += 1; return false }
         inFlight = true
         return true
     }
@@ -946,7 +965,17 @@ final class PreviewGate: @unchecked Sendable {
         let s = latest
         latest = nil
         inFlight = false
+        if s != nil { delivered += 1 }
         return s
+    }
+    /// SENSOR (invariante 5b): cuántos frames LLEGARON al ojo y cuántos se
+    /// tiraron porque main no los consumió. La compuerta degrada con gracia,
+    /// pero degradar EN SILENCIO fue el patrón de todos los bugs del Estudio:
+    /// el "preview a 3 fps" del 7 ago era main saturado tirando frames aquí,
+    /// y ningún número lo delataba.
+    func counts() -> (delivered: Int, dropped: Int) {
+        lock.lock(); defer { lock.unlock() }
+        return (delivered, dropped)
     }
 }
 

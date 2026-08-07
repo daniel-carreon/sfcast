@@ -47,7 +47,10 @@ Estudio multi-escena estilo OBS/piel Screen Studio, ADITIVO sobre el Loom:
 (doble salida: screen.mp4 + camera.mov raw, seg-001.mp4 programa con 2 pistas
 AAC, manifest.json = contrato con SFStudio/edición agéntica) ·
 `StudioWindow.swift` (vista desktop SwiftUI + `--studiotest`). Decisiones y
-gotchas: `DECISIONS.md` §v2.0–§v2.5. QA (SIEMPRE via `open` — TCC se atribuye al
+gotchas: `DECISIONS.md` §v2.0–§v2.8 (v2.7/v2.8: el preview se muere de hambre
+si main se satura — nada de alta frecuencia viaja por `@Published` del
+controller; vúmetro y preview van por CALayer directo, y el chip
+"cámara N · preview N fps" es el sensor que lo delata). QA (SIEMPRE via `open` — TCC se atribuye al
 proceso responsable, no al binario):
 
 ```bash
@@ -92,6 +95,11 @@ guardias de disco con auto-stop.
      promedio (es la diferencia entre 334 MB y 6 GB por la misma hora).
    - Nada que escriba a disco arranca sin **preflight de espacio** ni corre sin
      auto-stop: mejor 40 min buenos que 50 corruptos.
+   - Nada que ocurra >1 vez/s pasa por `@Published` de un objeto que observa
+     la ventana entera (v2.8: el vúmetro a 15 Hz saturó main con layout de
+     SwiftUI y el preview cayó a 3 fps con cámara y compositor sanos). Alta
+     frecuencia = CALayer directo. Y toda compuerta que TIRA trabajo para
+     degradar con gracia lleva contador visible (`flowCounts()`).
 6. **Destino local vs VPS** (toggle del micropanel, `autoUpload` en settings.json, v1.7):
    ON = sube al VPS al terminar (lo de siempre); OFF = SOLO guarda en local, sin subir.
    Se empuja luego con "↑ subir" del Historial. El push posterior NO comprime en sitio

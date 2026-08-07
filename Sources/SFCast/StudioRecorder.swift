@@ -147,6 +147,11 @@ final class StudioRecorder {
         health?.cancel()
         health = Task { @MainActor [weak self] in
             var ticks = 0
+            // Baseline del FLUJO (v2.8): cam/preview en fps por delta de
+            // contadores entre latidos. El "preview a 3 fps" del 7 ago habría
+            // sido visible aquí al primer ❤︎ — en su lugar, degradó en silencio.
+            var lastFlow = engine.flowCounts()
+            var lastFlowAt = CACurrentMediaTime()
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
                 guard let self, self.state == .recording else { return }
@@ -155,13 +160,22 @@ final class StudioRecorder {
                 let fresh = engine.levels.fresh()
                 let st = self.sink?.snapshot()
                 let beats = engine.screenHealth.beats()
+                let flow = engine.flowCounts()
+                let now = CACurrentMediaTime()
+                let dt = max(now - lastFlowAt, 0.001)
+                let camFPS = Double(flow.camera - lastFlow.camera) / dt
+                let prevFPS = Double(flow.previewDelivered - lastFlow.previewDelivered) / dt
+                let prevDrops = flow.previewDropped - lastFlow.previewDropped
+                lastFlow = flow
+                lastFlowAt = now
                 Log.info(String(format: "Estudio ❤︎ %ds — stream:%.1fs-mudo (v=%d a=%d) imagen:%@ "
-                                + "mic:%@ sys:%@ frames:%d drops:%d libre:%@",
+                                + "mic:%@ sys:%@ frames:%d drops:%d cam:%.0ffps prev:%.0ffps(-%d) libre:%@",
                                 Int(self.elapsed), engine.screenHealth.silence(),
                                 beats.video, beats.audio,
                                 engine.screenFrozen ? "CONGELADA" : "ok",
                                 fresh.mic ? "ok" : "MUDO", fresh.system ? "ok" : "mudo",
-                                st?.videoFrames ?? 0, st?.droppedFrames ?? 0, Self.gb(free)))
+                                st?.videoFrames ?? 0, st?.droppedFrames ?? 0,
+                                camFPS, prevFPS, prevDrops, Self.gb(free)))
                 if free < Self.stopFreeBytes {
                     Log.error("Estudio: DISCO CASI LLENO (\(Self.gb(free))) — deteniendo para salvar lo grabado")
                     self.onAlert?("Disco casi lleno (\(Self.gb(free))) — detuve la grabación para no corromperla", true)

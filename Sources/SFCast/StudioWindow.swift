@@ -20,8 +20,23 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     @Published var showSettings = false
     @Published var isRecording = false
     @Published var elapsed: TimeInterval = 0
-    @Published var micLevel: Float = 0
-    @Published var systemLevel: Float = 0
+    // Vúmetro SIN @Published — v2.8. Publicar los niveles a 15 Hz invalidaba
+    // la jerarquía SwiftUI COMPLETA (todos los paneles observan este objeto):
+    // cada pase de layout de la ventana cuesta ~60-70 ms, 30 publicaciones/s
+    // saturaban main al 99.7% (medido con `sample`) y el PreviewGate — que
+    // tira frames cuando main no consume, por diseño — dejaba el preview a
+    // ~3 fps con la cámara y el compositor perfectamente sanos a 30. Los
+    // niveles ahora van DIRECTO al CALayer de la barra, igual que el preview.
+    private weak var micMeter: MeterBarNSView?
+    private weak var sysMeter: MeterBarNSView?
+    private var micSmooth: Float = 0
+    private var sysSmooth: Float = 0
+    /// SENSOR (invariante 5b): fps medidos de cámara y preview, para VER que
+    /// lo que se ve es lo que se graba. Publica ~1 Hz y solo si cambió.
+    @Published var camFPS = -1        // -1 = sin dato aún
+    @Published var prevFPS = -1
+    private var lastFlow: StudioFlowCounts?
+    private var lastFlowAt: Double = 0
     @Published var screenOK = false
     @Published var cameraOK = false
     @Published var starved: Set<StudioSourceKind> = []
@@ -149,12 +164,23 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
             restoreConfig()
             exit(1)
         }
+        let flow0 = engine.flowCounts()
+        let flowT0 = CACurrentMediaTime()
         let half = UInt64(max(1, seconds / 2)) * 1_000_000_000
         try? await Task.sleep(nanoseconds: half)
         writeFramePNG(name: "studiotest-frame-a.png")
         selectScene(b.id)                                    // switch EN VIVO
         try? await Task.sleep(nanoseconds: half)
         writeFramePNG(name: "studiotest-frame-b.png")
+        // FLUJO medido (v2.8): cámara entrando y preview pintado, en fps.
+        // Es el sensor del "preview a 3 fps" — sin él, un preview muriendo
+        // de hambre pasa cualquier QA porque el archivo sale perfecto.
+        let flow = engine.flowCounts()
+        let dt = max(CACurrentMediaTime() - flowT0, 0.001)
+        print(String(format: "STUDIOTEST_FLOW cam=%.1ffps prev=%.1ffps prevTirados=%d",
+                     Double(flow.camera - flow0.camera) / dt,
+                     Double(flow.previewDelivered - flow0.previewDelivered) / dt,
+                     flow.previewDropped - flow0.previewDropped))
         let dir = await recorder.stop(engine: engine, config: config)
         isRecording = false
         saveWindowShot(to: dir)
@@ -196,6 +222,8 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
             print("BENCH_FAIL start: \(error.localizedDescription)")
             exit(1)
         }
+        let flow0 = engine.flowCounts()
+        let flowT0 = CACurrentMediaTime()
         // Movimiento real en pantalla: sin esto medimos un caso irreal (una
         // pantalla 100% quieta comprime a casi nada en CUALQUIER encoder).
         // De paso muestreamos el vúmetro: el bug de la línea fija solo se ve si
@@ -215,6 +243,15 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                         micMin, micMax, micSum / Float(max(micN, 1)), micMax - micMin))
         let beats = engine.screenHealth.beats()
         let silence = engine.screenHealth.silence()
+        // FLUJO medido (v2.8): el sensor que le faltaba al "preview a 3 fps".
+        let flow = engine.flowCounts()
+        let flowDT = max(CACurrentMediaTime() - flowT0, 0.001)
+        let benchFlow = String(format: "BENCH_FLOW cam=%.1ffps prev=%.1ffps prevTirados=%d",
+                               Double(flow.camera - flow0.camera) / flowDT,
+                               Double(flow.previewDelivered - flow0.previewDelivered) / flowDT,
+                               flow.previewDropped - flow0.previewDropped)
+        print(benchFlow)
+        Log.info(benchFlow)
         let dir = await recorder.stop(engine: engine, config: config)
         isRecording = false
         guard let dir else { print("BENCH_FAIL sin-sesion"); exit(1) }
@@ -423,14 +460,20 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
 
     private func startMeters() {
         meterTimer?.invalidate()
+        lastFlow = nil               // re-baseline del sensor de fps al reabrir
         meterTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 let l = self.engine.levels.get()
                 // Vúmetro real: ataque INSTANTÁNEO, caída suave (el valor crudo
-                // a 15Hz brincaba feo — feedback Daniel v2.3).
-                self.micLevel = max(l.mic, self.micLevel * 0.80)
-                self.systemLevel = max(l.system, self.systemLevel * 0.80)
+                // a 15Hz brincaba feo — feedback Daniel v2.3). DIRECTO al layer:
+                // esto corre 15 veces por segundo y NADA de esa frecuencia pasa
+                // por @Published (la lección v2.8 — re-layouteaba la ventana
+                // entera y el preview quedaba a 3 fps).
+                self.micSmooth = max(l.mic, self.micSmooth * 0.80)
+                self.sysSmooth = max(l.system, self.sysSmooth * 0.80)
+                self.micMeter?.set(level: self.micSmooth)
+                self.sysMeter?.set(level: self.sysSmooth)
                 // Publicar solo cuando cambia el SEGUNDO mostrado: a 15Hz cada
                 // asignación de @Published re-renderiza la jerarquía SwiftUI
                 // entera — carga gratuita en main justo mientras se graba.
@@ -439,14 +482,39 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                     if Int(e) != Int(self.elapsed) { self.elapsed = e }
                 }
                 self.tick += 1
+                if self.tick % 15 == 0 { self.refreshFlowSensor() }            // ~1s
                 if self.tick % 45 == 0 { self.engine.retryScreenIfNeeded() }   // ~3s
                 if self.tick % 150 == 0 {                                       // ~10s
                     let free = StudioRecorder.freeBytes()
-                    self.freeDiskNote = free < StudioRecorder.minFreeBytesToStart
+                    let note = free < StudioRecorder.minFreeBytesToStart
                         ? "Disco: \(StudioRecorder.gb(free)) libres" : nil
+                    if note != self.freeDiskNote { self.freeDiskNote = note }
                 }
             }
         }
+    }
+
+    func registerMeter(_ v: MeterBarNSView, kind: MeterKind) {
+        switch kind {
+        case .mic: micMeter = v
+        case .system: sysMeter = v
+        }
+    }
+
+    /// SENSOR de flujo (invariante 5b): fps de cámara ENTRANDO y de preview
+    /// PINTÁNDOSE, por conteo de frames sobre ~1s. Asigna los @Published solo
+    /// si el número mostrado cambió: un 30 estable no invalida la UI nunca.
+    private func refreshFlowSensor() {
+        let now = CACurrentMediaTime()
+        let flow = engine.flowCounts()
+        defer { lastFlow = flow; lastFlowAt = now }
+        guard let last = lastFlow else { return }
+        let dt = now - lastFlowAt
+        guard dt > 0.5 else { return }
+        let cam = Int((Double(flow.camera - last.camera) / dt).rounded())
+        let prev = Int((Double(flow.previewDelivered - last.previewDelivered) / dt).rounded())
+        if cam != camFPS { camFPS = cam }
+        if prev != prevFPS { prevFPS = prev }
     }
 
 
@@ -844,6 +912,74 @@ struct StudioPreviewView: NSViewRepresentable {
     }
 }
 
+// MARK: - vúmetro por CALayer (el camino caliente NO pasa por SwiftUI)
+
+enum MeterKind { case mic, system }
+
+/// Barra del vúmetro dibujada con CALayer DIRECTO, gemela del patrón del
+/// preview. El nivel llega 15 veces por segundo desde el meterTimer; cuando
+/// viajaba por @Published del controller, cada tick re-layouteaba la ventana
+/// SwiftUI completa (~60-70 ms el pase) y main quedaba saturado — el "preview
+/// a 3 fps" del 7 ago (v2.8). Un CALayer se actualiza en microsegundos.
+final class MeterBarNSView: NSView {
+    private let fill = CAGradientLayer()
+    private var level: Float = 0
+    private var hot = false
+    private static let mostaza = NSColor(calibratedRed: 1.0, green: 0.567, blue: 0.004, alpha: 1)
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
+        layer?.cornerRadius = 3
+        layer?.masksToBounds = true
+        fill.startPoint = CGPoint(x: 0, y: 0.5)
+        fill.endPoint = CGPoint(x: 1, y: 0.5)
+        fill.cornerRadius = 3
+        applyColors()
+        layer?.addSublayer(fill)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func applyColors() {
+        fill.colors = [Self.mostaza.withAlphaComponent(0.7).cgColor,
+                       (hot ? NSColor.systemRed : Self.mostaza).cgColor]
+    }
+
+    func set(level v: Float) {
+        level = v
+        if (v > 0.85) != hot { hot = v > 0.85; applyColors() }
+        relayout()
+    }
+
+    override func layout() {
+        super.layout()
+        relayout()
+    }
+
+    private func relayout() {
+        // La misma sensación que tenía en SwiftUI: .animation(.linear(0.08)).
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.08)
+        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .linear))
+        fill.frame = CGRect(x: 0, y: 0,
+                            width: bounds.width * CGFloat(min(level, 1)),
+                            height: bounds.height)
+        CATransaction.commit()
+    }
+}
+
+struct MeterBarView: NSViewRepresentable {
+    @EnvironmentObject var controller: StudioController
+    let kind: MeterKind
+    func makeNSView(context: Context) -> MeterBarNSView {
+        let v = MeterBarNSView(frame: .zero)
+        controller.registerMeter(v, kind: kind)
+        return v
+    }
+    func updateNSView(_ nsView: MeterBarNSView, context: Context) {}
+}
+
 // MARK: - piel (Screen Studio: oscuro, limpio, mostaza)
 
 enum StudioSkin {
@@ -946,6 +1082,7 @@ struct StudioRootView: View {
             .help(c.screenOK ? "Captura de pantalla activa"
                              : "Clic para aprobar «Grabación de pantalla» (tras un update se re-pide una vez). Se engancha solo al aprobar.")
             statusChip("Cámara", ok: c.cameraOK, starving: c.starved.contains(.camera))
+            if c.camFPS >= 0 { fpsChip }
             if let err = c.recordError {
                 Text(err)
                     .font(.system(size: 11))
@@ -971,6 +1108,22 @@ struct StudioRootView: View {
                     .foregroundStyle(.red)
             }
         }
+    }
+
+    /// SENSOR a la vista (invariante 5b): fps de cámara entrando vs fps del
+    /// preview pintándose. Si el preview va detrás, el chip se pone naranja —
+    /// y avisa que la GRABACIÓN no se entera (el sink drena en renderQueue).
+    /// El "preview a 3 fps" del 7 ago fue invisible justo por no tener esto.
+    private var fpsChip: some View {
+        let lag = c.prevFPS >= 0 && c.prevFPS + 5 < c.camFPS
+        return Text("cámara \(max(c.camFPS, 0)) · preview \(max(c.prevFPS, 0)) fps")
+            .font(.system(size: 10.5, design: .monospaced))
+            .foregroundStyle(lag ? Color.orange : StudioSkin.dim)
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(StudioSkin.panel)
+            .clipShape(Capsule())
+            .help(lag ? "El preview va detrás de la cámara (main ocupado). La grabación NO se afecta: el programa se compone y escribe fuera de main."
+                      : "FPS medidos por conteo de frames: cámara entrando · preview pintado. Lo que ves es lo que se graba.")
     }
 
     private func statusChip(_ label: String, ok: Bool, starving: Bool) -> some View {
@@ -1487,7 +1640,7 @@ struct MixerPanel: View {
     var body: some View {
         PanelBox(title: "Mixer") {
             VStack(alignment: .leading, spacing: 12) {
-                meter("Micrófono", level: c.micLevel, enabled: Binding(
+                meter("Micrófono", kind: .mic, enabled: Binding(
                     get: { c.config.micEnabled },
                     set: { c.config.micEnabled = $0; c.applySettings() }))
                     .help("Doble clic: elegir el micrófono")
@@ -1502,7 +1655,7 @@ struct MixerPanel: View {
                             showMicPicker = false
                         }
                     }
-                meter("Sistema", level: c.systemLevel, enabled: Binding(
+                meter("Sistema", kind: .system, enabled: Binding(
                     get: { c.config.systemAudioEnabled },
                     set: { c.config.systemAudioEnabled = $0; c.applySettings() }))
                 Text("Aplican al instante ·\ndoble clic al mic: elegirlo")
@@ -1512,7 +1665,7 @@ struct MixerPanel: View {
         }
     }
 
-    private func meter(_ label: String, level: Float, enabled: Binding<Bool>) -> some View {
+    private func meter(_ label: String, kind: MeterKind, enabled: Binding<Bool>) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(label).font(.system(size: 11)).foregroundStyle(StudioSkin.text)
@@ -1520,17 +1673,10 @@ struct MixerPanel: View {
                 Toggle("", isOn: enabled).toggleStyle(.checkbox).labelsHidden()
                     .disabled(c.isRecording)
             }
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 3).fill(Color.white.opacity(0.08))
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(LinearGradient(colors: [StudioSkin.mostaza.opacity(0.7), level > 0.85 ? .red : StudioSkin.mostaza],
-                                             startPoint: .leading, endPoint: .trailing))
-                        .frame(width: geo.size.width * CGFloat(min(level, 1)))
-                        .animation(.linear(duration: 0.08), value: level)
-                }
-            }
-            .frame(height: 7)
+            // La barra vive FUERA de SwiftUI (v2.8): el nivel a 15 Hz va
+            // directo a su CALayer, sin invalidar la jerarquía.
+            MeterBarView(kind: kind)
+                .frame(height: 7)
         }
     }
 }

@@ -431,7 +431,13 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                 // a 15Hz brincaba feo — feedback Daniel v2.3).
                 self.micLevel = max(l.mic, self.micLevel * 0.80)
                 self.systemLevel = max(l.system, self.systemLevel * 0.80)
-                if self.isRecording { self.elapsed = self.recorder.elapsed }
+                // Publicar solo cuando cambia el SEGUNDO mostrado: a 15Hz cada
+                // asignación de @Published re-renderiza la jerarquía SwiftUI
+                // entera — carga gratuita en main justo mientras se graba.
+                if self.isRecording {
+                    let e = self.recorder.elapsed
+                    if Int(e) != Int(self.elapsed) { self.elapsed = e }
+                }
                 self.tick += 1
                 if self.tick % 45 == 0 { self.engine.retryScreenIfNeeded() }   // ~3s
                 if self.tick % 150 == 0 {                                       // ~10s
@@ -521,16 +527,46 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         config.save()
     }
 
-    /// Ajustes → Aplicar: reinicia el motor con la config nueva (fps/canvas/
-    /// dispositivos se leen al arrancar). No disponible mientras grabas.
+    /// Ajustes → Aplicar EN CALIENTE, estilo OBS: el motor NO se reinicia (el
+    /// stop+start viejo bloqueaba main peleando el lock del AVCaptureSession —
+    /// la bolita de arcoíris del 6 ago). No disponible mientras grabas.
     func applySettings() {
         guard !recorder.isRecording else { return }
         config.save()
         Task {
-            await engine.stop()
-            await engine.start(config: config)
+            await engine.applyLive(config: config)
             pullEngineStatus()
         }
+    }
+
+    // MARK: - dispositivos (doble clic en Fuentes/Mixer + Ajustes)
+
+    var currentCameraID: String? { AppSettings.load().cameraDeviceID }
+    var currentMicID: String? { AppSettings.load().micDeviceID }
+
+    /// Cambia la cámara EN CALIENTE (doble clic sobre la fuente Cámara).
+    /// AppSettings es la config compartida con el modo Loom (una sola config).
+    func setCameraDevice(id: String?) {
+        guard !recorder.isRecording else {
+            raiseAlert("No cambio de cámara a mitad de una grabación", critical: false)
+            return
+        }
+        var s = AppSettings.load()
+        s.cameraDeviceID = id
+        s.save()
+        engine.applyDeviceSelection(micEnabled: config.micEnabled)
+    }
+
+    /// Cambia el micrófono EN CALIENTE (doble clic sobre el mixer del mic).
+    func setMicDevice(id: String?) {
+        guard !recorder.isRecording else {
+            raiseAlert("No cambio de micrófono a mitad de una grabación", critical: false)
+            return
+        }
+        var s = AppSettings.load()
+        s.micDeviceID = id
+        s.save()
+        engine.applyDeviceSelection(micEnabled: config.micEnabled)
     }
 
     /// Toggle de Ajustes: aplica al instante la visibilidad de la ventana en
@@ -1097,6 +1133,8 @@ func iconBtn(_ symbol: String, action: @escaping () -> Void) -> some View {
 
 struct SourcesPanel: View {
     @EnvironmentObject var c: StudioController
+    /// Item de cámara con el selector de dispositivo abierto (doble clic).
+    @State private var cameraPickerItem: UUID?
 
     var body: some View {
         PanelBox(title: "Fuentes — \(c.activeScene?.name ?? "")") {
@@ -1203,9 +1241,33 @@ struct SourcesPanel: View {
             .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
+        .help(item.kind == .camera ? "Doble clic: elegir la cámara" : item.kind.label)
+        // DOBLE CLIC sobre la fuente Cámara: selector de dispositivo, cambia
+        // EN CALIENTE (pedido de Daniel 6 ago — estilo OBS, sin abrir Ajustes).
+        .simultaneousGesture(TapGesture(count: 2).onEnded {
+            guard item.kind == .camera else { return }
+            c.selectedItemID = item.id
+            cameraPickerItem = item.id
+        })
+        .popover(isPresented: Binding(
+            get: { cameraPickerItem == item.id },
+            set: { if !$0 { cameraPickerItem = nil } }), arrowEdge: .trailing) {
+            DevicePickerPopover(title: "Cámara", entries: Devices.cameras(),
+                                currentID: c.currentCameraID) { id in
+                c.setCameraDevice(id: id)
+                cameraPickerItem = nil
+            }
+        }
         // CLIC DERECHO sobre la fuente: el aro neón del Loom, aquí (pedido de
         // Daniel). Actúa sobre ESTA fila por id — el clic derecho no selecciona.
         .contextMenu {
+            if item.kind == .camera {
+                Button("Cambiar cámara…") {
+                    c.selectedItemID = item.id
+                    cameraPickerItem = item.id
+                }
+                Divider()
+            }
             ForEach(SceneGlow.allCases, id: \.self) { g in
                 Button {
                     c.selectedItemID = item.id
@@ -1320,7 +1382,9 @@ struct StudioSettingsView: View {
             }
 
             HStack {
-                Button("Aplicar (reinicia el motor)") {
+                // EN CALIENTE (6 ago): nada de "reinicia el motor" — cada cambio
+                // viaja por su canal barato (StudioEngine.applyLive), estilo OBS.
+                Button("Aplicar") {
                     saveDevices()
                     c.applySettings()
                     c.showSettings = false
@@ -1371,21 +1435,77 @@ struct StudioSettingsView: View {
     }
 }
 
+// MARK: - selector de dispositivo (doble clic en Fuentes/Mixer)
+
+/// Lista de cámaras o micrófonos con el actual marcado. Elegir cambia EN
+/// CALIENTE (setCameraDevice/setMicDevice → reconciliación en la cola de
+/// sesión) — sin reiniciar el motor, sin abrir Ajustes.
+struct DevicePickerPopover: View {
+    let title: String
+    let entries: [Devices.Entry]
+    let currentID: String?
+    let pick: (String?) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title.uppercased())
+                .font(.system(size: 9.5, weight: .semibold)).tracking(1.1)
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 3)
+            row(name: "Default del sistema", id: nil)
+            ForEach(entries) { e in row(name: e.name, id: e.id) }
+        }
+        .padding(10)
+        .frame(minWidth: 210, alignment: .leading)
+    }
+
+    private func row(name: String, id: String?) -> some View {
+        let current = (currentID ?? "") == (id ?? "")
+        return Button {
+            pick(id)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: current ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(current ? StudioSkin.mostaza : .secondary)
+                Text(name).font(.system(size: 11.5)).lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 6).padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 // MARK: - panel Mixer
 
 struct MixerPanel: View {
     @EnvironmentObject var c: StudioController
+    @State private var showMicPicker = false
 
     var body: some View {
         PanelBox(title: "Mixer") {
             VStack(alignment: .leading, spacing: 12) {
                 meter("Micrófono", level: c.micLevel, enabled: Binding(
                     get: { c.config.micEnabled },
-                    set: { c.config.micEnabled = $0; c.config.save() }))
+                    set: { c.config.micEnabled = $0; c.applySettings() }))
+                    .help("Doble clic: elegir el micrófono")
+                    // Doble clic = selector de mic, gemelo del de la cámara en
+                    // Fuentes (pedido de Daniel 6 ago). Cambia en caliente.
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) { showMicPicker = true }
+                    .popover(isPresented: $showMicPicker, arrowEdge: .trailing) {
+                        DevicePickerPopover(title: "Micrófono", entries: Devices.microphones(),
+                                            currentID: c.currentMicID) { id in
+                            c.setMicDevice(id: id)
+                            showMicPicker = false
+                        }
+                    }
                 meter("Sistema", level: c.systemLevel, enabled: Binding(
                     get: { c.config.systemAudioEnabled },
-                    set: { c.config.systemAudioEnabled = $0; c.config.save() }))
-                Text("Los toggles aplican al\nabrir el Estudio de nuevo")
+                    set: { c.config.systemAudioEnabled = $0; c.applySettings() }))
+                Text("Aplican al instante ·\ndoble clic al mic: elegirlo")
                     .font(.system(size: 9))
                     .foregroundStyle(StudioSkin.dim.opacity(0.7))
             }
@@ -1398,6 +1518,7 @@ struct MixerPanel: View {
                 Text(label).font(.system(size: 11)).foregroundStyle(StudioSkin.text)
                 Spacer()
                 Toggle("", isOn: enabled).toggleStyle(.checkbox).labelsHidden()
+                    .disabled(c.isRecording)
             }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {

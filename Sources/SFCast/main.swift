@@ -156,10 +156,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await DemoChoreography.run(totalSeconds: seconds, noUpload: noUpload)
             }
         } else if Permissions.cameraGranted && Permissions.micGranted {
-            // Permisos listos → la cara de la app es el MICROPANEL (estilo Loom,
-            // Daniel 15 jul): minimalista, con preview de cámara y vúmetro. El
-            // hub queda para ajustes/historial/permisos.
-            LauncherPanelController.shared.show(relativeTo: statusBar.button)
+            // Permisos listos → la cara de la app es el ESTUDIO (Daniel 6 ago:
+            // ahí es donde graba de verdad). El modo Loom sigue a un clic
+            // ("Modo Loom" dentro del Estudio, o el menú de la barra).
+            StudioController.shared.open()
         } else {
             // Falta algún permiso → hub con la tarjeta de permisos + prompts
             // serializados via broker (con la app activa para que el diálogo
@@ -175,7 +175,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        HubWindowController.shared.show()
+        // Reabrir (clic al Dock) = el Estudio, igual que el arranque. Excepto
+        // con el Loom GRABANDO: abrir el Estudio escondería la burbuja (que va
+        // quemada en la captura) y pelearía la cámara — ahí, el hub.
+        if RecordingController.shared.state == .idle {
+            StudioController.shared.open()
+        } else {
+            HubWindowController.shared.show()
+        }
         return true
     }
 }

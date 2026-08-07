@@ -574,3 +574,76 @@ QA visual (un aro no se valida leyendo código, se valida mirándolo):
 ```bash
 open -W /Applications/SFCast.app --args --glowtest   # PNGs + perf + foto de la ventana
 ```
+
+## v2.6 — El Estudio es la cara de la app + ajustes EN CALIENTE (6 ago 2026)
+
+**El default de arranque ahora es el Estudio, no el micropanel Loom.** Daniel
+graba de verdad en el Estudio; el Loom sigue a un clic ("Modo Loom" dentro del
+Estudio, o el menú de la barra). Reabrir desde el Dock también va al Estudio —
+salvo con el Loom GRABANDO (abrir el Estudio escondería la burbuja quemada y
+pelearía la cámara; ahí se muestra el hub).
+
+**Murió "Aplicar (reinicia el motor)" — y con él la bolita de arcoíris.** El
+botón tiraba el motor entero (`engine.stop()` + `engine.start()`), y la
+reconfiguración del `AVCaptureSession` corría en MAIN: `commitConfiguration`
+se quedaba esperando el lock interno de la sesión mientras `stopRunning` lo
+tenía en otro hilo → main bloqueado varios segundos = beachball. Peor: el
+reinicio ni siquiera aplicaba el cambio de cámara, porque `startCameraTap`
+solo AGREGABA inputs si faltaban — el input viejo se quedaba y la cámara nueva
+jamás entraba (solo un relanzamiento completo la aplicaba).
+
+La cura es estilo OBS — **nada se reinicia; cada cambio viaja por su canal
+barato** (`StudioEngine.applyLive`):
+
+- **fps / canvas** → re-crear el render timer (captura fps y canvas al nacer;
+  instantáneo) + `updateConfiguration` del SCStream (async, sin tirar captura).
+- **audio del sistema** → `capturesAudio` vía `updateConfiguration`. Para que
+  el toggle funcione en AMBOS sentidos, el stream output de audio se engancha
+  SIEMPRE al arrancar (a un stream corriendo no se le añaden outputs);
+  `capturesAudio` decide si fluye.
+- **cámara / mic** → `reconcileInputs`: deja EXACTAMENTE la cámara y el mic
+  elegidos (quita el viejo, pone el nuevo), en `sessionQueue` — una cola serial
+  dedicada donde ahora vive TODA la cirugía del AVCaptureSession
+  (begin/commitConfiguration, start/stopRunning). En main, jamás.
+- **calidad del programa** → se lee al armar la grabación; no toca nada vivo.
+
+**Doble clic = cambiar dispositivo, sin abrir Ajustes.** Sobre la fuente
+"Cámara" del panel Fuentes (también "Cambiar cámara…" en el clic derecho) y
+sobre el mixer del micrófono: popover con la lista de dispositivos, el actual
+marcado, cambio en caliente. Los toggles del Mixer también aplican al instante
+(antes decían "aplican al abrir el Estudio de nuevo"); mientras GRABAS quedan
+deshabilitados — quitar/poner un input a mitad de grabación reconfigura el
+grafo de audio y el pop quedaría grabado (el "estruendo" de v2.3).
+
+## v2.7 — El preview a "1 fps" del minuto 15 (6 ago 2026)
+
+**Síntoma (Daniel, grabación real de ~20 min):** al minuto ~15 el preview de la
+cámara en el Estudio se veía a tirones, casi congelado. El archivo final salió
+perfecto. Le dio miedo — creyó que la grabación iba a salir así.
+
+**Raíz: el preview encolaba, la grabación drena.** El render loop mandaba CADA
+frame a main con `DispatchQueue.main.async` bajo un comentario que decía
+"coalescing natural del runloop" — **falso**: GCD no coalesce nada. Son 30
+bloques/s a la cola de main; si main va apenas atrás (vúmetros a 15Hz +
+`elapsed` publicado a 15Hz + SwiftUI mientras grabas), los bloques se APILAN.
+Y cada bloque retiene su IOSurface: a canvas 5K nativo son ~59 MB por frame —
+20 frames de backlog = 1.2 GB de surfaces vivos → presión de memoria → main
+más lento → más backlog. Bola de nieve que tarda minutos en hacerse visible:
+por eso apareció al minuto 15 y jamás en un QA de 8 segundos. El archivo no
+pasa por ahí: `ProgramSink.appendVideo` corre en renderQueue directo al
+encoder (y si el encoder se atrasa TIRA el frame y lo cuenta — jamás encola).
+
+**La cura: `PreviewGate` — coalescing de verdad.** Una caja con el ÚLTIMO
+IOSurface y un flag de hop-en-vuelo: el render loop deposita el frame (el
+anterior no consumido se libera ahí mismo) y solo agenda el hop a main si no
+hay otro pendiente. Bajo presión el preview tira frames viejos gratis en vez
+de acumularlos; en reposo se comporta idéntico a antes. Máximo 2 surfaces
+vivos (el del layer + el de la caja), backlog imposible por construcción.
+
+**De pilón:** `elapsed` ya solo se publica cuando cambia el SEGUNDO mostrado
+(era a 15Hz: 15 re-renders SwiftUI/s de carga gratuita en main, justo mientras
+se graba — exactamente cuando el preview necesita a main libre).
+
+**Regla que deja:** un productor de UI a frecuencia fija JAMÁS hace
+`main.async` por evento — siempre pasa por una compuerta de "último gana".
+La cola de main no es un buffer de video.

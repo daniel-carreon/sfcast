@@ -51,6 +51,7 @@ final class StudioEngine: NSObject {
     // MARK: - infra compartida con los hilos de captura/render
 
     let frames = LatestFrameStore()
+    let previewGate = PreviewGate()
     let levels = AudioLevelBox()
     /// Latido del STREAM de pantalla (no de la imagen). Ver StreamHealth.
     let screenHealth = StreamHealth()
@@ -61,6 +62,11 @@ final class StudioEngine: NSObject {
     private let renderQueue = DispatchQueue(label: "so.saasfactory.sfcast.studio.render", qos: .userInitiated)
     private let videoQueue = DispatchQueue(label: "so.saasfactory.sfcast.studio.video", qos: .userInitiated)
     private let audioQueue = DispatchQueue(label: "so.saasfactory.sfcast.studio.audio", qos: .userInitiated)
+    /// TODA la cirugía del AVCaptureSession (begin/commitConfiguration, start/
+    /// stopRunning) vive AQUÍ, serializada. En main era la bolita de arcoíris:
+    /// commitConfiguration se queda esperando el lock interno de la sesión
+    /// mientras stopRunning lo tiene en otro hilo (bug del "Aplicar", 6 ago).
+    private let sessionQueue = DispatchQueue(label: "so.saasfactory.sfcast.studio.session", qos: .userInitiated)
 
     private var renderTimer: DispatchSourceTimer?
     private var watchdog: Timer?
@@ -82,6 +88,12 @@ final class StudioEngine: NSObject {
     private(set) var canvasSize = CGSize(width: 1920, height: 1080)
     private(set) var fps = 30
     private var canvasOverride: CGSize?
+    /// Resolución nativa del display capturado (la mide startScreenTap). Se
+    /// guarda para que applyLive pueda volver a "Nativa" sin tirar el stream.
+    private var nativeCanvas: CGSize?
+    /// La config viva del SCStream: applyLive la muta y la re-aplica con
+    /// updateConfiguration (fps / audio del sistema en caliente, estilo OBS).
+    private var screenCfg: SCStreamConfiguration?
     private var systemAudioWanted = true
     private var retryingScreen = false
     private var restartingScreen = false
@@ -138,16 +150,82 @@ final class StudioEngine: NSObject {
             try? await Deadline.run(seconds: 8, name: "studio stopCapture") { try await s.stopCapture() }
         }
         screenStream = nil
+        screenCfg = nil
         screenRecOutput = nil
         screenAvailable = false
         stopCameraTap()
         frames.clear()
+        _ = previewGate.take()   // suelta el último IOSurface retenido
         onStatusChange?()
         Log.info("Estudio: motor abajo")
     }
 
     func setActiveScene(_ scene: StudioScene?) {
         sceneBox.set(scene)
+    }
+
+    /// Ajustes → Aplicar EN CALIENTE, estilo OBS: el motor NO se reinicia.
+    /// Cada cambio viaja por su canal barato: fps/canvas re-agendan el render
+    /// loop e `updateConfiguration` del SCStream (async, sin tirar la captura);
+    /// cámara/mic se reconcilian en la cola de sesión. El viejo camino
+    /// (stop() + start()) bloqueaba main peleando el lock del AVCaptureSession
+    /// — la bolita de arcoíris del 6 ago.
+    func applyLive(config: StudioConfig) async {
+        guard isRunning else { await start(config: config); return }
+
+        let newFPS = max(10, min(60, config.fps))
+        let fpsChanged = newFPS != fps
+        fps = newFPS
+        canvasOverride = config.canvasMode.size
+        let newCanvas = canvasOverride ?? nativeCanvas ?? canvasSize
+        let canvasChanged = newCanvas != canvasSize
+        canvasSize = newCanvas
+        let audioChanged = config.systemAudioEnabled != systemAudioWanted
+        systemAudioWanted = config.systemAudioEnabled
+
+        if fpsChanged || canvasChanged { restartRenderLoop() }
+        if fpsChanged || audioChanged, let stream = screenStream, let cfg = screenCfg {
+            cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+            cfg.capturesAudio = systemAudioWanted
+            do {
+                try await Deadline.run(seconds: 6, name: "studio updateConfiguration") {
+                    try await stream.updateConfiguration(cfg)
+                }
+                screenHealth.reset(audioExpected: systemAudioWanted)
+            } catch {
+                Log.error("Estudio: updateConfiguration falló (\(error.localizedDescription)) — reenganchando")
+                restartScreenTap(reason: "ajustes en caliente")
+            }
+        }
+        // Mic recién prendido puede necesitar permiso (broker, serializado).
+        if config.micEnabled, !Permissions.micGranted {
+            _ = await PermissionBroker.shared.request(.audio)
+        }
+        applyDeviceSelection(micEnabled: config.micEnabled)
+        onStatusChange?()
+        Log.info("Estudio: ajustes en caliente → \(Int(canvasSize.width))x\(Int(canvasSize.height))@\(fps) sys=\(systemAudioWanted) mic=\(config.micEnabled)")
+    }
+
+    /// Cambio de cámara/micrófono EN CALIENTE (doble clic en Fuentes/Mixer, o
+    /// Ajustes → Aplicar): reconcilia los inputs de la sesión con lo elegido en
+    /// AppSettings, sin parar la sesión y jamás en main.
+    func applyDeviceSelection(micEnabled: Bool) {
+        guard cameraAvailable else { return }   // sin permiso de cámara no hay sesión viva
+        let s = AppSettings.load()
+        let camID = s.cameraDeviceID
+        let micID = s.micDeviceID
+        let micOK = micEnabled && Permissions.micGranted
+        let session = cameraSession
+        sessionQueue.async {
+            session.beginConfiguration()
+            Self.reconcileInputs(session, camID: camID, micID: micID, micEnabled: micOK)
+            session.commitConfiguration()
+            if !session.isRunning { session.startRunning() }
+            let devs = session.inputs.compactMap { ($0 as? AVCaptureDeviceInput)?.device }
+            Log.info("Estudio: dispositivos en caliente → "
+                     + devs.map { "\($0.localizedName) [\($0.hasMediaType(.audio) ? "audio" : "video")]" }
+                           .joined(separator: " + "))
+        }
     }
 
     // MARK: - pantalla (SCStream con frames + SCRecordingOutput opcional)
@@ -167,6 +245,7 @@ final class StudioEngine: NSObject {
         })?.backingScaleFactor ?? 2.0
         let w = Int(CGFloat(display.width) * scale)
         let h = Int(CGFloat(display.height) * scale)
+        nativeCanvas = CGSize(width: w, height: h)
         canvasSize = canvasOverride ?? CGSize(width: w, height: h)
 
         let cfg = SCStreamConfiguration()
@@ -188,11 +267,14 @@ final class StudioEngine: NSObject {
         // del 25 jul: 50 min grabando el MISMO frame sin una sola línea de log).
         let stream = SCStream(filter: filter, configuration: cfg, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
-        if systemAudio {
-            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
-        }
+        // El output de audio se engancha SIEMPRE; `capturesAudio` decide si
+        // fluye. Así el toggle "Audio del sistema" aplica en caliente en ambos
+        // sentidos vía updateConfiguration (a un stream corriendo no se le
+        // pueden añadir outputs).
+        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
         try await Deadline.run(seconds: 12, name: "studio startCapture") { try await stream.startCapture() }
         screenStream = stream
+        screenCfg = cfg
         screenAvailable = true
         screenFrozen = false
         screenHealth.reset(audioExpected: systemAudio)
@@ -268,57 +350,90 @@ final class StudioEngine: NSObject {
     // MARK: - cámara (VideoDataOutput → compositor; MovieFileOutput → raw)
 
     private func startCameraTap(micEnabled: Bool) {
-        cameraSession.beginConfiguration()
-        cameraSession.sessionPreset = .high
-        if !cameraSession.inputs.contains(where: { ($0 as? AVCaptureDeviceInput)?.device.hasMediaType(.video) ?? false }),
-           let device = Devices.camera(id: AppSettings.load().cameraDeviceID),
-           let input = try? AVCaptureDeviceInput(device: device),
-           cameraSession.canAddInput(input) {
-            cameraSession.addInput(input)
-        }
-        // Mic en la MISMA sesión: va al raw de cámara (.mov con voz, estilo
-        // Screen Studio) y al programa. Solo con permiso YA otorgado (broker).
-        if micEnabled, Permissions.micGranted,
-           !cameraSession.inputs.contains(where: { ($0 as? AVCaptureDeviceInput)?.device.hasMediaType(.audio) ?? false }),
-           let mic = Devices.microphone(id: AppSettings.load().micDeviceID),
-           let micInput = try? AVCaptureDeviceInput(device: mic),
-           cameraSession.canAddInput(micInput) {
-            cameraSession.addInput(micInput)
-        }
+        // Los outputs se crean UNA vez (los delegates apuntan a las colas de
+        // captura); añadirlos a la sesión es cirugía y va a sessionQueue.
         if cameraVideoOut == nil {
             let out = AVCaptureVideoDataOutput()
             out.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
             out.alwaysDiscardsLateVideoFrames = true
             out.setSampleBufferDelegate(self, queue: videoQueue)
-            if cameraSession.canAddOutput(out) { cameraSession.addOutput(out); cameraVideoOut = out }
+            cameraVideoOut = out
         }
         if cameraAudioOut == nil {
             let out = AVCaptureAudioDataOutput()
             out.setSampleBufferDelegate(self, queue: audioQueue)
-            if cameraSession.canAddOutput(out) { cameraSession.addOutput(out); cameraAudioOut = out }
+            cameraAudioOut = out
         }
         // El MovieFileOutput se añade AQUÍ (antes de startRunning), NO al grabar:
         // agregar un output a una sesión corriendo reconfigura el grafo de audio
         // y ese pop quedaba GRABADO al inicio (el "estruendo" — feedback v2.3).
-        if cameraMovieOut == nil {
-            let out = AVCaptureMovieFileOutput()
-            if cameraSession.canAddOutput(out) { cameraSession.addOutput(out); cameraMovieOut = out }
-        }
-        cameraSession.commitConfiguration()
-        // Qué dispositivos quedaron DE VERDAD en la sesión. Sin esto no hay cómo
-        // saber si el audio viene del Shure o del propio capturador de video.
-        let devs = cameraSession.inputs.compactMap { ($0 as? AVCaptureDeviceInput)?.device }
-        Log.info("Estudio: sesión de cámara → "
-                 + devs.map { "\($0.localizedName) [\($0.hasMediaType(.audio) ? "audio" : "video")]" }
-                       .joined(separator: " + "))
+        if cameraMovieOut == nil { cameraMovieOut = AVCaptureMovieFileOutput() }
+
         let session = cameraSession
-        DispatchQueue.global().async { if !session.isRunning { session.startRunning() } }
-        cameraAvailable = cameraVideoOut != nil
+        let outs = [cameraVideoOut, cameraAudioOut, cameraMovieOut].compactMap { $0 }
+        let s = AppSettings.load()
+        let camID = s.cameraDeviceID
+        let micID = s.micDeviceID
+        // Mic en la MISMA sesión: va al raw de cámara (.mov con voz, estilo
+        // Screen Studio) y al programa. Solo con permiso YA otorgado (broker).
+        let micOK = micEnabled && Permissions.micGranted
+        sessionQueue.async {
+            session.beginConfiguration()
+            session.sessionPreset = .high
+            Self.reconcileInputs(session, camID: camID, micID: micID, micEnabled: micOK)
+            for out in outs where !session.outputs.contains(out) && session.canAddOutput(out) {
+                session.addOutput(out)
+            }
+            session.commitConfiguration()
+            // Qué dispositivos quedaron DE VERDAD en la sesión. Sin esto no hay
+            // cómo saber si el audio viene del Shure o del capturador de video.
+            let devs = session.inputs.compactMap { ($0 as? AVCaptureDeviceInput)?.device }
+            Log.info("Estudio: sesión de cámara → "
+                     + devs.map { "\($0.localizedName) [\($0.hasMediaType(.audio) ? "audio" : "video")]" }
+                           .joined(separator: " + "))
+            if !session.isRunning { session.startRunning() }
+        }
+        // Optimista: si al final no entrega frames, el comparador starved lo
+        // delata en la UI (jamás en silencio).
+        cameraAvailable = true
+    }
+
+    /// Reconcilia los INPUTS de la sesión con lo pedido: deja EXACTAMENTE la
+    /// cámara elegida y el mic elegido (o ninguno si está apagado). El código
+    /// viejo solo AGREGABA si faltaba — cambiar de cámara en Ajustes no
+    /// aplicaba de verdad hasta relanzar la app. Corre SIEMPRE en sessionQueue.
+    nonisolated private static func reconcileInputs(_ session: AVCaptureSession,
+                                                    camID: String?, micID: String?,
+                                                    micEnabled: Bool) {
+        func inputs() -> [AVCaptureDeviceInput] {
+            session.inputs.compactMap { $0 as? AVCaptureDeviceInput }
+        }
+        let wantCam = Devices.camera(id: camID)
+        for i in inputs() where i.device.hasMediaType(.video) && i.device.uniqueID != wantCam?.uniqueID {
+            session.removeInput(i)
+        }
+        if let cam = wantCam,
+           !inputs().contains(where: { $0.device.hasMediaType(.video) }),
+           let input = try? AVCaptureDeviceInput(device: cam),
+           session.canAddInput(input) {
+            session.addInput(input)
+        }
+        let wantMic = micEnabled ? Devices.microphone(id: micID) : nil
+        for i in inputs() where i.device.hasMediaType(.audio) && !i.device.hasMediaType(.video)
+            && i.device.uniqueID != wantMic?.uniqueID {
+            session.removeInput(i)
+        }
+        if let mic = wantMic,
+           !inputs().contains(where: { $0.device.hasMediaType(.audio) }),
+           let input = try? AVCaptureDeviceInput(device: mic),
+           session.canAddInput(input) {
+            session.addInput(input)
+        }
     }
 
     private func stopCameraTap() {
         let session = cameraSession
-        DispatchQueue.global().async { if session.isRunning { session.stopRunning() } }
+        sessionQueue.async { if session.isRunning { session.stopRunning() } }
         cameraAvailable = false
     }
 
@@ -364,6 +479,14 @@ final class StudioEngine: NSObject {
 
     // MARK: - render loop (el corazón del compositor)
 
+    /// El timer captura fps y canvas al crearse: re-crearlo es la forma barata
+    /// (e instantánea) de aplicar un cambio de fps/canvas sin tocar la captura.
+    private func restartRenderLoop() {
+        renderTimer?.cancel()
+        renderTimer = nil
+        startRenderLoop()
+    }
+
     private func startRenderLoop() {
         let timer = DispatchSource.makeTimerSource(queue: renderQueue)
         timer.schedule(deadline: .now(), repeating: .init(1.0 / Double(fps)), leeway: .milliseconds(3))
@@ -372,6 +495,7 @@ final class StudioEngine: NSObject {
         let scenes = sceneBox
         let sink = sink
         let canvas = canvasSize
+        let preview = previewGate
         timer.setEventHandler { [weak self] in
             guard let scene = scenes.get() else { return }
             let t = CACurrentMediaTime()
@@ -380,12 +504,20 @@ final class StudioEngine: NSObject {
             guard let pb = comp.compose(scene: scene, canvas: canvas, t: t,
                                         frames: frames, starved: &starved,
                                         stale: &stale) else { return }
-            // preview (main thread; coalescing natural del runloop)
+            // preview → main por la COMPUERTA: un solo hop en vuelo, siempre el
+            // frame más nuevo. Si main va atrás, aquí se TIRAN frames de preview
+            // (gratis) en vez de apilarlos — el apilado era el "1 fps al minuto
+            // 15" del 6 ago. La grabación va aparte, abajo, y no se entera.
             if let surface = CVPixelBufferGetIOSurface(pb)?.takeUnretainedValue() {
                 let s = unsafeBitCast(surface, to: IOSurface.self)
-                DispatchQueue.main.async { [weak self] in
-                    self?.onPreviewSurface?(s)
-                    self?.updateStarved(starved, stale: stale)
+                if preview.offer(s) {
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        if let latest = self.previewGate.take() {
+                            self.onPreviewSurface?(latest)
+                        }
+                        self.updateStarved(starved, stale: stale)
+                    }
                 }
             }
             // grabación del programa (salida B) — best-effort, jamás bloquea
@@ -787,6 +919,36 @@ final class Compositor: @unchecked Sendable {
 }
 
 // MARK: - cajas thread-safe (los hilos de captura/render no tocan MainActor)
+
+/// Coalescing REAL del preview — máximo UN hop a main en vuelo, siempre con el
+/// frame más nuevo. `DispatchQueue.main.async` por frame NO coalesce nada: con
+/// main ocupado los bloques se APILAN, y cada bloque encolado retiene su
+/// IOSurface (a canvas 5K son ~59 MB por frame: 20 de backlog = 1.2 GB vivos →
+/// presión de memoria → main más lento → más backlog). A los ~15 min el preview
+/// parecía 1 fps mientras el archivo salía perfecto — el sink drena en
+/// renderQueue directo al encoder y ni se entera (bug de Daniel, 6 ago).
+final class PreviewGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var latest: IOSurface?
+    private var inFlight = false
+    /// Deja el frame nuevo (el anterior no consumido se libera AQUÍ, no en una
+    /// cola). Devuelve true si toca agendar el hop (no hay otro en vuelo).
+    func offer(_ s: IOSurface) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        latest = s
+        if inFlight { return false }
+        inFlight = true
+        return true
+    }
+    /// El hop en main recoge el último frame y abre la puerta al siguiente.
+    func take() -> IOSurface? {
+        lock.lock(); defer { lock.unlock() }
+        let s = latest
+        latest = nil
+        inFlight = false
+        return s
+    }
+}
 
 final class LatestFrameStore: @unchecked Sendable {
     private let lock = NSLock()

@@ -160,6 +160,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // ahí es donde graba de verdad). El modo Loom sigue a un clic
             // ("Modo Loom" dentro del Estudio, o el menú de la barra).
             StudioController.shared.open()
+            // Doctor de pantalla (8 ago): mide el permiso EFECTIVO y se
+            // auto-repara (reset + prompt + reabrir con un clic). El respiro
+            // deja que el Estudio arranque y WindowServer se asiente.
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                await ScreenDoctor.checkAndRepair(razon: "arranque")
+            }
         } else {
             // Falta algún permiso → hub con la tarjeta de permisos + prompts
             // serializados via broker (con la app activa para que el diálogo
@@ -170,6 +177,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 1_400_000_000)
                 await PermissionBroker.shared.ensureCameraAndMic()
+                // Doctor de pantalla DESPUÉS del broker (los prompts de TCC se
+                // serializan: pedir pantalla con cámara/mic pendientes atora a
+                // tccd — el cuelgue del 14 jul).
+                await ScreenDoctor.checkAndRepair(razon: "arranque (hub)")
             }
         }
     }

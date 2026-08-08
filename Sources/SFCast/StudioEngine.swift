@@ -127,10 +127,16 @@ final class StudioEngine: NSObject {
             catch {
                 Log.error("Estudio: pantalla no arrancó: \(error.localizedDescription)")
                 screenAvailable = false
+                // Preflight dijo sí y la captura dijo no = fila de TCC
+                // muerta-en-vida → el doctor la repara (candado interno
+                // anti-duplicados; con el de arranque ya corrido, no-op).
+                Task { @MainActor in await ScreenDoctor.checkAndRepair(razon: "pantalla no arrancó") }
             }
         } else {
             screenAvailable = false
-            if Permissions.canPrompt { CGRequestScreenCaptureAccess() }
+            if Permissions.canPrompt {
+                Task { @MainActor in await ScreenDoctor.checkAndRepair(razon: "sin preflight al arrancar el estudio") }
+            }
         }
         startRenderLoop()
         startWatchdog()
@@ -599,6 +605,10 @@ final class StudioEngine: NSObject {
                 Log.error("Estudio: reenganche falló: \(error.localizedDescription)")
                 onAlert?("No pude reenganchar la pantalla: \(error.localizedDescription)", true)
                 onStatusChange?()
+                // Si el reenganche murió por permiso (fila de TCC muerta),
+                // el doctor guía la reparación; su alerta pide el clic, jamás
+                // relanza solo — si hay grabación viva, Daniel decide.
+                Task { @MainActor in await ScreenDoctor.checkAndRepair(razon: "reenganche falló") }
                 return
             }
             // 3) si grabábamos el raw, seguir en un archivo nuevo

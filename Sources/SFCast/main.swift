@@ -78,6 +78,32 @@ if let i = cliArgs.firstIndex(of: "--compresstest"), i + 1 < cliArgs.count {
     exit(0)
 }
 
+/// QA DEL ARCHIVO (`--rectest N [--chokems M]`): graba de verdad y verifica el
+/// MP4 — pistas alineadas, cadencia, y nada perdido en silencio.
+let recTestSeconds: Int? = {
+    guard let i = cliArgs.firstIndex(of: "--rectest") else { return nil }
+    return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 12
+}()
+
+/// QA DE SINCRONÍA (`--synctest N`): mide la latencia real de cámara, pantalla
+/// y mic contra el reloj del host. Es el número que decide cuánto compensa el
+/// `ProgramClock` — y el que no se pudo sacar del archivo por correlación.
+let syncTestSeconds: Int? = {
+    guard let i = cliArgs.firstIndex(of: "--synctest") else { return nil }
+    return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 10
+}()
+
+/// QA DE COSTO DEL COMPOSITOR (`--compbench [N]`): headless, sin TCC, sin
+/// grabar. Mide cuántos ms cuesta componer UN frame en esta Mac a cada tamaño
+/// de lienzo, con las escenas reales. Es el número que decide el default del
+/// lienzo: hasta hoy se elegía "nativa" sin saber que el presupuesto son 33 ms.
+if cliArgs.contains("--compbench") {
+    let i = cliArgs.firstIndex(of: "--compbench")!
+    let n = (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 90
+    StudioCompBench.run(iterations: n)
+    exit(0)
+}
+
 /// QA del pill de grabación (`--paneltest N`): lo muestra N segundos SIN grabar
 /// nada. Existe porque el pill lleva `sharingType = .none` y por diseño es
 /// invisible para cualquier captura — sin este modo no hay forma de revisar el
@@ -166,6 +192,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in await StudioController.shared.runMirrorLook(seconds: seconds) }
         } else if let seconds = mirrorTestSeconds {
             Task { @MainActor in await StudioController.shared.runMirrorTest(seconds: seconds) }
+        } else if let seconds = recTestSeconds {
+            Task { @MainActor in await StudioController.shared.runRecTest(seconds: seconds) }
+        } else if let seconds = syncTestSeconds {
+            Task { @MainActor in await StudioController.shared.runSyncTest(seconds: seconds) }
         } else if let seconds = studioBenchSeconds {
             Task { @MainActor in await StudioController.shared.runBench(seconds: seconds) }
         } else if let seconds = studioTestSeconds {

@@ -62,6 +62,30 @@ final class StudioRecorder {
         String(format: "%.1f GB", Double(bytes) / 1_000_000_000)
     }
 
+    /// Memoria del sistema que se puede usar sin empezar a comprimir/swapear.
+    /// No es un lujo de telemetría: el 9 ago la Mac tenía 15 de 16 GB ocupados
+    /// y 675 MB de swap, y ESA es la condición bajo la que el pool de buffers
+    /// se vuelve caro y el compositor pierde el ritmo. Grabar a 4K pide ~550 MB
+    /// entre pool de captura y programa; a 1440p, la mitad.
+    static func availableRAM() -> Int64 {
+        var stats = vm_statistics64_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size
+                                           / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &stats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return .max }
+        let page = Int64(vm_kernel_page_size)
+        // Libre + inactiva + purgable: lo que macOS puede entregar sin pelear.
+        return (Int64(stats.free_count) + Int64(stats.inactive_count)
+                + Int64(stats.purgeable_count)) * page
+    }
+
+    /// Por debajo de esto, grabar a lienzo grande es pedir el colapso.
+    static let lowRAMBytes: Int64 = 1_500_000_000
+
     /// Arranca la grabación con el set de salidas configurado. Devuelve error
     /// legible si NINGUNA salida pudo activarse (jamás grabar "nada" en silencio).
     func start(engine: StudioEngine, config: StudioConfig, activeScene: StudioScene?) throws {
@@ -117,6 +141,11 @@ final class StudioRecorder {
             activated.append("camera.mov")
         }
         if config.outputs.program {
+            // El reloj arranca con la grabación: ancla la corrección de latencia
+            // con las muestras que el motor lleva midiendo desde que se abrió el
+            // Estudio (para el REC ya hay decenas), sin rampa audible.
+            engine.programClock.begin()
+            engine.resetCompositorWindow()
             let s = ProgramSink(url: sessionDir.appendingPathComponent("seg-001.mp4"),
                                 width: Int(engine.canvasSize.width),
                                 height: Int(engine.canvasSize.height),
@@ -138,7 +167,42 @@ final class StudioRecorder {
         state = .recording
         Log.info("Estudio: grabando \(videoID) → [\(activated.joined(separator: ", "))] "
                  + "calidad=\(config.programQuality.rawValue) libre=\(Self.gb(free))")
+        preflightRitmo(engine: engine)
         startHealthMonitor(engine: engine)
+    }
+
+    // MARK: - preflight de RITMO (avisar antes, no después de 45 minutos)
+
+    /// El motor lleva componiendo desde que se abrió el Estudio, así que al dar
+    /// REC ya hay evidencia de si esta Mac sostiene la cadencia AHORA MISMO. La
+    /// alarma del 9 ago llegó cuando el video ya estaba grabado; ésta llega
+    /// antes de hablar. AVISA, jamás bloquea: la grabación es de Daniel.
+    private func preflightRitmo(engine: StudioEngine) {
+        let objetivo = Double(engine.fps)
+        guard objetivo > 0 else { return }
+        let presupuesto = 1000.0 / objetivo
+        let cs = engine.compositorStats()
+        let ram = Self.availableRAM()
+        var motivos: [String] = []
+        if cs.composed >= 45, cs.composeMsP50 > presupuesto * 0.6 {
+            motivos.append(String(format: "el compositor va a %.0f%% de su presupuesto",
+                                  cs.composeMsP50 / presupuesto * 100))
+        }
+        if ram < Self.lowRAMBytes, ram != .max {
+            motivos.append("quedan \(Self.gb(ram)) de RAM libre")
+        }
+        let px = Int(engine.canvasSize.width * engine.canvasSize.height)
+        if !motivos.isEmpty {
+            let sugerencia = px > 1920 * 1080
+                ? " Baja el lienzo en Ajustes → Video (o cierra apps) antes de la toma buena."
+                : " Cierra lo que esté cargando la Mac antes de la toma buena."
+            let msg = "Ojo: " + motivos.joined(separator: " y ") + "." + sugerencia
+            Log.error("Estudio: PREFLIGHT — " + msg)
+            onAlert?(msg, true)
+        } else {
+            Log.info(String(format: "Estudio: preflight OK — compositor %.1f ms de %.1f, RAM libre %@",
+                            cs.composeMsP50, presupuesto, Self.gb(ram)))
+        }
     }
 
     // MARK: - health monitor (el latido que faltaba)
@@ -171,14 +235,20 @@ final class StudioRecorder {
                 let prevDrops = flow.previewDropped - lastFlow.previewDropped
                 lastFlow = flow
                 lastFlowAt = now
+                let cs = engine.compositorStats()
+                let sync = engine.syncReport()
                 Log.info(String(format: "Estudio ❤︎ %ds — stream:%.1fs-mudo (v=%d a=%d) imagen:%@ "
-                                + "mic:%@ sys:%@ frames:%d drops:%d cam:%.0ffps prev:%.0ffps(-%d) libre:%@",
+                                + "mic:%@ sys:%@ frames:%d drops:%d cam:%.0ffps prev:%.0ffps(-%d) libre:%@ "
+                                + "| comp:%.1fms sinBuf:%d cadencia:%d/%d sync:%+.0fms ram:%@",
                                 Int(self.elapsed), engine.screenHealth.silence(),
                                 beats.video, beats.audio,
                                 engine.screenFrozen ? "CONGELADA" : "ok",
                                 fresh.mic ? "ok" : "MUDO", fresh.system ? "ok" : "mudo",
                                 st?.videoFrames ?? 0, st?.droppedFrames ?? 0,
-                                camFPS, prevFPS, prevDrops, Self.gb(free)))
+                                camFPS, prevFPS, prevDrops, Self.gb(free),
+                                cs.composeMsP50, cs.bufferFailures,
+                                engine.effectiveFPS, engine.fps, sync.appliedMs,
+                                Self.gb(Self.availableRAM())))
                 if free < Self.stopFreeBytes {
                     Log.error("Estudio: DISCO CASI LLENO (\(Self.gb(free))) — deteniendo para salvar lo grabado")
                     self.onAlert?("Disco casi lleno (\(Self.gb(free))) — detuve la grabación para no corromperla", true)
@@ -301,11 +371,37 @@ final class StudioRecorder {
                 let pct = real / objetivo
                 Log.info(String(format: "Estudio: fps REALES del archivo %.2f de %.0f pedidos (%.0f%%)",
                                 real, objetivo, pct * 100))
-                if pct < 0.9 {
+                // EL AVISO SE DECIDE POR TRAMO, NO POR PROMEDIO (fix 9 ago).
+                // Ese día el promedio salió 92% —por encima del umbral del 90%,
+                // así que NO avisó— mientras seis minutos del archivo estaban a
+                // 10 fps con congelamientos de 750 ms. El promedio de una
+                // grabación larga es justo el estadístico que oculta un colapso
+                // corto: hay que mirar el PEOR tramo.
+                let peor = st.worstWindow(20)
+                if let peor, peor.fps < objetivo * 0.9 {
+                    let m = peor.startSec / 60, s = peor.startSec % 60
+                    Log.error(String(format: "Estudio: PEOR TRAMO %.1f fps en el minuto %d:%02d "
+                                     + "(promedio %.1f — por eso el promedio no sirve de alarma)",
+                                     peor.fps, m, s, real))
+                    onAlert?(String(format: "Hubo un tramo a %.0f fps (minuto %d:%02d) aunque el promedio "
+                                    + "salió %.0f. La Mac no alcanzó a componer ahí. Baja el lienzo en "
+                                    + "Ajustes → Video o cierra lo que esté cargando el sistema.",
+                                    peor.fps, m, s, real), true)
+                } else if pct < 0.9 {
                     onAlert?(String(format: "La grabación quedó a %.1f fps, no a %.0f: la Mac no alcanzó a "
                                     + "componer. Baja el lienzo en Ajustes → Video, o cierra lo que esté "
                                     + "cargando el sistema.", real, objetivo), true)
                 }
+                // Los frames que NO llegaron a existir por falta de buffer no
+                // aparecían en ningún contador: `drops:0` mientras el archivo se
+                // caía. Ahora se dicen.
+                let cs = engine.compositorStats()
+                if cs.bufferFailures > 0 {
+                    Log.error("Estudio: \(cs.bufferFailures) frames sin buffer (el pool no dio memoria) — "
+                              + "señal de presión de RAM, no de CPU")
+                }
+                Log.info(String(format: "Estudio: compositor p50 %.1f ms (máx %.1f) de un presupuesto de %.1f ms",
+                                cs.composeMsP50, cs.composeMsMax, 1000.0 / objetivo))
             }
         }
         state = .idle
@@ -346,6 +442,25 @@ final class ProgramSink: @unchecked Sendable {
         var droppedFrames = 0
         var micSamples = 0
         var systemSamples = 0
+        /// Frames escritos por segundo de grabación. Es lo que permite hablar
+        /// de TRAMOS en vez de promedios: el 9 ago el archivo promedió 92% del
+        /// objetivo (por eso no saltó ninguna alarma) mientras seis minutos
+        /// estaban a 10 fps. Un promedio de 45 minutos esconde un colapso de 6.
+        var perSecond: [Int] = []
+
+        /// La PEOR ventana continua de `w` segundos: (fps, segundo en que empieza).
+        func worstWindow(_ w: Int = 20) -> (fps: Double, startSec: Int)? {
+            guard perSecond.count >= w else { return nil }
+            var best: (Double, Int)?
+            var sum = perSecond[0..<w].reduce(0, +)
+            best = (Double(sum) / Double(w), 0)
+            for i in w..<perSecond.count {
+                sum += perSecond[i] - perSecond[i - w]
+                let fps = Double(sum) / Double(w)
+                if fps < best!.0 { best = (fps, i - w + 1) }
+            }
+            return best
+        }
     }
 
     private let lock = NSLock()
@@ -363,6 +478,31 @@ final class ProgramSink: @unchecked Sendable {
     private var stopped = false
     private var stats = Stats()
     private var audioErrorLogged = false
+
+    // MARK: - arranque ALINEADO de las dos pistas (fix 9 ago)
+    //
+    // Antes la sesión arrancaba en el PRIMER frame de video, y el audio además
+    // se tiraba durante 150 ms de warmup. Resultado medido en TODAS las
+    // grabaciones: `video start_time = 0.000` y `audio start_time = 0.152`.
+    //
+    // Un reproductor que respeta el start_time lo compensa; medio mundo (y
+    // varios editores) lo IGNORA y pega ambas pistas en cero — y entonces la
+    // voz va 152 ms ADELANTADA. Sumado a la latencia de cámara, eso ya es un
+    // desfase de labios que se ve a simple vista con la cara en pantalla.
+    //
+    // La cura: no arrancar la sesión hasta poder arrancar las dos pistas en el
+    // MISMO instante. Se pagan ~150 ms de cabeza (invisibles: es justo después
+    // del countdown) y los dos tracks salen con start_time 0.
+    private var firstVideoPTS = CMTime.invalid
+    private var firstAudioSeen = CMTime.invalid
+    private var firstAudioUsable = CMTime.invalid
+    private var startDeadline = CMTime.invalid
+    /// Warmup del audio: los primeros buffers de una sesión traen el arranque
+    /// del grafo (el "estruendo" del feedback v2.3).
+    private let audioWarmup: Double = 0.15
+    /// Si el mic no entrega (apagado, mudo, permiso), la grabación NO puede
+    /// quedarse esperando: pasado esto arranca solo con video.
+    private let audioWaitLimit: Double = 0.6
 
     private let quality: StudioQuality
 
@@ -453,10 +593,24 @@ final class ProgramSink: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard let writer, let videoInput, let adaptor, !stopped, writer.status == .writing else { return }
         if !sessionStarted {
-            writer.startSession(atSourceTime: hostTime)
-            sessionStartTime = hostTime
+            if !firstVideoPTS.isValid {
+                firstVideoPTS = hostTime
+                startDeadline = CMTimeAdd(hostTime, CMTime(seconds: audioWaitLimit, preferredTimescale: 1000))
+            }
+            guard let start = resolveSessionStart(now: hostTime) else {
+                // Todavía no se pueden arrancar las DOS pistas juntas: este
+                // frame se descarta a propósito. Son milésimas del arranque, no
+                // contenido — y a cambio el archivo sale sin hueco de audio.
+                return
+            }
+            writer.startSession(atSourceTime: start)
+            sessionStartTime = start
             sessionStarted = true
+            Log.info(String(format: "ProgramSink: sesión alineada en t=%.3f (video y audio arrancan juntos)",
+                            CMTimeGetSeconds(start)))
         }
+        // Un frame anterior al arranque de sesión rompería el orden del writer.
+        if CMTimeCompare(hostTime, sessionStartTime) < 0 { return }
         guard videoInput.isReadyForMoreMediaData else {
             stats.droppedFrames += 1
             if stats.droppedFrames % 120 == 1 {
@@ -466,6 +620,13 @@ final class ProgramSink: @unchecked Sendable {
         }
         if adaptor.append(pb, withPresentationTime: hostTime) {
             stats.videoFrames += 1
+            let sec = Int(CMTimeGetSeconds(CMTimeSubtract(hostTime, sessionStartTime)))
+            if sec >= 0, sec < 60 * 60 * 6 {
+                if stats.perSecond.count <= sec {
+                    stats.perSecond.append(contentsOf: repeatElement(0, count: sec - stats.perSecond.count + 1))
+                }
+                stats.perSecond[sec] += 1
+            }
         } else {
             stats.droppedFrames += 1
         }
@@ -481,18 +642,46 @@ final class ProgramSink: @unchecked Sendable {
 
     private func appendAudio(_ sb: CMSampleBuffer, to input: AVAssetWriterInput?, count: () -> Void) {
         lock.lock(); defer { lock.unlock() }
-        guard let writer, let input, !stopped, writer.status == .writing,
-              sessionStarted, input.isReadyForMoreMediaData else { return }
-        // Warmup: los primeros ~150ms de audio se tiran — el writer recortaba a
-        // MITAD de buffer en el arranque y eso truena (parte del "estruendo").
+        guard let writer, let input, !stopped, writer.status == .writing else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sb)
-        if CMTimeGetSeconds(CMTimeSubtract(pts, sessionStartTime)) < 0.15 { return }
+        guard pts.isValid, pts.isNumeric else { return }
+
+        // El warmup se mide desde el PRIMER audio de la sesión, no desde el
+        // primer video: son dos relojes de arranque distintos y mezclarlos es
+        // lo que producía el hueco de 152 ms.
+        if !firstAudioSeen.isValid { firstAudioSeen = pts }
+        guard CMTimeGetSeconds(CMTimeSubtract(pts, firstAudioSeen)) >= audioWarmup else { return }
+        if !firstAudioUsable.isValid { firstAudioUsable = pts }
+
+        // Antes de que la sesión arranque no hay dónde escribir; el buffer se
+        // pierde, pero ya dejó su marca (`firstAudioUsable`) que es lo que hace
+        // arrancar las dos pistas juntas.
+        guard sessionStarted, input.isReadyForMoreMediaData else { return }
+        if CMTimeCompare(pts, sessionStartTime) < 0 { return }
         if input.append(sb) {
             count()
         } else if !audioErrorLogged {
             audioErrorLogged = true
             Log.error("ProgramSink: append de audio falló (\(writer.error?.localizedDescription ?? "?")) — el video sigue")
         }
+    }
+
+    /// ¿Ya se pueden arrancar las DOS pistas en el mismo instante?
+    /// - con mic vivo: en cuanto hay un audio pasado el warmup (el máximo de
+    ///   los dos primeros PTS, para que ninguna pista tenga que escribir en
+    ///   negativo);
+    /// - sin mic (apagado/mudo/sin permiso): tras `audioWaitLimit`, con video
+    ///   solo. Una grabación JAMÁS se queda esperando al audio (invariante #5).
+    private func resolveSessionStart(now: CMTime) -> CMTime? {
+        guard firstVideoPTS.isValid else { return nil }
+        if firstAudioUsable.isValid {
+            return CMTimeMaximum(firstVideoPTS, firstAudioUsable)
+        }
+        if startDeadline.isValid, CMTimeCompare(now, startDeadline) >= 0 {
+            Log.info("ProgramSink: sin audio en \(audioWaitLimit)s — arranco solo con video")
+            return firstVideoPTS
+        }
+        return nil
     }
 
     /// Stats en vivo para el health monitor.

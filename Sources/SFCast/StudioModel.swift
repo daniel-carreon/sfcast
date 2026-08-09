@@ -276,7 +276,7 @@ struct StudioConfig: Codable {
     var micEnabled = true
     var systemAudioEnabled = true
     var fps = 30
-    var canvasMode = StudioCanvasMode.native
+    var canvasMode = StudioCanvasMode.p1440
     var programQuality = StudioQuality.media
     /// false = la ventana del Estudio es INVISIBLE en capturas/grabaciones
     /// (estilo OBS, default); true = ventana normal, sale en screenshots.
@@ -291,6 +291,20 @@ struct StudioConfig: Codable {
     /// de edición no los tocan) y entre los dos costaban ~6.9 Mbps de los ~7.8
     /// que pesaba una sesión. Se avisa en la UI y siguen a un clic en Salidas.
     var weightFixApplied = false
+
+    /// Migración única del 9 ago: el lienzo deja de ser "nativa del display".
+    ///
+    /// Medido en el M4 de Daniel (`--compbench`): componer + codificar a
+    /// 4096×2304 pide 244 MB de huella y 5.2 ms por frame; a 2560×1440, 120 MB
+    /// y 3.6 ms. Sumando el pool de captura (queueDepth 8), la diferencia real
+    /// ronda el medio giga. Su Mac tiene 16 GB y dos monitores 4K: ese medio
+    /// giga es justo el margen que le faltó el 9 ago, cuando seis minutos de
+    /// una grabación de 45 salieron a 10 fps.
+    ///
+    /// Y el lienzo nativo no compraba NADA: sus videos salen a 1080p/1440p en
+    /// YouTube. Se pagaba 2.6× de cómputo y memoria por píxeles que se tiran en
+    /// la exportación. Reversible con un clic en Ajustes → Video.
+    var canvasFixApplied = false
 
     static let file = AppSettings.dir.appendingPathComponent("scenes.json")
 
@@ -311,12 +325,17 @@ struct StudioConfig: Codable {
         programQuality = try c.decodeIfPresent(StudioQuality.self, forKey: .programQuality) ?? .media
         windowCapturable = try c.decodeIfPresent(Bool.self, forKey: .windowCapturable) ?? false
         weightFixApplied = try c.decodeIfPresent(Bool.self, forKey: .weightFixApplied) ?? false
+        canvasFixApplied = try c.decodeIfPresent(Bool.self, forKey: .canvasFixApplied) ?? false
         mirrorEnabled = try c.decodeIfPresent(Bool.self, forKey: .mirrorEnabled) ?? false
     }
 
     /// true si `load()` acaba de aplicar la migración de peso (la UI lo avisa
     /// UNA vez: apagar salidas del usuario en silencio sería peor que el bug).
     static private(set) var weightFixJustApplied = false
+    /// Igual para la migración de lienzo: cambiar la resolución de sus
+    /// grabaciones sin decírselo sería exactamente el "degradar en silencio"
+    /// que causó todos los bugs anteriores del Estudio.
+    static private(set) var canvasFixJustApplied = false
 
     static func load() -> StudioConfig {
         if let data = try? Data(contentsOf: file),
@@ -333,6 +352,17 @@ struct StudioConfig: Codable {
                     Self.weightFixJustApplied = true
                     Log.info("Estudio: migración de peso — RAW de pantalla y cámara apagados "
                              + "(nada los consumía; eran ~6.9 de los ~7.8 Mbps). Reactivables en Salidas.")
+                }
+                cfg.save()
+            }
+            if !cfg.canvasFixApplied {
+                cfg.canvasFixApplied = true
+                if cfg.canvasMode == .native {
+                    cfg.canvasMode = .p1440
+                    Self.canvasFixJustApplied = true
+                    Log.info("Estudio: migración de lienzo — de «nativa del display» a 2560×1440. "
+                             + "Medido: 4K pide el doble de memoria y de tiempo de composición por "
+                             + "píxeles que YouTube tira igual. Reversible en Ajustes → Video.")
                 }
                 cfg.save()
             }

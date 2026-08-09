@@ -829,3 +829,119 @@ ni la sombra del halo.
   conectada. En el QA la ZV-E10 estaba apagada y el Estudio grabó de "OBS
   Virtual Camera" (con OBS cerrado: un cuadro fijo). Ahora
   `engine.cameraDeviceName` expone el dispositivo RESUELTO y el QA lo imprime.
+
+---
+
+## v3.0 — La grabación de 45 minutos que se rompió en los últimos 6 (9 ago 2026)
+
+**Síntoma (Daniel, video real de 45.7 min):** *"el video se empezó a trabar a la
+mitad... desde el minuto uno, cuando hago full en la cámara, mi voz está
+desincronizada"*. Y la pregunta de fondo: *"¿por qué OBS siendo de código abierto
+luce bien y lo nuestro se laguea?"*.
+
+### Lo que el archivo dijo (medir primero, opinar después)
+
+El perfil frame a frame del `seg-001.mp4` no se parece a "se trabó a la mitad":
+
+```
+min  0 → 37     30.0 fps clavados, peor congelamiento 82 ms   ← 82% del material, intacto
+min 38 → 39     17.8 y 10.2 fps                               ← primer bache
+min 40 → 41     30.0 fps                                       ← se recupera solo
+min 42 → 45.7   12.7 / 10.6 / 11.9 / 8.4 fps, saltos de 750 ms ← colapso final
+```
+
+`drops: 0` en todo momento. **El encoder nunca tiró un frame**: los frames NO SE
+COMPUSIERON. Y ahí estaba el agujero: `Compositor.compose` hacía
+`guard let pb = makeBuffer(canvas) else { return nil }` y el render loop hacía
+`return` sin contar nada. **Un frame que no llega a existir no aparecía en ningún
+contador** — por eso el log decía `drops:0` mientras el archivo se caía a 8 fps.
+Cuarta repetición del patrón órgano-sin-sensor, ahora en el único sitio del
+pipeline donde nadie miraba.
+
+### El desfase de audio eran TRES capas, no una
+
+Y solo una era la que todos habrían buscado:
+
+1. **El timestamp se tomaba DESPUÉS de componer.** `appendVideo(pb, hostTime:
+   CMClockGetTime(hostClock))` al final del handler ⇒ el tiempo de composición se
+   sumaba al desfase. El error crecía *justo cuando la Mac ya iba mal*.
+2. **La latencia de captura se ignoraba.** El audio se escribe con su PTS real; el
+   video, con "ahora". Medido con `--synctest`: **ZV-E10 por UVC = 52 ms**, Shure
+   MV7+ = 12.7 ms ⇒ **40 ms netos** de labios detrás de la voz. Sub-umbral solo, pero
+   suma.
+3. **El hueco de arranque de 152 ms** — el que de verdad se veía. El warmup de audio
+   se medía contra el primer frame de VIDEO, así que el track de audio empezaba en
+   `0.152` con el de video en `0.000`. Verificado en **todas** las grabaciones del
+   historial. Un reproductor que respeta `start_time` lo compensa; medio mundo (y
+   varios editores) pega ambas pistas en cero ⇒ **voz 152 ms adelantada**.
+
+**Nota honesta de método:** el desfase se intentó medir desde el archivo por
+correlación audio↔movimiento de boca en 14 ventanas. Dio r≈0.02-0.16 con lags
+contradictorios (+567 y −567 ms): **no daba para afirmar nada**, y no se afirmó. El
+número salió de instrumentar el mecanismo (`--synctest`), no de la estadística.
+
+### El benchmark que refutó la hipótesis obvia
+
+La sospecha inicial era el lienzo 4096×2304. `--compbench` (headless, sin TCC) la
+tumbó: componer a 4K cuesta **3.4 ms** de un presupuesto de 33.3, y el pipeline
+completo —timer + compose + writer HEVC real + buffers retenidos— **sostiene 29.9
+fps a 4K en una máquina limpia**. El diseño aguanta.
+
+Lo que 4K sí cuesta es **memoria**: 244 MB de huella contra 120 MB (1440p) y 85 MB
+(1080p), más el pool de captura (queueDepth 8 × 37.7 MB = 302 MB a 4K contra 66 MB
+a 1080p). **Casi medio giga de diferencia** en un Mac mini M4 de 16 GB con dos
+monitores 4K — que el 9 ago estaba con 15 GB ocupados, 675 MB de swap y 74 MB
+libres. No fue el cómputo: fue el margen.
+
+### Los cinco cambios
+
+1. **`ProgramClock`** — el instante se toma ANTES de componer y se le resta la
+   latencia MEDIDA de la fuente crítica (cámara si hay, si no pantalla), con
+   `maxSlew` de 2 ms/frame (un salto sería un tirón audible) y monotonicidad
+   estricta (`AVAssetWriter` descarta en silencio un PTS que no avanza).
+   `LatestFrameStore` ahora guarda el PTS de cada frame y su latencia mediana.
+2. **Pistas alineadas** — la sesión del writer no arranca hasta poder arrancar
+   **las dos** en el mismo instante (`max(primerVideo, primerAudioTrasWarmup)`),
+   con deadline de 0.6 s para no bloquear jamás una grabación sin mic. Verificado:
+   `video start=0.000 · audio start=0.000`.
+3. **`RenderGovernor`** — pedir 30 cuando la Mac da 10 no consigue 30: consigue 10
+   feos. Baja la cadencia por escalones (30→24→19→15) de forma **regular**, con
+   backoff exponencial en las subidas. Sin el backoff oscilaba: medido con
+   `--chokems 60`, bajaba a 15, subía a 19 a los 10 s, no alcanzaba y volvía —
+   cadencia yo-yo, peor que quedarse abajo.
+4. **Menos trabajo** — lienzo por default a **2560×1440** (migración única avisada,
+   reversible en Ajustes → Video) y **captura escalada**: si el lienzo es menor que
+   el display, se le pide a SCK la captura ya reducida y el downscale lo hace el
+   compositor de ventanas, gratis. El lienzo nativo no compraba nada: sus videos
+   salen a 1080p/1440p en YouTube.
+5. **Sensores que llegan** — fallos de buffer contados; **el aviso se decide por
+   TRAMO, no por promedio** (ese día el promedio fue 92%, por encima del umbral del
+   90%, así que *no avisó*, mientras seis minutos estaban a 10 fps); preflight de
+   ritmo y RAM al dar REC; latido con `comp/sinBuf/cadencia/sync/ram`; y
+   notificación del sistema cuando la cadencia baja **grabando** — el chip de fps ya
+   existía y no sirvió de nada porque vive en la ventana del Estudio, que está en el
+   otro monitor mientras Daniel presenta.
+
+### La respuesta a "¿por qué OBS no?"
+
+No es el código: es el trabajo pedido. OBS escala su salida a 1080p aunque el canvas
+sea la pantalla; SFCast componía **y codificaba** a 4096×2304 — 4.6× más píxeles por
+los que YouTube no paga. Streamlabs es OBS con otra piel.
+
+### Lo que deja
+
+- **Un sensor que mide el promedio no es un sensor.** El promedio de 45 minutos
+  esconde un colapso de 6. Alarma por peor ventana, siempre.
+- **Un `return nil` en el camino caliente es un frame que desaparece del mundo.**
+  Si el código puede fallar en silencio, cuenta el fallo ahí mismo.
+- **Degradar bien es una feature.** 15 fps parejos se ven pobres; 8 fps con saltos
+  de 750 ms se ven rotos, y encima no hay interpolación que los salve.
+
+### QA nuevo
+
+```bash
+open -W /Applications/SFCast.app --args --rectest 14              # graba y verifica el MP4
+open -W /Applications/SFCast.app --args --rectest 22 --chokems 60 # ejerce el governor
+open -W /Applications/SFCast.app --args --synctest 12             # latencia real por fuente
+./.build/debug/SFCast --compbench 60                              # costo/memoria por lienzo (headless)
+```

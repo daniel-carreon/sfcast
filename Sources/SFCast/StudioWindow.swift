@@ -109,6 +109,26 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
             recorder.onAlert = { [weak self] msg, critical in
                 self?.raiseAlert(msg, critical: critical)
             }
+            // La cadencia bajó (o volvió). Se avisa SIEMPRE, y encima se manda
+            // notificación del sistema cuando pasa GRABANDO: el chip de fps ya
+            // existía el 9 ago y no sirvió de nada porque vive en la ventana del
+            // Estudio, que está en el otro monitor mientras Daniel presenta. Un
+            // sensor que no alcanza al humano en el momento en que importa es un
+            // sensor apagado.
+            engine.onCadenceChange = { [weak self] efectivo, pedido in
+                guard let self else { return }
+                if efectivo < pedido {
+                    self.raiseAlert("La Mac no daba \(pedido) fps: bajé la grabación a \(efectivo) "
+                                    + "parejos (mejor eso que \(pedido) a tirones).", critical: true)
+                    if self.recorder.isRecording {
+                        notify("SFCast", "Grabando a \(efectivo) fps: la Mac no da \(pedido). "
+                               + "Cierra algo o baja el lienzo.")
+                    }
+                } else {
+                    self.raiseAlert("La Mac respira otra vez: cadencia de vuelta a \(efectivo) fps.",
+                                    critical: false)
+                }
+            }
             recorder.onEmergencyStop = { [weak self] in
                 guard let self, self.recorder.isRecording else { return }
                 self.toggleRecord()
@@ -121,6 +141,12 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         if StudioConfig.weightFixJustApplied {
             raiseAlert("Apagué los RAW de pantalla y cámara: nada los usaba y eran ~9x el peso "
                        + "del programa. Están a un clic en Salidas si los quieres.",
+                       critical: false, sticky: true)
+        }
+        if StudioConfig.canvasFixJustApplied {
+            raiseAlert("Bajé el lienzo de «nativa del display» a 2560×1440. Medido en esta Mac: "
+                       + "4K pedía el doble de memoria por píxeles que YouTube tira igual, y ese "
+                       + "margen es lo que faltó el 9 ago. Reversible en Ajustes → Video.",
                        critical: false, sticky: true)
         }
         startMeters()
@@ -234,6 +260,29 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     /// archivo. Existe porque el bug del 25 jul (6 GB donde OBS hace 334 MB) era
     /// invisible sin una medición: la app nunca decía cuánto pesaba lo que
     /// escribía. Ahora el número se mide, no se supone.
+    /// QA DEL ARCHIVO (`--rectest N`): graba y verifica el MP4 resultante.
+    func runRecTest(seconds: Int) async {
+        testMode = true
+        open()
+        // Respiro para que las fuentes entreguen frames y el store junte
+        // muestras de latencia: sin eso el reloj arrancaría sin corrección y el
+        // test mediría un caso que no ocurre en la vida real (Daniel abre el
+        // Estudio, se acomoda, y luego graba).
+        try? await Task.sleep(nanoseconds: 4_000_000_000)
+        await StudioRecTest.run(seconds: seconds, engine: engine, recorder: recorder,
+                                config: config, scene: activeScene)
+    }
+
+    /// QA de SINCRONÍA (`--synctest N`): abre el motor, deja que las fuentes
+    /// entreguen frames, y reporta la latencia MEDIDA de cada una. No graba.
+    func runSyncTest(seconds: Int) async {
+        testMode = true
+        open()
+        try? await Task.sleep(nanoseconds: 2_500_000_000)
+        await StudioSyncTest.run(seconds: seconds, engine: engine)
+        exit(0)
+    }
+
     func runBench(seconds: Int) async {
         testMode = true
         AudioMath.traceAudio = true

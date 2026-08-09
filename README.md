@@ -272,7 +272,20 @@ data.json con el transcript). Dile a Levy:
 /Applications/SFCast.app/Contents/MacOS/SFCast --paneltest 8      # muestra el pill sin grabar
 /Applications/SFCast.app/Contents/MacOS/SFCast --compresstest ~/Movies/SFCast/{id}   # compresor sobre una COPIA
 open -W /Applications/SFCast.app --args --studiotest 8            # QA del Modo Estudio E2E
+open -W /Applications/SFCast.app --args --rectest 14              # graba y VERIFICA el MP4 (pistas alineadas, cadencia, nada perdido)
+open -W /Applications/SFCast.app --args --rectest 22 --chokems 60 # ahoga el loop a propósito → ejerce el governor
+open -W /Applications/SFCast.app --args --synctest 12             # latencia REAL de cámara/pantalla/mic
+./.build/debug/SFCast --compbench 60                              # costo y RAM por tamaño de lienzo (headless, sin TCC)
 ```
+
+**`--rectest` es el gate del archivo (v3.0).** Verifica contra el MP4 —no contra la
+intención— las tres cosas que el 9 ago salieron mal y nadie vio hasta el día
+siguiente: que las dos pistas arrancan en el mismo instante (antes: video 0.000,
+audio 0.152 en TODAS las grabaciones), que la cadencia se sostiene o baja pareja, y
+que nada se pierde en silencio. Con `--chokems N` se ahoga el render loop a propósito:
+un mecanismo de recuperación que nunca se disparó no es un fix, es una intención.
+`--synctest` y `--compbench` salen al LOG (`~/Library/Logs/sfcast.log`) porque una app
+lanzada con `open` no tiene stdout.
 
 **OJO --studiotest:** lánzalo con `open` (launchd), no con el binario directo —
 desde terminal el TCC se atribuye a la TERMINAL y pantalla/cámara salen "sin
@@ -297,8 +310,23 @@ por escena + PNG de la ventana. Restaura `scenes.json` al salir.
    llena a los ~64KB y bloquea al hijo para siempre. Mismo pie, dos veces ya.
 5. **camOnly graba `.mov`; los otros modos `.mp4`.** Cualquier cosa que itere
    segmentos debe cubrir las dos extensiones.
-6. **La captura no baja de resolución** (nativa × backingScaleFactor): todo
-   bitrate fijo hay que escalarlo por píxeles o el texto sale borroso en Retina.
+6. **La captura no baja de resolución POR SÍ SOLA** (nativa × backingScaleFactor):
+   todo bitrate fijo hay que escalarlo por píxeles o el texto sale borroso en
+   Retina. ⚠️ **Enmienda v3.0:** sí baja cuando el LIENZO es menor — ahí se le pide
+   a SCK la captura ya escalada (`StudioEngine.captureSize`, aspecto preservado,
+   nunca hacia arriba) porque cada buffer pesa lo que pesa la salida: 302 MB de
+   pool a 4K contra 66 MB a 1080p. El bitrate sigue escalándose por píxeles.
+6b. **El programa se estampa con el reloj de ANTES de componer, menos la latencia
+   MEDIDA de la fuente crítica** (`ProgramClock`). Estampar al terminar suma el
+   tiempo de composición al desfase de labios, y lo empeora justo cuando la Mac va
+   mal. Y **las dos pistas arrancan en el mismo instante**: el warmup del audio se
+   mide contra el primer AUDIO, jamás contra el primer video (eso dejaba
+   `audio start_time = 0.152` en todas las grabaciones).
+6c. **Lo que puede fallar en silencio se cuenta en el sitio donde falla.** Un
+   `return nil` en el camino caliente es un frame que desaparece del archivo sin
+   aparecer en ningún contador — fue exactamente el bug del 9 ago. Y **ninguna
+   alarma se decide por promedio**: por peor ventana. Un promedio de 45 minutos
+   esconde un colapso de 6.
 7. **Las vistas layer-backed de AppKit tienen las animaciones implícitas
    APAGADAS.** `layer.transform = x` salta. Usa `CABasicAnimation` explícita.
 8. **El pill lleva `sharingType = .none`**: es invisible a CUALQUIER captura,

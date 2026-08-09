@@ -696,6 +696,19 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         try? await Task.sleep(nanoseconds: 1_200_000_000)
         qa("MIRRORLOOK visible=\(mirror.isVisible) rect=\(mirror.screenRect.map { "\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height))" } ?? "-") "
            + "camara='\(engine.cameraDeviceName ?? "ninguna")'")
+        // La barra del Estudio CON el espejo prendido: el botón tiene que verse
+        // encendido de un vistazo (la ventana es sharingType=.none, así que la
+        // única forma de revisarlo es el auto-render).
+        let outLook = URL(fileURLWithPath: "/tmp/sfcast-espejo")
+        try? FileManager.default.createDirectory(at: outLook, withIntermediateDirectories: true)
+        saveWindowShot(to: outLook, name: "barra-espejo-prendido.png")
+        config.mirrorEnabled = false
+        syncMirror()
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        saveWindowShot(to: outLook, name: "barra-espejo-apagado.png")
+        config.mirrorEnabled = true
+        syncMirror()
+        try? await Task.sleep(nanoseconds: 600_000_000)
         let paso = UInt64(max(1, seconds)) * 1_000_000_000 / 4
         for s in CameraBubble.Size.allCases {
             mirror.applySize(s)
@@ -730,13 +743,13 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         print("STUDIOTEST_SHOT \(url.path)")
     }
 
-    private func saveWindowShot(to dir: URL?) {
+    private func saveWindowShot(to dir: URL?, name: String = "studiotest-ui.png") {
         guard let w = window, let v = w.contentView,
               let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
         v.cacheDisplay(in: v.bounds, to: rep)
         if let png = rep.representation(using: .png, properties: [:]) {
             let out = (dir ?? FileManager.default.temporaryDirectory)
-                .appendingPathComponent("studiotest-ui.png")
+                .appendingPathComponent(name)
             try? png.write(to: out)
             print("STUDIOTEST_SHOT \(out.path)")
         }
@@ -1625,14 +1638,44 @@ struct StudioRootView: View {
     /// mirar la toma. Al lado del chip Cámara porque de la cámara habla.
     private var mirrorButton: some View {
         let on = c.config.mirrorEnabled
-        let blocked = on && c.mirrorNote != nil
         let warn = on && c.mirrorOccluding
-        let tint: Color = !on ? StudioSkin.dim
-            : (warn ? .orange : (blocked ? StudioSkin.dim : StudioSkin.mostaza))
+        let accent: Color = warn ? .orange : StudioSkin.mostaza
         var label = "Espejo"
         if on, let note = c.mirrorNote { label = "Espejo — \(note)" }
         else if warn { label = "Espejo · tapando" }
-        return Menu {
+        // Botón de VERDAD + chevron aparte. Antes era un Menu con label gris del
+        // mismo tamaño que los chips "Pantalla"/"Cámara" — que son SEMÁFOROS, no
+        // controles — y Daniel no lo encontró aunque lo tenía en pantalla
+        // (9 ago). Un toggle tiene que verse pulsable y verse encendido: relleno
+        // mostaza cuando está prendido, contorno cuando no. ⌘E también.
+        return HStack(spacing: 0) {
+            Button { c.toggleMirror() } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: on ? "circle.dashed.inset.filled" : "circle.dashed")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text(label).font(.system(size: 11.5, weight: .semibold))
+                    if on && c.mirrorLocked { Image(systemName: "lock").font(.system(size: 9)) }
+                    if on && c.mirrorXray { Image(systemName: "eye").font(.system(size: 9)) }
+                }
+                .foregroundStyle(on ? Color.black.opacity(0.88) : StudioSkin.text)
+                .padding(.leading, 10).padding(.trailing, 8).padding(.vertical, 5)
+                .background(on ? accent : Color.white.opacity(0.10))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("e", modifiers: .command)
+            mirrorMenu(on: on, accent: accent)
+        }
+        .clipShape(Capsule())
+        .overlay(Capsule().stroke(on ? Color.clear : Color.white.opacity(0.22), lineWidth: 1))
+        .help(on
+              ? "La burbuja del programa, proyectada sobre la pantalla que se graba. Arrástrala ahí y el programa la sigue. Es invisible en el video. (⌘E)"
+              : "Proyecta la burbuja sobre la pantalla que se graba, para ver qué estás tapando. Arrástrala y el programa la sigue. Nunca sale en el video. (⌘E)")
+    }
+
+    /// El chevron: rayos X, fijar, tamaños y la lectura del sensor.
+    private func mirrorMenu(on: Bool, accent: Color) -> some View {
+        Menu {
             // RAYOS X y FIJAR viven AQUÍ, en el Estudio, y no en chips sobre el
             // círculo (Daniel, 9 ago). Son decisiones de sesión: se toman una
             // vez y se olvidan. Sobre la burbuja solo va lo que se hace
@@ -1660,29 +1703,16 @@ struct StudioRootView: View {
                       systemImage: on ? "xmark.circle" : "circle.dashed")
             }
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: on ? "circle.dashed.inset.filled" : "circle.dashed")
-                    .font(.system(size: 10))
-                Text(label).font(.system(size: 11))
-                if on && c.mirrorLocked {
-                    Image(systemName: "lock").font(.system(size: 9))
-                }
-                if on && c.mirrorXray {
-                    Image(systemName: "eye").font(.system(size: 9))
-                }
-            }
-            .foregroundStyle(tint)
-        } primaryAction: {
-            c.toggleMirror()
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(on ? Color.black.opacity(0.7) : StudioSkin.dim)
+                .padding(.horizontal, 7).padding(.vertical, 6)
+                .background(on ? accent : Color.white.opacity(0.10))
+                .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .fixedSize()
-        .padding(.horizontal, 8).padding(.vertical, 3)
-        .background(on ? tint.opacity(0.14) : StudioSkin.panel)
-        .clipShape(Capsule())
-        .help(on
-              ? "La burbuja del programa, proyectada sobre la pantalla que se graba. Arrástrala ahí y el programa la sigue. Es invisible en el video."
-              : "Proyecta la burbuja sobre la pantalla que se graba, para ver qué estás tapando. Arrástrala y el programa la sigue. Nunca sale en el video.")
     }
 
     /// SENSOR a la vista (invariante 5b): fps de cámara entrando vs fps del

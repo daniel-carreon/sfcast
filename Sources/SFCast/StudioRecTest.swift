@@ -103,7 +103,20 @@ enum StudioRecTest {
                 fallos.append("GOVERNOR-NO-ACTUO(seguía en \(efectivo) con ahogo de \(choke)ms)")
             }
         } else if videoFPS > 0, videoFPS < Double(engine.fps) * 0.9 {
-            fallos.append(String(format: "CADENCIA-BAJA(%.1f de %d)", videoFPS, engine.fps))
+            // Distinguir las DOS causas, porque piden acciones opuestas: si el
+            // governor bajó la cadencia, el código hizo su trabajo y la culpa es
+            // de la máquina (cierra apps / baja el lienzo); si NO bajó teniendo
+            // que hacerlo, entonces sí es el governor el que está roto.
+            if efectivo < engine.fps {
+                fallos.append(String(format:
+                    "MAQUINA-SATURADA(%.1f de %d; el governor SÍ actuó: bajó a %d — "
+                    + "no es el código, es que esta Mac no daba el ritmo ahora)",
+                    videoFPS, engine.fps, efectivo))
+            } else {
+                fallos.append(String(format:
+                    "CADENCIA-BAJA(%.1f de %d y el governor NUNCA bajó — eso sí es un bug)",
+                    videoFPS, engine.fps))
+            }
         }
 
         // 3) NADA EN SILENCIO

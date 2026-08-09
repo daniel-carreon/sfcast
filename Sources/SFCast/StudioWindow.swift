@@ -601,6 +601,12 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         }
         mirror.applySize(.full)
         try? await Task.sleep(nanoseconds: 350_000_000)
+        // PARIDAD a tamaño completo (Daniel, 9 ago: "en el preview no veo el
+        // glow, el que sí tenemos en la cámara"). Se guardan las DOS caras del
+        // mismo instante — el frame del programa y el auto-retrato del panel —
+        // para poder ponerlas una al lado de la otra.
+        writeFramePNG(name: "espejo-completo-programa.png", dir: out)
+        mirror.qaSelfShot(to: out.appendingPathComponent("espejo-completo-panel.png"))
         let full = mirror.screenRect ?? .zero
         let fullEsperado = (screen.visibleFrame.width * 0.72)
         let fullErr = abs(full.width - fullEsperado)
@@ -1600,7 +1606,6 @@ struct StudioRootView: View {
             .help(c.screenOK ? "Captura de pantalla activa"
                              : "Clic para aprobar «Grabación de pantalla» (tras un update se re-pide una vez). Se engancha solo al aprobar.")
             statusChip("Cámara", ok: c.cameraOK, starving: c.starved.contains(.camera))
-            mirrorButton
             if c.camFPS >= 0 { fpsChip }
             if let err = c.recordError {
                 Text(err)
@@ -1627,92 +1632,6 @@ struct StudioRootView: View {
                     .foregroundStyle(.red)
             }
         }
-    }
-
-    /// EL BOTÓN ESPEJO (v2.9). Clic = prender/apagar; el chevron abre rayos X,
-    /// fijar/soltar y la lectura cruda del sensor de oclusión.
-    ///
-    /// Vive AQUÍ, entre los sensores del top bar, y no en el panel Fuentes,
-    /// porque no es una propiedad de la fuente (eso es el rect, que ya está en
-    /// Fuentes): es un modo de trabajo que se prende y se apaga sin dejar de
-    /// mirar la toma. Al lado del chip Cámara porque de la cámara habla.
-    private var mirrorButton: some View {
-        let on = c.config.mirrorEnabled
-        let warn = on && c.mirrorOccluding
-        let accent: Color = warn ? .orange : StudioSkin.mostaza
-        var label = "Espejo"
-        if on, let note = c.mirrorNote { label = "Espejo — \(note)" }
-        else if warn { label = "Espejo · tapando" }
-        // Botón de VERDAD + chevron aparte. Antes era un Menu con label gris del
-        // mismo tamaño que los chips "Pantalla"/"Cámara" — que son SEMÁFOROS, no
-        // controles — y Daniel no lo encontró aunque lo tenía en pantalla
-        // (9 ago). Un toggle tiene que verse pulsable y verse encendido: relleno
-        // mostaza cuando está prendido, contorno cuando no. ⌘E también.
-        return HStack(spacing: 0) {
-            Button { c.toggleMirror() } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: on ? "circle.dashed.inset.filled" : "circle.dashed")
-                        .font(.system(size: 11, weight: .semibold))
-                    Text(label).font(.system(size: 11.5, weight: .semibold))
-                    if on && c.mirrorLocked { Image(systemName: "lock").font(.system(size: 9)) }
-                    if on && c.mirrorXray { Image(systemName: "eye").font(.system(size: 9)) }
-                }
-                .foregroundStyle(on ? Color.black.opacity(0.88) : StudioSkin.text)
-                .padding(.leading, 10).padding(.trailing, 8).padding(.vertical, 5)
-                .background(on ? accent : Color.white.opacity(0.10))
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut("e", modifiers: .command)
-            mirrorMenu(on: on, accent: accent)
-        }
-        .clipShape(Capsule())
-        .overlay(Capsule().stroke(on ? Color.clear : Color.white.opacity(0.22), lineWidth: 1))
-        .help(on
-              ? "La burbuja del programa, proyectada sobre la pantalla que se graba. Arrástrala ahí y el programa la sigue. Es invisible en el video. (⌘E)"
-              : "Proyecta la burbuja sobre la pantalla que se graba, para ver qué estás tapando. Arrástrala y el programa la sigue. Nunca sale en el video. (⌘E)")
-    }
-
-    /// El chevron: rayos X, fijar, tamaños y la lectura del sensor.
-    private func mirrorMenu(on: Bool, accent: Color) -> some View {
-        Menu {
-            // RAYOS X y FIJAR viven AQUÍ, en el Estudio, y no en chips sobre el
-            // círculo (Daniel, 9 ago). Son decisiones de sesión: se toman una
-            // vez y se olvidan. Sobre la burbuja solo va lo que se hace
-            // mirándola — el tamaño.
-            Button { c.mirror.toggleXray() } label: {
-                Label(c.mirrorXray ? "Quitar rayos X" : "Rayos X (ver qué hay debajo)",
-                      systemImage: c.mirrorXray ? "eye.slash" : "eye")
-            }
-            Button { c.mirror.setLocked(!c.mirrorLocked) } label: {
-                Label(c.mirrorLocked ? "Soltar el espejo (que vuelva a recibir clics)"
-                                     : "Fijar el espejo (que no reciba clics)",
-                      systemImage: c.mirrorLocked ? "lock.open" : "lock")
-            }
-            Divider()
-            Section("Tamaño (los del Loom)") {
-                ForEach(CameraBubble.Size.allCases, id: \.self) { s in
-                    Button(s.label) { c.mirror.applySize(s) }
-                }
-            }
-            Divider()
-            Text("Detalle bajo la burbuja: \(c.mirrorEnergyText)")
-            Divider()
-            Button { c.toggleMirror() } label: {
-                Label(on ? "Apagar el espejo" : "Prender el espejo",
-                      systemImage: on ? "xmark.circle" : "circle.dashed")
-            }
-        } label: {
-            Image(systemName: "chevron.down")
-                .font(.system(size: 8, weight: .bold))
-                .foregroundStyle(on ? Color.black.opacity(0.7) : StudioSkin.dim)
-                .padding(.horizontal, 7).padding(.vertical, 6)
-                .background(on ? accent : Color.white.opacity(0.10))
-                .contentShape(Rectangle())
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
     }
 
     /// SENSOR a la vista (invariante 5b): fps de cámara entrando vs fps del
@@ -1962,6 +1881,46 @@ struct SourcesPanel: View {
         }
     }
 
+    /// Todo el espejo, en el clic derecho de la fuente Cámara: prender/apagar,
+    /// rayos X, fijar, los cuatro tamaños del Loom y la lectura cruda del
+    /// sensor de oclusión. Las opciones solo aparecen si el espejo está vivo —
+    /// un menú lleno de cosas apagadas es ruido.
+    @ViewBuilder private var mirrorSubmenu: some View {
+        let on = c.config.mirrorEnabled
+        Menu {
+            Button { c.toggleMirror() } label: {
+                Label(on ? "Apagar el espejo" : "Prender el espejo",
+                      systemImage: on ? "xmark.circle" : "circle.dashed")
+            }
+            if on {
+                Divider()
+                Button { c.mirror.toggleXray() } label: {
+                    Label(c.mirrorXray ? "Quitar rayos X" : "Rayos X (ver qué hay debajo)",
+                          systemImage: c.mirrorXray ? "eye.slash" : "eye")
+                }
+                Button { c.mirror.setLocked(!c.mirrorLocked) } label: {
+                    Label(c.mirrorLocked ? "Soltar el espejo (que vuelva a recibir clics)"
+                                         : "Fijar el espejo (que no reciba clics)",
+                          systemImage: c.mirrorLocked ? "lock.open" : "lock")
+                }
+                Divider()
+                Section("Tamaño (los del Loom)") {
+                    ForEach(CameraBubble.Size.allCases, id: \.self) { s in
+                        Button(s.label) { c.mirror.applySize(s) }
+                    }
+                }
+                Divider()
+                if let note = c.mirrorNote {
+                    Text("No se ve: \(note)")
+                } else {
+                    Text("Detalle bajo la burbuja: \(c.mirrorEnergyText)")
+                }
+            }
+        } label: {
+            Label("Espejo en la pantalla", systemImage: "circle.dashed")
+        }
+    }
+
     private func sourceRow(_ item: SceneItem) -> some View {
         let selected = item.id == c.selectedItemID
         return Button {
@@ -1982,6 +1941,18 @@ struct SourcesPanel: View {
                         .stroke(Color(red: rgb.r, green: rgb.g, blue: rgb.b), lineWidth: 1.6)
                         .frame(width: 8, height: 8)
                         .shadow(color: Color(red: rgb.r, green: rgb.g, blue: rgb.b).opacity(0.9), radius: 3)
+                }
+                // Sin botón en la barra, el estado del espejo se ve AQUÍ: punteado
+                // mostaza cuando está proyectado, ámbar cuando el sensor dice que
+                // está tapando contenido. Un modo encendido tiene que verse en
+                // algún sitio (invariante 5b) — pero en el sitio que le toca.
+                if item.kind == .camera && c.config.mirrorEnabled {
+                    Image(systemName: "circle.dashed")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(c.mirrorOccluding ? Color.orange : StudioSkin.mostaza)
+                        .help(c.mirrorOccluding
+                              ? "Espejo proyectado — estás tapando contenido"
+                              : "Espejo proyectado en la pantalla que se graba")
                 }
                 Spacer()
                 Button {
@@ -2024,13 +1995,13 @@ struct SourcesPanel: View {
                     c.selectedItemID = item.id
                     cameraPickerItem = item.id
                 }
-                // El espejo también aquí: el botón vive en el top bar, pero
-                // quien viene a mover la burbuja llega por esta fila.
-                Button { c.toggleMirror() } label: {
-                    Label(c.config.mirrorEnabled ? "Quitar el espejo de la pantalla"
-                                                 : "Espejo en la pantalla",
-                          systemImage: c.config.mirrorEnabled ? "xmark.circle" : "circle.dashed")
-                }
+                // EL ESPEJO VIVE AQUÍ, y solo aquí (Daniel, 9 ago: "ya vi que
+                // estaba en la cámara, clic derecho… déjala ahí, no es necesario
+                // que esté hasta arriba"). El botón del top bar se retiró: la
+                // barra es para SENSORES, y el espejo es una propiedad de esta
+                // fuente. Lo que sí quedó arriba es nada; el estado se ve en el
+                // punto de esta misma fila y en el propio espejo.
+                mirrorSubmenu
                 Divider()
             }
             ForEach(SceneGlow.allCases, id: \.self) { g in

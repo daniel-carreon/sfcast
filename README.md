@@ -136,7 +136,7 @@ liga al cdhash del binario. Cámara y micrófono NO se revocan porque la firma
 
 ### Espejo (v2.9 — ver qué estás tapando, y moverlo desde ahí)
 
-> Botón **Espejo** en la barra del Estudio, junto a "Pantalla" y "Cámara".
+> **Clic derecho en la fuente Cámara** → «Espejo en la pantalla».
 
 En el Estudio la cámara no toca la pantalla física (la pega el compositor), así
 que la burbuja te tapa el texto y no te enteras. El espejo proyecta esa burbuja
@@ -149,10 +149,14 @@ corrida de `--mirrortest`: fuga neta 0.0007 sobre 1.0).
 - **Al hover** salen los chips de tamaño — los cuatro del Loom (S · M · L ·
   completo). Clic derecho: el mismo menú.
 - **Aviso de oclusión**: si debajo de la burbuja hay contenido de verdad, sale
-  un **aro punteado ámbar** y el botón del Estudio dice "Espejo · tapando".
-- **Rayos X** (menú del botón Espejo): baja la burbuja al 18% para ver qué hay
-  debajo. **Fijar**: deja de recibir clics, para que no te coma la esquina en
-  plena toma; se suelta desde el mismo menú.
+  un **aro punteado ámbar**, y el punto de la fila Cámara (panel Fuentes) se
+  pone ámbar.
+- **Rayos X** (mismo menú): baja la burbuja al 18% para ver qué hay debajo.
+  **Fijar**: deja de recibir clics, para que no te coma la esquina en plena
+  toma; se suelta desde el mismo menú.
+- **Sin borde, solo halo**: el aro definido se retiró de las dos cámaras (la del
+  programa y la del espejo) a pedido de Daniel. El halo se topa contra el
+  lienzo, así que a tamaño completo no crece hasta leerse como una banda.
 - Se apaga solo, diciendo por qué, cuando la escena no lo admite ("aquí la
   cámara no tapa la pantalla" en Lado a lado, "esta escena no tiene cámara" en
   Completa). El toggle vive en `scenes.json` (`mirrorEnabled`) y se recuerda.

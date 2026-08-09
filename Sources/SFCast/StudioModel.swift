@@ -59,15 +59,25 @@ enum SceneGlow: String, Codable, CaseIterable {
         }
     }
 
-    // Proporciones heredadas de la burbuja (1.5pt de anillo y 10pt de halo
-    // sobre 280pt de diámetro), en fracción del lado menor del item para que se
-    // vea igual a cualquier tamaño de canvas o de cámara. El halo va un pelo más
-    // ancho que en el Loom: allá tenía que morir dentro del `glowPad` de 34px
-    // del NSPanel o se veía el corte cuadrado; aquí el compositor no recorta.
-    static let ringFraction: Double = 0.007
+    // SIN ANILLO (9 ago, Daniel): "quítales el borde, no me gusta el borde
+    // morado, pero sí el glow morado". El aro definido se fue de las dos
+    // cámaras — la del programa y la del espejo — y queda solo el halo.
+    //
+    // El halo es proporcional al item MIENTRAS es chico, y se TOPA contra el
+    // lienzo cuando el item crece. Con la fracción sola, a tamaño completo el
+    // halo salía de ~46 pt y se leía como una banda ("muy amplio, muy brusco");
+    // topado se queda en ~20 y el aura es la misma a cualquier tamaño, que es
+    // justo lo elegante. Las dos cantidades son FRACCIONES de magnitudes que
+    // escalan igual en el canvas (px) y en la pantalla (pt), así que compositor
+    // y espejo dan el mismo número sin ponerse de acuerdo.
     static let haloFraction: Double = 0.045
-    static let ringAlpha: Double = 0.9
+    static let haloCap: Double = 0.014
     static let haloAlpha: Double = 0.5
+
+    /// Radio del halo para un item, en las MISMAS unidades que se le pasen.
+    static func halo(itemMinSide: Double, canvasMinSide: Double) -> Double {
+        min(itemMinSide * haloFraction, canvasMinSide * haloCap)
+    }
 }
 
 /// Un item DENTRO de una escena: qué fuente, dónde y cómo.

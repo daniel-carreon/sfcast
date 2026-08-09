@@ -151,7 +151,8 @@ final class StudioMirror: NSObject {
 
         let layout = MirrorLayout(itemID: cam.id, rect: rect, circle: cam.circleMask,
                                   glow: cam.glow, opacity: cam.opacity,
-                                  screenNumber: screen.displayNumber)
+                                  screenNumber: screen.displayNumber,
+                                  screenMinSide: min(screen.frame.width, screen.frame.height))
         if panel == nil { build(session: session, mirrored: mirrored) }
         if applied != layout {
             applied = layout
@@ -455,12 +456,18 @@ struct MirrorLayout: Equatable {
     let opacity: Double
     let screenNumber: CGDirectDisplayID
 
+    /// Lado menor de la PANTALLA capturada, en pt. Entra en el layout porque el
+    /// halo se topa contra el lienzo, no solo contra el item (ver `SceneGlow`):
+    /// sin este dato el espejo y el compositor darían halos distintos y se
+    /// acabaría la paridad.
+    let screenMinSide: CGFloat
+
     var minSide: CGFloat { min(rect.width, rect.height) }
-    /// Mismas fracciones que el compositor (`SceneGlow`): el aro del espejo y el
-    /// del video son el MISMO aro a distinta escala.
-    var ringWidth: CGFloat { max(1.5, minSide * SceneGlow.ringFraction) }
-    var halo: CGFloat { minSide * SceneGlow.haloFraction }
-    var pad: CGFloat { halo * 2.2 + ringWidth + 6 }
+    /// EXACTAMENTE la misma cuenta que el compositor. Sin anillo (Daniel, 9 ago).
+    var halo: CGFloat {
+        SceneGlow.halo(itemMinSide: minSide, canvasMinSide: screenMinSide)
+    }
+    var pad: CGFloat { halo * 3 + 6 }
 
     /// El recorte, en coordenadas locales del contenido. Con `circle` es el
     /// círculo INSCRITO y CENTRADO — igual que `Compositor.place`, que recorta
@@ -596,7 +603,6 @@ final class MirrorContentView: NSView {
 
     private let glowLayer = CALayer()        // sombra = halo (sin clip, respira)
     private let clipLayer = CALayer()        // el recorte del video vive aquí
-    private let ringLayer = CAShapeLayer()
     private let warnLayer = CAShapeLayer()   // aviso de oclusión (punteado ámbar)
 
     var videoLayer: AVCaptureVideoPreviewLayer? {
@@ -617,14 +623,12 @@ final class MirrorContentView: NSView {
         glowLayer.masksToBounds = false
         clipLayer.masksToBounds = true
         clipLayer.backgroundColor = NSColor.black.cgColor
-        ringLayer.fillColor = nil
         warnLayer.fillColor = nil
         warnLayer.strokeColor = NSColor(calibratedRed: 1.0, green: 0.567, blue: 0.004, alpha: 0.95).cgColor
         warnLayer.lineDashPattern = [7, 5]
         warnLayer.isHidden = true
         layer?.addSublayer(glowLayer)
         layer?.addSublayer(clipLayer)
-        layer?.addSublayer(ringLayer)
         layer?.addSublayer(warnLayer)
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -649,23 +653,20 @@ final class MirrorContentView: NSView {
         if let rgb = l.glow.rgb {
             glowLayer.shadowColor = CGColor(srgbRed: rgb.r, green: rgb.g, blue: rgb.b, alpha: 1)
             glowLayer.shadowOpacity = Float(SceneGlow.haloAlpha * l.opacity)
-            glowLayer.shadowRadius = l.halo
+            // CALayer difumina la sombra con un radio ~2σ, y CIGaussianBlur usa
+            // σ directo. Sin el 0.5 el halo del espejo salía el doble de ancho
+            // que el del video — que es justo la paridad que se busca aquí.
+            glowLayer.shadowRadius = l.halo * 0.5
             glowLayer.shadowOffset = .zero
             glowLayer.shadowPath = path
-            ringLayer.path = path
-            ringLayer.lineWidth = l.ringWidth
-            ringLayer.strokeColor = CGColor(srgbRed: rgb.r, green: rgb.g, blue: rgb.b,
-                                            alpha: SceneGlow.ringAlpha * l.opacity)
-            ringLayer.isHidden = false
         } else {
             glowLayer.shadowOpacity = 0
-            ringLayer.isHidden = true
         }
-        // El aviso vive FUERA del aro real, para que el espejo siga enseñando
-        // cómo se ve el video y la alarma se lea como UI.
-        let out = l.ringWidth * 3 + 4
+        // El aviso de oclusión vive FUERA de la forma: el espejo enseña cómo se
+        // ve el video, y la alarma se lee como UI.
+        let out = max(4.0, l.minSide * 0.02)
         warnLayer.path = l.shapePath(in: local.insetBy(dx: -out, dy: -out))
-        warnLayer.lineWidth = max(1.5, l.ringWidth * 1.4)
+        warnLayer.lineWidth = max(1.5, l.minSide * 0.006)
         CATransaction.commit()
     }
 

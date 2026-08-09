@@ -77,8 +77,10 @@ La burbuja del programa **proyectada sobre la pantalla que se captura**, para ve
 `sharingType = .none` (invisible en el video), colocado por la **inversa de la
 colocación de la fuente Pantalla** (`MirrorGeometry`), video colgado de la sesión
 de cámara que YA tiene el Estudio. Arrastrarlo mueve el item de escena en vivo.
-Botón **Espejo** en la barra; ojo/candado en su menú; tamaños del Loom
-(`CameraBubble.Size`) en los chips de la burbuja. Sensor de oclusión
+Se prende en el **clic derecho de la fuente Cámara** → "Espejo en la pantalla"
+(ahí viven también rayos X, fijar y los tamaños); los chips de la burbuja son
+los del Loom (`CameraBubble.Size`). Sin anillo: solo halo, topado contra el
+lienzo para que a tamaño completo no se lea como banda. Sensor de oclusión
 (`OcclusionProbe`) → aro punteado ámbar. Decisiones y el bug que encontró el QA
 (esconder el panel estrangulaba la sesión de cámara: 60 → 0 fps):
 `DECISIONS.md` §v2.9.

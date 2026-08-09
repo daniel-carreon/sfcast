@@ -98,6 +98,13 @@ struct SceneItem: Codable, Identifiable, Equatable {
     var enabled = true
     var opacity: Double = 1.0
     var glow: SceneGlow = .nada // aro neón estilo Loom (clic derecho en Fuentes)
+    /// ESPEJADO HORIZONTAL de la fuente (v2.9). Manual, por escena: la cámara de
+    /// Daniel vive a la derecha del monitor y él mira a la izquierda, así que
+    /// según de qué lado quede la burbuja conviene voltearla para que parezca
+    /// que mira HACIA el contenido y no fuera del cuadro. Afecta al PROGRAMA y
+    /// al espejo con el mismo valor: es una propiedad del item, no un adorno del
+    /// panel.
+    var flipH = false
 
     init(kind: StudioSourceKind, rect: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1),
          fit: StudioFit = .fill, circleMask: Bool = false) {
@@ -117,6 +124,7 @@ struct SceneItem: Codable, Identifiable, Equatable {
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         opacity = try c.decodeIfPresent(Double.self, forKey: .opacity) ?? 1.0
         glow = try c.decodeIfPresent(SceneGlow.self, forKey: .glow) ?? .nada
+        flipH = try c.decodeIfPresent(Bool.self, forKey: .flipH) ?? false
     }
 }
 
@@ -399,6 +407,10 @@ struct StudioManifest: Codable {
     var canvasWidth: Int
     var canvasHeight: Int
     var fps: Int
+    /// FPS PEDIDOS vs los que de verdad quedaron en el programa. Se separan a
+    /// propósito: `fps` es la intención y `achievedFps` es el hecho, y el 9 ago
+    /// se descubrió que podían diferir en un 27% sin que nadie se enterara.
+    var achievedFps: Double?
     var outputs: [OutputFile]
     var sceneTimeline: [SceneSwitch]
     var scenes: [StudioScene]

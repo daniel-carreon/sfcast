@@ -77,6 +77,11 @@ final class StudioMirror: NSObject {
     private(set) var itemNormRect: CGRect?
     private(set) var mirroredItemID: UUID?
     private var dragAnchor: CGRect?
+    /// Dónde estaba la burbuja ANTES de irse a pantalla completa, en normalizado.
+    /// "Completo" la centra por definición; sin esta memoria, volver a S/M/L la
+    /// dejaba plantada en el centro (Daniel, 9 ago). Un tamaño no debería mover
+    /// nada de sitio: se recupera el centro que tenía.
+    private var centerBeforeFull: CGPoint?
 
     private(set) var unavailable: Unavailable?
 
@@ -108,6 +113,9 @@ final class StudioMirror: NSObject {
     var onResize: ((CGRect, Bool?) -> Void)?
     /// El chip de cerrar pide apagar el espejo (el toggle vive en el controller).
     var onRequestClose: (() -> Void)?
+    /// Voltear la cámara en horizontal. Lo aplica el controller sobre el ITEM,
+    /// así que cae igual en el programa y en el espejo.
+    var onFlip: (() -> Void)?
     /// Cambió algo que la UI del Estudio debe reflejar (fijado / rayos X).
     var onStateChange: (() -> Void)?
 
@@ -147,7 +155,7 @@ final class StudioMirror: NSObject {
         unavailable = nil
 
         let layout = MirrorLayout(itemID: cam.id, rect: rect, circle: cam.circleMask,
-                                  glow: cam.glow, opacity: cam.opacity,
+                                  glow: cam.glow, opacity: cam.opacity, flipH: cam.flipH,
                                   screenNumber: screen.displayNumber,
                                   screenMinSide: min(screen.frame.width, screen.frame.height))
         if panel == nil { build(hasCamera: session != nil) }
@@ -312,7 +320,10 @@ final class StudioMirror: NSObject {
         dragEnded()
     }
 
-    fileprivate func dragBegan() { dragAnchor = itemNormRect }
+    fileprivate func dragBegan() {
+        dragAnchor = itemNormRect
+        centerBeforeFull = nil   // si la mueve a mano, ese es su sitio nuevo
+    }
 
     fileprivate func dragMoved(byScreenDelta d: CGSize) {
         guard let geo = geometry, let anchor = dragAnchor else { return }
@@ -345,6 +356,10 @@ final class StudioMirror: NSObject {
         guard let geo = geometry, let l = applied,
               let screen = RecordingController.captureScreen() else { return }
         if size == .full {
+            // Recordar de dónde viene, para poder volver a su sitio.
+            if currentSize != .full, let r = itemNormRect {
+                centerBeforeFull = CGPoint(x: r.midX, y: r.midY)
+            }
             // Igual que el Loom: rectángulo 16:9 centrado al 72% del ancho útil,
             // y deja de ser círculo (allá el `corner` pasa a 24 pt).
             let vf = screen.visibleFrame
@@ -358,7 +373,13 @@ final class StudioMirror: NSObject {
         // circular el círculo es el INSCRITO, así que un rect cuadrado hace que
         // el diámetro sea exactamente el pedido.
         let d = size.diameter
-        let c = CGPoint(x: l.rect.midX, y: l.rect.midY)
+        // Volviendo de "completo": al sitio donde estaba, no al centro.
+        var c = CGPoint(x: l.rect.midX, y: l.rect.midY)
+        if let saved = centerBeforeFull {
+            c = geo.screenPoint(fromCanvas: CGPoint(x: saved.x * geo.canvas.width,
+                                                    y: saved.y * geo.canvas.height))
+            centerBeforeFull = nil
+        }
         let r = CGRect(x: c.x - d / 2, y: c.y - d / 2, width: d, height: d)
         onResize?(geo.normalizedRect(fromScreen: r), true)
     }
@@ -424,6 +445,7 @@ final class StudioMirror: NSObject {
     @objc fileprivate func chipTapped(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue else { return }
         if id == "close" { onRequestClose?(); return }
+        if id == "flip" { onFlip?(); return }
         if let s = CameraBubble.Size(rawValue: id) { applySize(s) }
     }
 }
@@ -439,6 +461,7 @@ struct MirrorLayout: Equatable {
     let circle: Bool
     let glow: SceneGlow
     let opacity: Double
+    let flipH: Bool
     let screenNumber: CGDirectDisplayID
 
     /// Lado menor de la PANTALLA capturada, en pt. Entra en el layout porque el
@@ -642,8 +665,14 @@ final class MirrorContentView: NSView {
         clipLayer.masksToBounds = true
         clipLayer.mask = nil
         clipLayer.opacity = Float(l.opacity)
+        // El volteo va como transform de la capa (escala -1 en X sobre su propio
+        // centro), que es EXACTAMENTE la reflexión que hace el compositor
+        // alrededor del centro del rect. `frame` no se puede fijar con una
+        // transform puesta, así que primero identidad, luego frame, luego voltea.
+        videoLayer.transform = CATransform3DIdentity
         videoLayer.frame = CGRect(x: local.minX - box.minX, y: local.minY - box.minY,
                                   width: local.width, height: local.height)
+        if l.flipH { videoLayer.transform = CATransform3DMakeScale(-1, 1, 1) }
 
         // HALO HORNEADO. Una sombra VIVA de CALayer se vuelve a componer cada
         // vez que cambia el árbol de capas — o sea, en cada frame de cámara — y
@@ -739,6 +768,10 @@ final class MirrorContentView: NSView {
             menu.addItem(i)
         }
         menu.addItem(.separator())
+        let flip = NSMenuItem(title: "Voltear la cámara en horizontal",
+                              action: #selector(pickFlip), keyEquivalent: "")
+        flip.target = self
+        menu.addItem(flip)
         let close = NSMenuItem(title: "Apagar el espejo", action: #selector(pickClose), keyEquivalent: "")
         close.target = self
         menu.addItem(close)
@@ -750,6 +783,7 @@ final class MirrorContentView: NSView {
               let s = CameraBubble.Size(rawValue: raw) else { return }
         mirror?.applySize(s)
     }
+    @objc private func pickFlip() { mirror?.onFlip?() }
     @objc private func pickClose() { mirror?.onRequestClose?() }
 }
 
@@ -772,7 +806,7 @@ final class MirrorChipsPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 
     init() {
-        let w: CGFloat = 152, h: CGFloat = 32
+        let w: CGFloat = 186, h: CGFloat = 32
         super.init(contentRect: NSRect(x: 0, y: 0, width: w, height: h),
                    styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
@@ -813,6 +847,23 @@ final class MirrorChipsPanel: NSPanel {
             stack.addArrangedSubview(b)
             buttons.append(b)
         }
+        // VOLTEAR EN HORIZONTAL. No está en el Loom, pero pertenece a la
+        // burbuja: la cámara de Daniel vive a la derecha y él mira a la
+        // izquierda, así que según de qué lado quede conviene voltearla para que
+        // mire HACIA el contenido. Cae en el programa y en el espejo a la vez.
+        let flip = NSButton(title: "", target: nil, action: #selector(StudioMirror.chipTapped(_:)))
+        flip.image = NSImage(systemSymbolName: "arrow.left.arrow.right",
+                             accessibilityDescription: "Voltear la cámara en horizontal")?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
+        flip.imagePosition = .imageOnly
+        flip.bezelStyle = .inline
+        flip.isBordered = false
+        flip.contentTintColor = .white
+        flip.identifier = NSUserInterfaceItemIdentifier("flip")
+        flip.toolTip = "Voltear la cámara en horizontal"
+        stack.addArrangedSubview(flip)
+        buttons.append(flip)
+
         // Lo único que el Loom no necesita: apagar el espejo (allá la burbuja
         // ES la grabación, aquí es una ayuda que se quita).
         let close = NSButton(title: "", target: nil, action: #selector(StudioMirror.chipTapped(_:)))

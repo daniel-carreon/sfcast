@@ -912,6 +912,13 @@ final class Compositor: @unchecked Sendable {
         let dx = target.midX - img.extent.midX
         let dy = target.midY - img.extent.midY
         img = img.transformed(by: CGAffineTransform(translationX: dx, y: dy))
+        // ESPEJADO HORIZONTAL alrededor del CENTRO del rect del item: la
+        // reflexión manda el target sobre sí mismo, así que el recorte y la
+        // máscara (simétricos respecto al centro) no se enteran.
+        if item.flipH {
+            img = img.transformed(by: CGAffineTransform(scaleX: -1, y: 1)
+                .concatenating(CGAffineTransform(translationX: 2 * target.midX, y: 0)))
+        }
         if item.fit == .fill {
             img = img.cropped(to: target)
         }

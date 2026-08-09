@@ -635,6 +635,40 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                   tallas.joined(separator: " "), full.width, fullEsperado,
                   circuloTrasFull ? "NO" : "si", tallasOK ? "OK" : "FALLA"))
 
+        // ── 3c. VOLVER DE "COMPLETO" A SU SITIO ───────────────────────────
+        // "Completo" centra la burbuja por definición. Volver a S/M/L tiene que
+        // devolverla a DONDE ESTABA, no dejarla plantada en el centro (Daniel,
+        // 9 ago). Se prueba el viaje redondo entero.
+        updateItem(camItem.id) { $0.rect = antesRect; $0.circleMask = camItem.circleMask }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let centroAntes = mirror.screenRect.map { CGPoint(x: $0.midX, y: $0.midY) } ?? .zero
+        mirror.applySize(.full)
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        mirror.applySize(.l)
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        let centroDespues = mirror.screenRect.map { CGPoint(x: $0.midX, y: $0.midY) } ?? .zero
+        let errCentro = max(abs(centroDespues.x - centroAntes.x), abs(centroDespues.y - centroAntes.y))
+        qa(String(format: "MIRRORTEST_VUELTA centro=(%.0f,%.0f) tras completo→L=(%.0f,%.0f) err=%.1fpt veredicto=%@",
+                  centroAntes.x, centroAntes.y, centroDespues.x, centroDespues.y, errCentro,
+                  errCentro < 1.5 ? "OK" : "SE-QUEDO-EN-EL-CENTRO"))
+
+        // ── 3d. VOLTEO HORIZONTAL, en el programa Y en el espejo ──────────
+        updateItem(camItem.id) { $0.rect = antesRect; $0.circleMask = camItem.circleMask }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        writeFramePNG(name: "espejo-sin-voltear.png", dir: out)
+        let flipAntes = activeScene?.items.first(where: { $0.id == camItem.id })?.flipH ?? false
+        mirror.onFlip?()
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        let flipDespues = activeScene?.items.first(where: { $0.id == camItem.id })?.flipH ?? false
+        writeFramePNG(name: "espejo-volteado.png", dir: out)
+        mirror.qaSelfShot(to: out.appendingPathComponent("espejo-volteado-panel.png"))
+        let enDiscoFlip = (try? JSONDecoder().decode(StudioConfig.self, from: Data(contentsOf: StudioConfig.file)))?
+            .scenes.first(where: { $0.id == burbuja.id })?
+            .items.first(where: { $0.id == camItem.id })?.flipH
+        qa("MIRRORTEST_VOLTEO \(flipAntes) → \(flipDespues) persistido=\(enDiscoFlip == flipDespues ? "si" : "NO") "
+           + "veredicto=\(flipDespues != flipAntes && enDiscoFlip == flipDespues ? "OK" : "FALLA")")
+        mirror.onFlip?()   // dejarlo como estaba
+
         // devolver la burbuja a como estaba: el QA no le mueve las escenas a nadie
         updateItem(camItem.id) { $0.rect = antesRect; $0.circleMask = camItem.circleMask }
         try? await Task.sleep(nanoseconds: 400_000_000)
@@ -1025,6 +1059,12 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                 if let circle { $0.circleMask = circle }
             }
         }
+        // Voltear cae sobre el ITEM: por eso lo ve el programa y el espejo con
+        // el mismo valor, sin que nadie tenga que sincronizar nada.
+        mirror.onFlip = { [weak self] in
+            guard let self, let id = self.mirror.mirroredItemID else { return }
+            self.updateItem(id) { $0.flipH.toggle() }
+        }
         mirror.onRequestClose = { [weak self] in
             guard let self, self.config.mirrorEnabled else { return }
             self.toggleMirror()
@@ -1047,6 +1087,19 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         }
         Log.info("Espejo: \(config.mirrorEnabled ? "prendido" : "apagado")"
                  + (mirror.unavailable.map { " (\($0.reason))" } ?? ""))
+    }
+
+    /// Voltear en horizontal la cámara de la escena activa. Vive en el
+    /// controller (no en el espejo) porque el dueño del item es él, y porque
+    /// tiene que funcionar con el espejo apagado también.
+    func flipMirroredCamera() {
+        guard let item = activeScene?.items.last(where: { $0.kind == .camera && $0.enabled })
+        else { return }
+        updateItem(item.id) { $0.flipH.toggle() }
+    }
+
+    var mirroredCameraFlipped: Bool {
+        activeScene?.items.last(where: { $0.kind == .camera && $0.enabled })?.flipH ?? false
     }
 
     /// Reconcilia el espejo con lo que hay AHORA. Idempotente y barata: la
@@ -1870,6 +1923,12 @@ struct SourcesPanel: View {
                     Label(c.mirrorLocked ? "Soltar el espejo (que vuelva a recibir clics)"
                                          : "Fijar el espejo (que no reciba clics)",
                           systemImage: c.mirrorLocked ? "lock.open" : "lock")
+                }
+                Divider()
+                Button { c.flipMirroredCamera() } label: {
+                    Label(c.mirroredCameraFlipped ? "Quitar el volteo horizontal"
+                                                  : "Voltear la cámara en horizontal",
+                          systemImage: "arrow.left.arrow.right")
                 }
                 Divider()
                 Section("Tamaño (los del Loom)") {

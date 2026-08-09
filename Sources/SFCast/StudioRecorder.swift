@@ -34,6 +34,9 @@ final class StudioRecorder {
 
     /// Avisos hacia la UI (disco, congelada, auto-stop).
     var onAlert: ((String, Bool) -> Void)?
+    /// FPS que de verdad quedaron en el archivo de la última grabación
+    /// (frames escritos ÷ duración). -1 = todavía no se midió.
+    private(set) var achievedFPS: Double = -1
     /// Lo llama el health monitor si el disco se acaba: hay que DETENER.
     var onEmergencyStop: (() -> Void)?
 
@@ -240,6 +243,10 @@ final class StudioRecorder {
             }
             outputs.append(out)
         }
+        // FPS REALES del programa, ANTES de armar el manifest: lo conseguido
+        // tiene que quedar escrito junto a lo pedido (ver el aviso más abajo).
+        let realFPS = (programStats.map { duration > 0.5 ? Double($0.videoFrames) / duration : 0 }) ?? 0
+        achievedFPS = realFPS
         let iso = ISO8601DateFormatter()
         let manifest = StudioManifest(
             id: id,
@@ -248,6 +255,7 @@ final class StudioRecorder {
             canvasWidth: Int(engine.canvasSize.width),
             canvasHeight: Int(engine.canvasSize.height),
             fps: engine.fps,
+            achievedFps: realFPS > 0 ? realFPS : nil,
             outputs: outputs,
             sceneTimeline: timeline,
             scenes: config.scenes,
@@ -277,6 +285,28 @@ final class StudioRecorder {
 
         if let st = programStats {
             Log.info("Estudio: programa cerró — \(st.videoFrames) frames, \(st.droppedFrames) drops, mic=\(st.micSamples) sys=\(st.systemSamples)")
+            // FPS REALES DEL ARCHIVO (9 ago). Hasta hoy, una grabación a 21.75
+            // fps se veía IDÉNTICA a una de 30 hasta que alguien la abría con
+            // ffprobe: el manifest declaraba 30 porque 30 es lo CONFIGURADO, no
+            // lo conseguido. Daniel grabó dos videos así sin que nada se lo
+            // dijera (21.75 y 24.86 fps, medidos en sus archivos).
+            //
+            // El número existía —`videoFrames` ya se contaba— y nadie lo
+            // dividía entre la duración. Ahora se divide, se guarda en el
+            // manifest y, si se quedó corto, se AVISA. Invariante 5b: lo que no
+            // se mide se degrada en silencio, y esto se degradó en silencio.
+            let real = realFPS
+            let objetivo = Double(engine.fps)
+            if real > 0, objetivo > 0 {
+                let pct = real / objetivo
+                Log.info(String(format: "Estudio: fps REALES del archivo %.2f de %.0f pedidos (%.0f%%)",
+                                real, objetivo, pct * 100))
+                if pct < 0.9 {
+                    onAlert?(String(format: "La grabación quedó a %.1f fps, no a %.0f: la Mac no alcanzó a "
+                                    + "componer. Baja el lienzo en Ajustes → Video, o cierra lo que esté "
+                                    + "cargando el sistema.", real, objetivo), true)
+                }
+            }
         }
         state = .idle
         wroteScreen = false

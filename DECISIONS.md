@@ -705,3 +705,127 @@ vúmetro publicando.
 - Toda compuerta que TIRA trabajo para degradar con gracia lleva contador, y
   el contador se muestra. Degradar en silencio es cómo el 25 jul grabó 50 min
   congelado y cómo este preview murió de hambre sin decirlo.
+
+---
+
+## v2.9 — El ESPEJO: la burbuja del programa, sobre la pantalla que grabas (9 ago 2026)
+
+**El problema, en las palabras de Daniel:** dos monitores, a punto de grabar un
+video de YouTube, escenas "Burbuja derecha" / "Burbuja izquierda". *"En ocasiones
+mi texto queda por detrás de mi cámara y quiero ser consciente cuando eso pase."*
+
+**Por qué pasaba.** En Modo Estudio la cámara **nunca toca la pantalla física**:
+la pega el compositor sobre el canvas (`Compositor.place`). El modo Loom sí la
+enseña, pero porque allá la burbuja **es** un `NSPanel` real que se quema en el
+video. En el Estudio la pantalla no sabe que la burbuja existe, y con la ventana
+del Estudio en el otro monitor no hay nada que mirar mientras trabajas. Números
+de su setup: burbuja de **412 pt de diámetro** (28.6% del alto) en la esquina
+inferior de un BenQ de 2560×1440 — un cuadrado de ~415 pt comiéndose el texto.
+
+**Lo que se construyó.** Un panel flotante sobre la pantalla capturada, en la
+posición, el tamaño, la forma y el aro EXACTOS de la burbuja del programa. Se
+arrastra con el mouse y el programa la sigue en el mismo frame.
+
+### Las tres decisiones que lo sostienen
+
+1. **`sharingType = .none`, y probado, no supuesto.** Si el panel se colara a la
+   captura saldría la cara **duplicada** (el panel real + la burbuja compuesta
+   encima) — la clase de bug que se descubre viendo la grabación al día
+   siguiente. `--mirrortest` mide el frame de pantalla real con el espejo
+   apagado y prendido. Medido: **fuga neta 0.0007** sobre 1.0.
+   - Con una salvedad que costó una corrida: comparar apagado vs prendido a
+     secas NO sirve, porque el escritorio de abajo está VIVO. En una corrida el
+     movimiento de un chat levantó el promedio 0.051 y el test gritó FUGA sin
+     que nada se hubiera colado. La cura es una **región de control** del mismo
+     tamaño donde el espejo jamás cae: se mide la diferencia de diferencias.
+2. **La geometría es la INVERSA de la colocación de la fuente Pantalla**
+   (`MirrorGeometry`), no una fórmula paralela. De ahí salen gratis los casos
+   raros: en "Lado a lado" la cámara cae FUERA del recuadro de la pantalla y el
+   espejo se apaga solo diciendo *"aquí la cámara no tapa la pantalla"*; en "Mi
+   cámara solo" no hay fuente de pantalla que invertir. Medido: **0.00 px** de
+   error contra la posición del programa, y los tamaños del Loom vuelven
+   exactos (s=180.0/180, m=280.0/280, l=420.0/420, completo=1843.2/1843).
+3. **El video sale de la sesión de cámara que YA tiene el Estudio**
+   (`AVCaptureVideoPreviewLayer` colgado de ella). Ni una sesión nueva
+   (invariante: una sola dueña de cámara/mic), ni un frame extra a main.
+
+### El bug que el QA encontró y que nadie habría visto
+
+Ocultar el espejo con `orderOut` **estrangulaba la sesión de cámara entera**: la
+cámara pasaba de **60 fps a 0** al apagar el espejo, y ese cero se lo come el
+PROGRAMA — cara congelada mientras grabas. Es el patrón del 25 jul otra vez,
+ahora por el lado de la cámara. Un `AVCaptureVideoPreviewLayer` colgado de la
+sesión con su ventana fuera de pantalla no basta con esconderlo: hay que
+**soltar la sesión** (`layer.session = nil`) y desmontar el panel.
+
+**Y la regla que deja:** *el tramo DESPUÉS es tan importante como el durante.*
+El QA medía "antes" y "con espejo", los dos perfectos, y el bug vivía en el
+tercer tramo que no existía. Ahora `MIRRORTEST_FLUJO` mide **antes / con espejo
+/ después** y falla con `LA-CAMARA-NO-VOLVIO` si la cámara no vuelve a su línea
+base. Medido tras el arreglo: 60.0 → 54.6 → 60.0 fps, veredicto `SIN-SECUELAS`.
+
+### El sensor de oclusión (la pregunta original, hecha número)
+
+El espejo hace la oclusión **visible**; el sensor la hace **avisada**. Recorta
+del frame de pantalla el pedazo exacto que la burbuja tapa, lo baja a 360 px,
+mide energía de bordes y prende un **aro punteado ámbar por fuera** del aro real
+(el aro del programa NO se repinta: el espejo tiene que seguir enseñando cómo se
+ve el video, y la alarma debe leerse como UI).
+
+Dos errores de bulto en el primer intento, los dos del mismo tipo — **fabricar
+la señal que se quería medir**:
+- Reducir 825→360 px con una escala afín pelona INVENTA bordes por aliasing.
+- `CIEdges` con `inputIntensity: 4.0` satura y todo lee "lleno de detalle".
+
+Síntoma: tres sitios distintos de la pantalla midiendo 0.2784, 0.2797 y 0.2797
+— un sensor que no distingue nada. Con Lanczos e intensidad 1.0, la rejilla 3×3
+sobre su pantalla real da **0.0000 (escritorio vacío) → 0.3908 (texto denso)**.
+El umbral (**0.100**) se fijó de ese rango, y `--mirrortest` reimprime la
+rejilla en cada corrida para re-calibrarlo con evidencia.
+
+### El arrastre no pasa por `@Published` (v2.8 aplicada, no repetida)
+
+El mouse manda 60-120 eventos por segundo y cada asignación a `config` invalida
+la jerarquía SwiftUI entera. `setItemRectLive` escribe una copia detachada al
+`sceneBox` del compositor y al espejo; `config` se toca UNA vez al soltar. **El
+arrastre del preview del Estudio se migró al mismo camino**: dos arrastres con
+dos verdades habrían sido el siguiente bug.
+
+### Dónde vive cada control (feedback de Daniel a mitad de la construcción)
+
+- **Botón "Espejo"** en la barra del Estudio, junto a los sensores. Clic =
+  prender/apagar; el chevron abre rayos X, fijar/soltar, los cuatro tamaños y la
+  lectura cruda del sensor. Está ahí y no en Fuentes porque no es propiedad de
+  la fuente (eso es el rect, que ya está en Fuentes): es un modo de trabajo.
+- **Rayos X y fijar → en el Estudio**, no en la burbuja: *"el ojo pensaba verlo
+  en el studio, no en el círculo"*. Son decisiones de sesión, se toman una vez.
+- **Sobre la burbuja, solo lo que se hace mirándola: el tamaño.** Y en el idioma
+  que ya existe — se reusa `CameraBubble.Size` del Loom (S 180 · M 280 · L 420 ·
+  completo), no una escala nueva que se despegaría con el tiempo.
+- **Iconos de línea (SF Symbols), cero emojis**: un emoji se pinta con la fuente
+  de color del sistema, no hereda el tint y no pesa igual en cada Mac.
+- **Fijar** existe porque un círculo de ~400 pt comiéndose los clics de una
+  esquina en plena toma sería peor que el bug que vinimos a arreglar.
+
+### QA nuevo
+
+```bash
+open -W /Applications/SFCast.app --args --mirrortest 6   # invisibilidad, alineación, arrastre, tamaños, sensor, costo
+open /Applications/SFCast.app --args --mirrorlook 16     # lo deja CAPTURABLE para revisar el diseño con un screenshot
+```
+
+`--mirrorlook` existe por el mismo motivo que `--paneltest` para el pill: lo que
+es invisible a la captura por diseño también es invisible para quien quiere
+mirarlo, y el auto-retrato por `cacheDisplay` no sabe pintar ni la capa de video
+ni la sombra del halo.
+
+### Hallazgo colateral (no es del espejo, pero muerde)
+
+- **El Estudio solo captura `CGMainDisplayID()`.** No hay selector de display.
+  Con dos monitores, todo lo que Daniel ponga en el segundo **no se graba**. El
+  espejo lo delata de rebote: solo aparece en la pantalla que sí se está
+  grabando.
+- **`Devices.camera(id:)` cae a otra cámara en silencio** si la elegida no está
+  conectada. En el QA la ZV-E10 estaba apagada y el Estudio grabó de "OBS
+  Virtual Camera" (con OBS cerrado: un cuadro fijo). Ahora
+  `engine.cameraDeviceName` expone el dispositivo RESUELTO y el QA lo imprime.

@@ -103,6 +103,42 @@ final class StudioEngine: NSObject {
     /// hay que reenganchar a mitad de grabación (screen-002.mp4, -003…).
     var onNeedNewScreenRawURL: (() -> URL?)?
 
+    // MARK: - lo que el ESPEJO necesita del motor (v2.9)
+
+    /// La sesión de cámara del Estudio. El espejo cuelga de AQUÍ un
+    /// `AVCaptureVideoPreviewLayer`: ni una sesión nueva (invariante: una sola
+    /// dueña de cámara/mic), ni un frame extra viajando a main.
+    var cameraCaptureSession: AVCaptureSession? { cameraAvailable ? cameraSession : nil }
+
+    /// Resolución NATIVA del display capturado, en px. El espejo la usa para
+    /// mapear canvas ⇄ pantalla con el mismo número que usa el stream, no con
+    /// una re-derivación desde NSScreen que podría diferir.
+    var capturedPixelSize: CGSize? { nativeCanvas }
+
+    /// El dispositivo de cámara que quedó DE VERDAD en la sesión — no el que
+    /// pide settings.json. Si el elegido no está conectado (una cámara apagada,
+    /// por ejemplo), `Devices.camera(id:)` cae a otro y el video sale de un
+    /// sitio que nadie eligió: pasó en el QA del 9 ago, donde la ZV-E10 estaba
+    /// apagada y el Estudio grabó de "OBS Virtual Camera" (un cuadro fijo, y
+    /// con OBS cerrado ni eso). El nombre resuelto es el sensor de eso.
+    var cameraDeviceName: String? {
+        cameraSession.inputs.compactMap { ($0 as? AVCaptureDeviceInput)?.device }
+            .first(where: { $0.hasMediaType(.video) })?.localizedName
+    }
+
+    /// ¿El programa sale espejeado? Se LEE de la conexión real del data-output
+    /// (que es de donde el compositor toma los frames), jamás se asume: si el
+    /// espejo volteara por su cuenta, mentiría sobre el encuadre.
+    var cameraMirroredInProgram: Bool {
+        cameraVideoOut?.connection(with: .video)?.isVideoMirrored ?? false
+    }
+
+    /// SENSOR DE OCLUSIÓN (v2.9): cuánto DETALLE hay en el pedazo de pantalla
+    /// que la burbuja tapa. Es la pregunta original de Daniel ("mi texto queda
+    /// por detrás de mi cámara y quiero ser consciente cuando eso pase")
+    /// convertida en número: el espejo lo hace VISIBLE, esto lo hace AVISADO.
+    let occlusion = OcclusionProbe()
+
     // MARK: - arranque / parada del motor (preview vivo, sin grabar)
 
     func start(config: StudioConfig) async {
@@ -1078,6 +1114,119 @@ final class SinkBox: @unchecked Sendable {
     private var sink: ProgramSink?
     func set(_ s: ProgramSink?) { lock.lock(); sink = s; lock.unlock() }
     func get() -> ProgramSink? { lock.lock(); defer { lock.unlock() }; return sink }
+}
+
+/// SENSOR DE OCLUSIÓN (v2.9) — ¿hay contenido debajo de la burbuja?
+///
+/// Es la pregunta con la que Daniel abrió el 9 ago ("mi texto queda por detrás
+/// de mi cámara y quiero ser consciente cuando eso pase") convertida en número.
+/// El espejo hace la oclusión VISIBLE; esto la hace AVISADA — el aro punteado
+/// ámbar del espejo y el chip del Estudio leen de aquí.
+///
+/// Cómo mide: recorta del frame de PANTALLA exactamente el pedazo que la
+/// burbuja tapa, lo baja a ~360 px, le pasa un detector de bordes y promedia.
+/// Fondo plano (escritorio, editor vacío) ⇒ casi 0; una terminal llena de texto
+/// ⇒ sube claro. Se mide sobre el pixel que YA está en el store: el sensor no
+/// captura nada extra ni le pide nada al sistema.
+///
+/// Corre FUERA de main (main es el recurso escaso de esta app — v2.7/v2.8) y
+/// con UNA sola medición en vuelo: si la anterior no terminó, ésta se TIRA. Y
+/// como toda compuerta que tira trabajo en este código, lleva contador visible.
+final class OcclusionProbe: @unchecked Sendable {
+    /// Umbral MEDIDO, no supuesto. Rejilla 3x3 sobre la pantalla real de Daniel
+    /// (5120x2880, `--mirrortest` del 9 ago): escritorio vacío **0.0000**, zonas
+    /// con un borde o dos 0.05-0.12, zonas con contenido de verdad 0.17-0.39.
+    /// 0.10 parte ese rango donde debe: "hay UN borde" no es tapar, "hay texto"
+    /// sí. `--mirrortest` reimprime la rejilla en cada corrida para re-calibrar
+    /// con evidencia si el sensor se pone quejica o sordo.
+    static let threshold: Double = 0.100
+    /// Lado mayor al que se baja el recorte antes de buscar bordes. Bajar más
+    /// sería más barato pero desharía el texto fino, que es justo lo que hay que
+    /// detectar; a 360 px una letra de 28 px (2x) sigue midiendo ~11 px.
+    private static let workingSide: CGFloat = 360
+
+    private let queue = DispatchQueue(label: "so.saasfactory.sfcast.studio.occlusion", qos: .utility)
+    private let ctx = CIContext(options: [.cacheIntermediates: false])
+    private let lock = NSLock()
+    private var value: Double?
+    private var stamp: Double = 0
+    private var busy = false
+    private var taken = 0
+    private var skipped = 0
+
+    /// Pide una medición del rect dado (en px de la FUENTE de pantalla). No
+    /// bloquea; el resultado se recoge después con `latest()`.
+    func request(sourceRect: CGRect, frames: LatestFrameStore) {
+        lock.lock()
+        if busy { skipped += 1; lock.unlock(); return }
+        busy = true
+        lock.unlock()
+        queue.async { [weak self] in
+            guard let self else { return }
+            let v = frames.get(.screen).flatMap { self.measure($0, sourceRect) }
+            self.lock.lock()
+            if let v { self.value = v; self.stamp = CACurrentMediaTime(); self.taken += 1 }
+            self.busy = false
+            self.lock.unlock()
+        }
+    }
+
+    /// Última energía de bordes y su edad en segundos. `nil` = jamás midió.
+    func latest() -> (energy: Double, age: Double)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let v = value else { return nil }
+        return (v, CACurrentMediaTime() - stamp)
+    }
+
+    /// SENSOR del sensor (invariante 5b): mediciones hechas vs tiradas por
+    /// llegar con otra en vuelo. Degradar es correcto; degradar en silencio no.
+    func counts() -> (taken: Int, skipped: Int) {
+        lock.lock(); defer { lock.unlock() }
+        return (taken, skipped)
+    }
+
+    func reset() {
+        lock.lock(); value = nil; stamp = 0; taken = 0; skipped = 0; lock.unlock()
+    }
+
+    /// Medición SÍNCRONA (la usa `--mirrortest` para barrer la pantalla sin
+    /// pelearse con el muestreo periódico, que escribe el mismo `value`).
+    func measureNow(sourceRect: CGRect, frames: LatestFrameStore) -> Double? {
+        frames.get(.screen).flatMap { measure($0, sourceRect) }
+    }
+
+    private func measure(_ pb: CVPixelBuffer, _ r: CGRect) -> Double? {
+        let img = CIImage(cvPixelBuffer: pb)
+        let crop = r.integral.intersection(img.extent)
+        guard crop.width > 16, crop.height > 16 else { return nil }
+        let s = min(1.0, Self.workingSide / max(crop.width, crop.height))
+        // Lanczos y no una escala afín pelona: reducir 825→360 px con muestreo
+        // crudo INVENTA bordes por aliasing, y entonces el detector de bordes
+        // encuentra "detalle" hasta en un fondo liso. Fue justo lo que pasó en
+        // la primera corrida del QA: tres sitios distintos de la pantalla
+        // midiendo 0.2784, 0.2797 y 0.2797 — un sensor que no distingue nada.
+        let cropped = img
+            .cropped(to: crop)
+            .transformed(by: CGAffineTransform(translationX: -crop.minX, y: -crop.minY))
+        let small = cropped.applyingFilter("CILanczosScaleTransform", parameters: [
+            kCIInputScaleKey: s, kCIInputAspectRatioKey: 1.0,
+        ])
+        // Intensidad 1.0 (el default), no 4.0: amplificar satura el resultado y
+        // todo pasa a leerse "lleno de detalle" — la otra mitad del mismo bug.
+        guard let edges = CIFilter(name: "CIEdges", parameters: [
+            kCIInputImageKey: small, "inputIntensity": 1.0,
+        ])?.outputImage else { return nil }
+        let ext = edges.extent
+        guard ext.width >= 1, ext.height >= 1, !ext.isInfinite else { return nil }
+        guard let avg = CIFilter(name: "CIAreaAverage", parameters: [
+            kCIInputImageKey: edges, kCIInputExtentKey: CIVector(cgRect: ext),
+        ])?.outputImage else { return nil }
+        var px = [UInt8](repeating: 0, count: 4)
+        ctx.render(avg, toBitmap: &px, rowBytes: 4,
+                   bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+                   format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+        return (Double(px[0]) + Double(px[1]) + Double(px[2])) / (3 * 255)
+    }
 }
 
 /// Niveles RMS 0-1 para el Mixer (mic y audio del sistema).

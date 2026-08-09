@@ -58,13 +58,30 @@ open -W /Applications/SFCast.app --args --studiotest 8                 # E2E com
 open -W /Applications/SFCast.app --args --studiobench 45               # PESO por archivo + mic + salud
 open -W /Applications/SFCast.app --args --studiobench 30 --killstream  # mata el stream: prueba la recuperación
 open -W /Applications/SFCast.app --args --glowtest                     # aro neón: PNGs + costo por frame
+open -W /Applications/SFCast.app --args --mirrortest 6                 # ESPEJO: invisibilidad, alineación, arrastre, tamaños, sensor, costo
+open /Applications/SFCast.app --args --mirrorlook 16                   # ESPEJO capturable, para revisar el diseño con screenshot
 ```
+
+`--mirrortest` imprime en `~/Library/Logs/sfcast.log` (con `open` no hay stdout).
 
 Los tres bugs de la sesión real del 25 jul (mixer clavado, 15x el peso de OBS,
 pantalla congelada 50 min) y sus raíces medidas están en `DECISIONS.md` §v2.4.
 Resumen operativo: el programa sale a **~0.8 Mbps** (OBS hace 0.93), los RAW van
 **apagados por default** (nada los consumía) y hay watchdog del stream +
 guardias de disco con auto-stop.
+
+## Espejo (v2.9, 9 ago 2026)
+
+La burbuja del programa **proyectada sobre la pantalla que se captura**, para ver
+—y poder mover— lo que estás tapando. `StudioMirror.swift`: NSPanel
+`sharingType = .none` (invisible en el video), colocado por la **inversa de la
+colocación de la fuente Pantalla** (`MirrorGeometry`), video colgado de la sesión
+de cámara que YA tiene el Estudio. Arrastrarlo mueve el item de escena en vivo.
+Botón **Espejo** en la barra; ojo/candado en su menú; tamaños del Loom
+(`CameraBubble.Size`) en los chips de la burbuja. Sensor de oclusión
+(`OcclusionProbe`) → aro punteado ámbar. Decisiones y el bug que encontró el QA
+(esconder el panel estrangulaba la sesión de cámara: 60 → 0 fps):
+`DECISIONS.md` §v2.9.
 
 ## Invariantes que NO se tocan
 
@@ -99,7 +116,17 @@ guardias de disco con auto-stop.
      la ventana entera (v2.8: el vúmetro a 15 Hz saturó main con layout de
      SwiftUI y el preview cayó a 3 fps con cámara y compositor sanos). Alta
      frecuencia = CALayer directo. Y toda compuerta que TIRA trabajo para
-     degradar con gracia lleva contador visible (`flowCounts()`).
+     degradar con gracia lleva contador visible (`flowCounts()`). Los arrastres
+     (preview y espejo) van por `setItemRectLive` → `sceneBox`; `config` se
+     escribe UNA vez al soltar.
+   - El tramo **DESPUÉS** se mide igual que el durante (v2.9). Apagar el espejo
+     estrangulaba la sesión de cámara (60 → 0 fps) y el QA no lo veía porque
+     medía "antes" y "con espejo", los dos perfectos. Todo lo que se prende y se
+     apaga tiene que **devolver el sistema a su línea base**, y eso se afirma.
+   - Un sensor que mide sobre imagen reescalada **no puede inventar la señal
+     que busca** (v2.9): reducir con escala afín cruda y amplificar el filtro
+     hacía que tres zonas distintas de la pantalla midieran lo mismo. Lanczos,
+     intensidad por defecto, y el umbral se fija del RANGO medido.
 6. **Destino local vs VPS** (toggle del micropanel, `autoUpload` en settings.json, v1.7):
    ON = sube al VPS al terminar (lo de siempre); OFF = SOLO guarda en local, sin subir.
    Se empuja luego con "↑ subir" del Historial. El push posterior NO comprime en sitio

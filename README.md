@@ -134,6 +134,29 @@ liga al cdhash del binario. Cámara y micrófono NO se revocan porque la firma
   como el pill). Escenas en `~/Library/Application Support/SFCast/scenes.json`.
 - Grabación Loom y Estudio son excluyentes (guard cruzado con aviso).
 
+### Espejo (v2.9 — ver qué estás tapando, y moverlo desde ahí)
+
+> Botón **Espejo** en la barra del Estudio, junto a "Pantalla" y "Cámara".
+
+En el Estudio la cámara no toca la pantalla física (la pega el compositor), así
+que la burbuja te tapa el texto y no te enteras. El espejo proyecta esa burbuja
+**sobre la pantalla que se está grabando**, en su posición, tamaño, forma y aro
+exactos. Es **invisible en el video** (`sharingType = .none`, medido en cada
+corrida de `--mirrortest`: fuga neta 0.0007 sobre 1.0).
+
+- **Arrástrala en la pantalla** y el programa la sigue en el mismo frame (y al
+  revés: si la mueves en el preview del Estudio, el espejo va detrás).
+- **Al hover** salen los chips de tamaño — los cuatro del Loom (S · M · L ·
+  completo). Clic derecho: el mismo menú.
+- **Aviso de oclusión**: si debajo de la burbuja hay contenido de verdad, sale
+  un **aro punteado ámbar** y el botón del Estudio dice "Espejo · tapando".
+- **Rayos X** (menú del botón Espejo): baja la burbuja al 18% para ver qué hay
+  debajo. **Fijar**: deja de recibir clics, para que no te coma la esquina en
+  plena toma; se suelta desde el mismo menú.
+- Se apaga solo, diciendo por qué, cuando la escena no lo admite ("aquí la
+  cámara no tapa la pantalla" en Lado a lado, "esta escena no tiene cámara" en
+  Completa). El toggle vive en `scenes.json` (`mirrorEnabled`) y se recuerda.
+
 **Regalable:** el Estudio no toca el VPS ni credenciales. Para regalar el build:
 `./scripts/build-app.sh` → compartir `dist/SFCast.app` (arrastrar a /Applications).
 El tercero aprueba cámara/mic/pantalla en su primer uso; si no quiere el VPS,
@@ -286,6 +309,13 @@ por escena + PNG de la ventana. Restaura `scenes.json` al salir.
 
 - **Burbuja quemada** = no editable después. A cambio: link instantáneo.
 - **Modo ventana = sin burbuja** (la burbuja vive en el display, no en la ventana).
+- **El Estudio graba SOLO el display principal** (`CGMainDisplayID`), y no hay
+  selector. Con dos monitores, lo que pongas en el segundo **no sale en el
+  video**. El espejo (v2.9) lo delata de rebote: solo aparece en la pantalla que
+  sí se está grabando.
+- **Si la cámara elegida no está conectada, se cae a otra en silencio** (en el
+  QA del 9 ago: la ZV-E10 apagada → grabó de "OBS Virtual Camera"). El nombre
+  RESUELTO sale en el log al arrancar la sesión y en `--mirrortest`.
 - **Grabación en pausa no sobrevive** al reinicio de la app.
 - **No controlamos el bitrate de captura**: `SCRecordingOutputConfiguration` solo
   expone outputURL, fileType y codec. Bajarlo en origen exigiría re-arquitecturar

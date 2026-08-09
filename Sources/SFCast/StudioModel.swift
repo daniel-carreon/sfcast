@@ -257,6 +257,11 @@ struct StudioConfig: Codable {
     /// false = la ventana del Estudio es INVISIBLE en capturas/grabaciones
     /// (estilo OBS, default); true = ventana normal, sale en screenshots.
     var windowCapturable = false
+    /// EL ESPEJO (v2.9): proyecta la burbuja del programa sobre la pantalla que
+    /// se captura, para VER lo que estás tapando mientras grabas. Persiste
+    /// porque es una preferencia de trabajo, no un modo de sesión: si lo dejaste
+    /// prendido ayer, mañana sigue prendido. Ver `StudioMirror`.
+    var mirrorEnabled = false
     /// Migración única del 25 jul: apagar los RAW por default. Motivo: NADA los
     /// consumía (el worker del VPS solo glob-ea `seg-*.mp4`, SFStudio y la skill
     /// de edición no los tocan) y entre los dos costaban ~6.9 Mbps de los ~7.8
@@ -282,6 +287,7 @@ struct StudioConfig: Codable {
         programQuality = try c.decodeIfPresent(StudioQuality.self, forKey: .programQuality) ?? .media
         windowCapturable = try c.decodeIfPresent(Bool.self, forKey: .windowCapturable) ?? false
         weightFixApplied = try c.decodeIfPresent(Bool.self, forKey: .weightFixApplied) ?? false
+        mirrorEnabled = try c.decodeIfPresent(Bool.self, forKey: .mirrorEnabled) ?? false
     }
 
     /// true si `load()` acaba de aplicar la migración de peso (la UI lo avisa

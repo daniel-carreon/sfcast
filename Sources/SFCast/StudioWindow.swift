@@ -14,6 +14,9 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
 
     let engine = StudioEngine()
     let recorder = StudioRecorder()
+    /// EL ESPEJO: la burbuja del programa proyectada sobre la pantalla que se
+    /// captura, para VER (y poder mover) lo que estás tapando. Ver StudioMirror.
+    let mirror = StudioMirror()
 
     @Published var config = StudioConfig.load()
     @Published var selectedItemID: UUID? { didSet { previewView?.refreshOverlay() } }
@@ -40,6 +43,18 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     @Published var screenOK = false
     @Published var cameraOK = false
     @Published var starved: Set<StudioSourceKind> = []
+    // EL ESPEJO (v2.9). Publicados: SOLO booleanos y un texto que cambian de
+    // Pascua a Ramos — nada del arrastre ni de la energía cruda pasa por aquí.
+    /// Por qué el espejo no se ve estando prendido (nil = se ve). Un espejo que
+    /// desaparece en silencio sería el patrón de bug del 25 jul otra vez.
+    @Published var mirrorNote: String?
+    @Published var mirrorOccluding = false
+    @Published var mirrorLocked = false
+    @Published var mirrorXray = false
+    /// Energía de bordes medida bajo la burbuja. Plain var a propósito: se
+    /// mueve todo el tiempo y no hay razón para re-renderizar la ventana por
+    /// ella (se lee en el tooltip y la imprime `--mirrortest`).
+    var mirrorEnergy: Double = -1
     @Published var lastSessionDir: URL?
     @Published var recordError: String?
     /// Alarma VISIBLE del Estudio (congelada / disco / reenganche). Es lo que
@@ -88,7 +103,10 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                 guard let self, self.recorder.isRecording else { return }
                 self.toggleRecord()
             }
-            Task { await engine.start(config: config); pullEngineStatus() }
+            wireMirror()
+            // El espejo necesita el canvas y la sesión de cámara: hasta que el
+            // motor no arranca no hay dónde ni con qué proyectarlo.
+            Task { await engine.start(config: config); pullEngineStatus(); syncMirror() }
         }
         if StudioConfig.weightFixJustApplied {
             raiseAlert("Apagué los RAW de pantalla y cámara: nada los usaba y eran ~9x el peso "
@@ -103,12 +121,16 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     /// GRABANDO no se llega aquí (los start* del Loom lo guardan antes).
     func closeForLoom() {
         guard isOpen || engine.isRunning else { return }
+        // El espejo se va PRIMERO: cuelga de la sesión de cámara del Estudio,
+        // que el Loom está a punto de quedarse (una sola dueña a la vez).
+        mirror.hide()
         window?.orderOut(nil)
         Task { await engine.stop() }
         stopMeters()
     }
 
     func windowWillClose(_ notification: Notification) {
+        mirror.hide()
         stopMeters()
         if recorder.isRecording {
             Task {
@@ -360,18 +382,347 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         exit(0)
     }
 
+    /// QA DEL ESPEJO (`--mirrortest N`) — lo que lo hace foso y no adorno.
+    ///
+    /// Mide CUATRO cosas con números, sobre la config REAL (las escenas de
+    /// Daniel, su monitor, su cámara):
+    ///
+    ///  1. **INVISIBILIDAD** — la que de verdad importa. Compara el frame de
+    ///     PANTALLA con el espejo apagado y prendido, en el mismísimo recorte
+    ///     donde vive la burbuja. Si `sharingType = .none` fallara, ahí saldría
+    ///     un aro morado y una cara, y en el video final la cara saldría
+    ///     DUPLICADA (el panel real + la burbuja compuesta encima). Es la clase
+    ///     de bug que si no se mide, se descubre viendo la grabación al día
+    ///     siguiente — o sea, tarde.
+    ///  2. **ALINEACIÓN** — dónde dice el espejo que está vs dónde cae la
+    ///     burbuja según la geometría del programa, en píxeles.
+    ///  3. **ARRASTRE** — ejerce el camino real (dragBegan→dragMoved→dragEnded,
+    ///     no el setter) y verifica que el rect de escena Y el panel se
+    ///     movieron lo mismo, y que quedó persistido.
+    ///  4. **COSTO** — fps de cámara y preview con el espejo encima. Lo que no
+    ///     se mide se degrada en silencio (v2.7/v2.8).
+    ///
+    /// Y de paso imprime el sensor de oclusión en tres posiciones distintas,
+    /// para calibrar el umbral con evidencia y no a ojo.
+    /// Evidencia del QA a DOS canales: stdout (corrida desde terminal) y el log
+    /// de la app. El runbook manda correr el QA con `open` — TCC se atribuye al
+    /// proceso responsable, no al binario — y `open` NO reenvía stdout: sin la
+    /// segunda vía, los números de la prueba se perdían en el aire.
+    private func qa(_ s: String) { print(s); Log.info(s) }
+
+    func runMirrorTest(seconds: Int) async {
+        let out = URL(fileURLWithPath: "/tmp/sfcast-espejo")
+        try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        // OJO: aquí NO se pone testMode. La ventana del Estudio debe quedarse
+        // invisible a la captura, o se metería en el recorte que estamos
+        // midiendo y ensuciaría justo la medición que vinimos a hacer.
+        open()
+        try? await Task.sleep(nanoseconds: 3_500_000_000)
+        guard engine.screenAvailable else { qa("MIRRORTEST_FAIL sin-permiso-de-pantalla"); exit(3) }
+        guard engine.cameraAvailable else { qa("MIRRORTEST_FAIL sin-camara"); exit(3) }
+
+        // La escena del caso real: pantalla + cámara en burbuja circular.
+        guard let burbuja = config.scenes.first(where: { s in
+            s.items.contains(where: { $0.kind == .screen && $0.enabled })
+                && s.items.contains(where: { $0.kind == .camera && $0.enabled && $0.circleMask })
+        }) else { qa("MIRRORTEST_FAIL sin-escena-de-burbuja"); exit(2) }
+        selectScene(burbuja.id)
+        try? await Task.sleep(nanoseconds: 800_000_000)
+
+        let screen = RecordingController.captureScreen()
+        qa("MIRRORTEST escena='\(burbuja.name)' "
+              + "canvas=\(Int(engine.canvasSize.width))x\(Int(engine.canvasSize.height)) "
+              + "display=\(Int(screen?.frame.width ?? 0))x\(Int(screen?.frame.height ?? 0))pt "
+              + "@\(screen?.backingScaleFactor ?? 0)x displays=\(NSScreen.screens.count) "
+              + "camara='\(engine.cameraDeviceName ?? "ninguna")'")
+
+        // LÍNEA BASE del flujo, tomada ANTES de que el espejo exista siquiera.
+        // Es la referencia contra la que se juzgan las otras dos ventanas.
+        func medirFlujo(segundos: Int) async -> (Double, Double, Int) {
+            let a = engine.flowCounts()
+            let t = CACurrentMediaTime()
+            try? await Task.sleep(nanoseconds: UInt64(max(1, segundos)) * 1_000_000_000)
+            let b = engine.flowCounts()
+            let dt = max(CACurrentMediaTime() - t, 0.001)
+            return (Double(b.camera - a.camera) / dt,
+                    Double(b.previewDelivered - a.previewDelivered) / dt,
+                    b.previewDropped - a.previewDropped)
+        }
+
+        // El recorte a vigilar, en px de la FUENTE de pantalla.
+        let wasOn = config.mirrorEnabled
+        if wasOn { config.mirrorEnabled = false; mirror.hide() }
+        syncMirror()
+        let (camAntes, prevAntes, _) = await medirFlujo(segundos: 3)
+        guard let camItem = burbuja.items.last(where: { $0.kind == .camera && $0.enabled }),
+              let scrItem = burbuja.items.first(where: { $0.kind == .screen && $0.enabled }),
+              let screen, let geo = MirrorGeometry(canvas: engine.canvasSize,
+                                                   screenItem: scrItem, screen: screen)
+        else { qa("MIRRORTEST_FAIL sin-geometria"); exit(2) }
+        let watch = geo.sourceRect(fromCanvas: geo.canvasRect(of: camItem))
+
+        // ── 1. INVISIBILIDAD ──────────────────────────────────────────────
+        //
+        // Comparar el recorte de la burbuja apagado vs prendido NO basta: la
+        // pantalla de abajo es un escritorio VIVO (un chat que escribe, un
+        // spinner, el reloj), y en una corrida del 9 ago ese movimiento solo
+        // levantó el promedio 0.051 y el test gritó FUGA sin que nada se hubiera
+        // colado. Un detector que confunde "cambió la pantalla" con "se coló el
+        // panel" no sirve para lo único que tiene que decidir.
+        //
+        // La cura es una REGIÓN DE CONTROL del mismo tamaño donde el espejo
+        // JAMÁS cae. Si las dos regiones se mueven igual, es la pantalla; si
+        // solo se mueve la de la burbuja, es fuga. Se mide la DIFERENCIA de
+        // diferencias, no un valor absoluto.
+        let control = CGRect(x: geo.sourcePixels.width - watch.maxX, y: watch.minY,
+                             width: watch.width, height: watch.height)
+        func sample(_ n: Int) async -> (bubble: SIMD3<Double>, ctrl: SIMD3<Double>) {
+            var b = SIMD3<Double>(), c = SIMD3<Double>()
+            var got = 0.0
+            for _ in 0..<n {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard let pb = engine.frames.get(.screen),
+                      let mb = MirrorProbe.meanRGB(of: pb, rect: watch),
+                      let mc = MirrorProbe.meanRGB(of: pb, rect: control) else { continue }
+                b += SIMD3(mb.r, mb.g, mb.b)
+                c += SIMD3(mc.r, mc.g, mc.b)
+                got += 1
+            }
+            let d = max(got, 1)
+            return (b / d, c / d)
+        }
+        // Y aun con región de control, UN ciclo apagado→prendido no basta: si la
+        // pantalla se mueve fuerte justo entre las dos muestras (un build
+        // scrolleando, por ejemplo: deriva medida de 0.1577 sobre 1.0), el ruido
+        // se reparte distinto entre las dos regiones y el neto sale sucio.
+        // Por eso se ALTERNA varias veces: una fuga es un desvío del MISMO signo
+        // cada vez que el espejo está encendido, mientras que el ruido de la
+        // pantalla no está correlacionado con el interruptor y se cancela.
+        var netos: [SIMD3<Double>] = []
+        var derivas: [Double] = []
+        for ciclo in 0..<4 {
+            config.mirrorEnabled = false
+            syncMirror()
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            let off = await sample(3)
+            if ciclo == 0, let pb = engine.frames.get(.screen) {
+                MirrorProbe.writeCrop(pb, rect: watch,
+                                      to: out.appendingPathComponent("captura-espejo-apagado.png"))
+            }
+            config.mirrorEnabled = true
+            syncMirror()
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            guard mirror.isVisible else {
+                qa("MIRRORTEST_FAIL el-espejo-no-se-mostro (\(mirror.unavailable?.reason ?? "?"))")
+                exit(1)
+            }
+            let on = await sample(3)
+            if ciclo == 0, let pb = engine.frames.get(.screen) {
+                MirrorProbe.writeCrop(pb, rect: watch,
+                                      to: out.appendingPathComponent("captura-espejo-prendido.png"))
+                // Auto-retrato del panel: la ÚNICA forma de VER el espejo,
+                // porque por diseño ningún screenshot del sistema lo captura.
+                mirror.qaSelfShot(to: out.appendingPathComponent("espejo-panel.png"))
+            }
+            let dCtrl = on.ctrl - off.ctrl
+            netos.append((on.bubble - off.bubble) - dCtrl)
+            derivas.append((abs(dCtrl.x) + abs(dCtrl.y) + abs(dCtrl.z)) / 3)
+        }
+        var suma = SIMD3<Double>()
+        for n in netos { suma += n }
+        let neto = suma / Double(netos.count)
+        let deriva = derivas.reduce(0, +) / Double(derivas.count)
+        let leak = max(abs(neto.x), max(abs(neto.y), abs(neto.z)))
+        // Si la pantalla se movió MUCHO, la medición no concluye — y lo dice.
+        // Un test que grita "fuga" por ruido acabaría ignorado, que es la única
+        // forma de que un test de seguridad no sirva para nada.
+        let veredicto = leak < 0.02 ? "INVISIBLE" : (deriva > 0.05 ? "INCONCLUSO (pantalla muy movida; repítelo en reposo)" : "FUGA")
+        qa(String(format: "MIRRORTEST_INVISIBLE ciclos=%d fuga_neta=(%.4f,%.4f,%.4f) max=%.4f "
+                     + "deriva_pantalla=%.4f veredicto=%@",
+                     netos.count, neto.x, neto.y, neto.z, leak, deriva, veredicto))
+
+        // ── 2. ALINEACIÓN ─────────────────────────────────────────────────
+        let esperado = geo.screenRect(fromCanvas: geo.canvasRect(of: camItem))
+        let real = mirror.screenRect ?? .zero
+        let dx = abs(real.minX - esperado.minX), dy = abs(real.minY - esperado.minY)
+        let dw = abs(real.width - esperado.width), dh = abs(real.height - esperado.height)
+        qa(String(format: "MIRRORTEST_ALINEACION esperado=(%.1f,%.1f %.1fx%.1f) real=(%.1f,%.1f %.1fx%.1f) "
+                     + "delta=(%.2f,%.2f %.2fx%.2f) veredicto=%@",
+                     esperado.minX, esperado.minY, esperado.width, esperado.height,
+                     real.minX, real.minY, real.width, real.height, dx, dy, dw, dh,
+                     max(max(dx, dy), max(dw, dh)) < 1.0 ? "OK" : "DESALINEADO"))
+
+        // ── 3. ARRASTRE (el camino real, no el setter) ────────────────────
+        let antesRect = camItem.rect
+        let antesPanel = mirror.screenRect ?? .zero
+        writeFramePNG(name: "espejo-programa-antes.png", dir: out)
+        let delta = CGSize(width: -220, height: 160)
+        mirror.qaDrag(byScreenDelta: delta)
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        let despuesRect = activeScene?.items.first(where: { $0.id == camItem.id })?.rect ?? .zero
+        let despuesPanel = mirror.screenRect ?? .zero
+        writeFramePNG(name: "espejo-programa-despues.png", dir: out)
+        let panelMovio = CGSize(width: despuesPanel.minX - antesPanel.minX,
+                                height: despuesPanel.minY - antesPanel.minY)
+        // El rect de escena tiene que haberse movido lo que pide la geometría…
+        let esperadoNorm = geo.normalizedDelta(fromScreen: delta)
+        let normMovio = CGSize(width: despuesRect.minX - antesRect.minX,
+                               height: despuesRect.minY - antesRect.minY)
+        let errNorm = max(abs(normMovio.width - esperadoNorm.width),
+                          abs(normMovio.height - esperadoNorm.height))
+        // …y el panel tiene que haber seguido al rect, no al mouse.
+        let errPanel = max(abs(panelMovio.width - delta.width), abs(panelMovio.height - delta.height))
+        // ¿Y quedó PERSISTIDO? (soltar el mouse escribe scenes.json una vez)
+        let enDisco = (try? JSONDecoder().decode(StudioConfig.self, from: Data(contentsOf: StudioConfig.file)))?
+            .scenes.first(where: { $0.id == burbuja.id })?
+            .items.first(where: { $0.id == camItem.id })?.rect ?? .zero
+        let errDisco = max(abs(enDisco.minX - despuesRect.minX), abs(enDisco.minY - despuesRect.minY))
+        qa(String(format: "MIRRORTEST_ARRASTRE pedido=(%.0f,%.0f)pt panel=(%.1f,%.1f)pt err_panel=%.2fpt "
+                     + "rect=(%.4f,%.4f)→(%.4f,%.4f) err_norm=%.5f persistido=%@ veredicto=%@",
+                     delta.width, delta.height, panelMovio.width, panelMovio.height, errPanel,
+                     antesRect.minX, antesRect.minY, despuesRect.minX, despuesRect.minY, errNorm,
+                     errDisco < 0.0001 ? "si" : "NO",
+                     (errPanel < 1.5 && errNorm < 0.0005 && errDisco < 0.0001) ? "OK" : "FALLA"))
+        // ── 3b. TAMAÑOS DEL LOOM ──────────────────────────────────────────
+        // Los chips piden un DIÁMETRO en puntos de pantalla (el idioma del
+        // Loom) y eso tiene que volver como rect normalizado de escena: es la
+        // inversa de la geometría, ejercida en el sentido contrario al del
+        // arrastre. Si esta y aquella no cierran, la burbuja crecería distinto
+        // de como se mueve.
+        var tallas: [String] = []
+        var tallasOK = true
+        for s in CameraBubble.Size.allCases where s != .full {
+            mirror.applySize(s)
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            let real = mirror.currentDiameter ?? -1
+            let err = abs(real - s.diameter)
+            if err > 1.0 { tallasOK = false }
+            tallas.append(String(format: "%@=%.1f/%.0f", s.rawValue, real, s.diameter))
+        }
+        mirror.applySize(.full)
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        let full = mirror.screenRect ?? .zero
+        let fullEsperado = (screen.visibleFrame.width * 0.72)
+        let fullErr = abs(full.width - fullEsperado)
+        let circuloTrasFull = activeScene?.items.first(where: { $0.id == camItem.id })?.circleMask ?? true
+        if fullErr > 1.5 || circuloTrasFull { tallasOK = false }
+        qa(String(format: "MIRRORTEST_TAMANOS %@ completo=%.1f/%.0f circuloApagado=%@ veredicto=%@",
+                  tallas.joined(separator: " "), full.width, fullEsperado,
+                  circuloTrasFull ? "NO" : "si", tallasOK ? "OK" : "FALLA"))
+
+        // devolver la burbuja a como estaba: el QA no le mueve las escenas a nadie
+        updateItem(camItem.id) { $0.rect = antesRect; $0.circleMask = camItem.circleMask }
+        try? await Task.sleep(nanoseconds: 400_000_000)
+
+        // ── 4. CALIBRACIÓN DEL SENSOR DE OCLUSIÓN ─────────────────────────
+        // Barrido 3x3 de la pantalla con medición SÍNCRONA (el muestreo
+        // periódico escribe el mismo `value` y contaminaría la lectura: en la
+        // primera corrida los tres sitios dieron el mismo número justo por eso).
+        // El umbral se fija con el RANGO medido sobre la pantalla real, no a ojo.
+        var grid: [Double] = []
+        var celdas: [String] = []
+        for (fy, ny) in [(0.02, "ab"), (0.5 - antesRect.height / 2, "md"), (0.98 - antesRect.height, "ar")] {
+            for (fx, nx) in [(0.01, "iz"), (0.5 - antesRect.width / 2, "ce"), (0.99 - antesRect.width, "de")] {
+                var probe = camItem
+                probe.rect = CGRect(x: fx, y: fy, width: antesRect.width, height: antesRect.height)
+                let e = engine.occlusion.measureNow(
+                    sourceRect: geo.sourceRect(fromCanvas: geo.canvasRect(of: probe)),
+                    frames: engine.frames) ?? -1
+                grid.append(e)
+                celdas.append(String(format: "%@%@=%.4f", ny, nx, e))
+            }
+        }
+        let vals = grid.filter { $0 >= 0 }
+        qa("MIRRORTEST_OCLUSION " + celdas.joined(separator: " "))
+        qa(String(format: "MIRRORTEST_OCLUSION_RANGO min=%.4f max=%.4f rango=%.4f umbral=%.3f veredicto=%@",
+                  vals.min() ?? -1, vals.max() ?? -1,
+                  (vals.max() ?? 0) - (vals.min() ?? 0), OcclusionProbe.threshold,
+                  ((vals.max() ?? 0) - (vals.min() ?? 0)) > 0.01 ? "DISCRIMINA" : "NO-DISCRIMINA"))
+
+        // ── 5. COSTO: fps antes / con espejo / después ────────────────────
+        // Un "cuesta poco" sin línea base no es una medición, es una opinión.
+        // TRES ventanas, en este orden, y el DESPUÉS es tan importante como el
+        // durante: prendido → apagado tiene que devolver la cámara a como
+        // estaba. Con el preview layer colgado de la sesión y la ventana
+        // escondida, ese tercer tramo medía cam=0 (la sesión estrangulada) y el
+        // programa se habría quedado con la cara congelada. Sin el tramo
+        // "después" el bug era invisible: los dos primeros salían perfectos.
+        let secs = max(3, seconds)
+        config.mirrorEnabled = true
+        syncMirror()
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        let (camOn, prevOn, tirOn) = await medirFlujo(segundos: secs)
+        config.mirrorEnabled = false
+        mirror.hide()
+        syncMirror()
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        let (camOff, prevOff, tirOff) = await medirFlujo(segundos: secs)
+        let oc = engine.occlusion.counts()
+        let sano = camOff > camAntes * 0.7 && prevOff > prevAntes * 0.7
+        qa(String(format: "MIRRORTEST_FLUJO antes: cam=%.1f prev=%.1f | espejo: cam=%.1f prev=%.1f tirados=%d "
+                  + "| despues: cam=%.1f prev=%.1f tirados=%d | costo_preview=%.1ffps "
+                  + "oclusionMedidas=%d oclusionTiradas=%d veredicto=%@",
+                  camAntes, prevAntes, camOn, prevOn, tirOn, camOff, prevOff, tirOff,
+                  prevAntes - prevOn, oc.taken, oc.skipped,
+                  sano ? "SIN-SECUELAS" : "LA-CAMARA-NO-VOLVIO"))
+
+        saveWindowShot(to: out)
+        config.mirrorEnabled = wasOn
+        config.save()
+        mirror.hide()
+        await engine.stop()
+        qa("MIRRORTEST_OK \(out.path)")
+        exit(0)
+    }
+
+    /// QA VISUAL del espejo (`--mirrorlook N`): lo muestra N segundos CAPTURABLE
+    /// para poder revisar el diseño con un screenshot, y lo pasea por los cuatro
+    /// tamaños del Loom. Existe por el mismo motivo que `--paneltest` para el
+    /// pill: lo que es invisible a la captura por diseño también es invisible
+    /// para quien quiere mirarlo. No graba nada y no toca las escenas.
+    func runMirrorLook(seconds: Int) async {
+        StudioMirror.capturableForQA = true
+        open()
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        guard let burbuja = config.scenes.first(where: { s in
+            s.items.contains(where: { $0.kind == .screen && $0.enabled })
+                && s.items.contains(where: { $0.kind == .camera && $0.enabled && $0.circleMask })
+        }) else { qa("MIRRORLOOK_FAIL sin-escena-de-burbuja"); exit(2) }
+        let cfgBackup = try? Data(contentsOf: StudioConfig.file)
+        selectScene(burbuja.id)
+        let wasOn = config.mirrorEnabled
+        config.mirrorEnabled = true
+        syncMirror()
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        qa("MIRRORLOOK visible=\(mirror.isVisible) rect=\(mirror.screenRect.map { "\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height))" } ?? "-") "
+           + "camara='\(engine.cameraDeviceName ?? "ninguna")'")
+        let paso = UInt64(max(1, seconds)) * 1_000_000_000 / 4
+        for s in CameraBubble.Size.allCases {
+            mirror.applySize(s)
+            qa("MIRRORLOOK tamaño=\(s.rawValue) diametro=\(mirror.currentDiameter.map { String(format: "%.0f", $0) } ?? "-")")
+            try? await Task.sleep(nanoseconds: paso)
+        }
+        config.mirrorEnabled = wasOn
+        mirror.hide()
+        await engine.stop()
+        // Las escenas se devuelven TAL CUAL: el paseo de tamaños las movió.
+        if let cfgBackup { try? cfgBackup.write(to: StudioConfig.file) }
+        qa("MIRRORLOOK_OK")
+        exit(0)
+    }
+
     /// Empuja la escena activa al motor SIN pasar por el ciclo de SwiftUI
     /// (el QA de rendimiento necesita que el cambio llegue en el mismo frame).
     private func pushActiveSceneNow() { engine.setActiveScene(activeScene) }
 
-    private func writeFramePNG(name: String) {
+    private func writeFramePNG(name: String, dir customDir: URL? = nil) {
         guard let pb = engine.snapshotProgramFrame() else {
             print("STUDIOTEST_WARN sin frame de programa para \(name)")
             return
         }
         let img = CIImage(cvPixelBuffer: pb)
         let ctx = CIContext()
-        let dir = AppSettings.recordingsDir.appendingPathComponent(recorder.videoID)
+        let dir = customDir ?? AppSettings.recordingsDir.appendingPathComponent(recorder.videoID)
         let url = dir.appendingPathComponent(name)
         guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
               let data = ctx.pngRepresentation(of: img, format: .BGRA8, colorSpace: cs) else { return }
@@ -482,7 +833,17 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                     if Int(e) != Int(self.elapsed) { self.elapsed = e }
                 }
                 self.tick += 1
-                if self.tick % 15 == 0 { self.refreshFlowSensor() }            // ~1s
+                // SENSOR DE OCLUSIÓN a ~2 Hz: la medición corre FUERA de main
+                // (main es el recurso escaso — v2.7/v2.8); aquí solo se pide.
+                if self.tick % 8 == 0 { self.probeOcclusion() }                // ~2/s
+                if self.tick % 15 == 0 {                                        // ~1s
+                    self.refreshFlowSensor()
+                    self.readOcclusion()
+                    // Red de seguridad del espejo: si algo lo movió por fuera
+                    // (cambio de monitor, resolución, fin de grabación), aquí se
+                    // reconcilia. Es no-op cuando nada cambió.
+                    self.syncMirror()
+                }
                 if self.tick % 45 == 0 { self.engine.retryScreenIfNeeded() }   // ~3s
                 if self.tick % 150 == 0 {                                       // ~10s
                     let free = StudioRecorder.freeBytes()
@@ -581,8 +942,8 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         }
     }
 
-    /// Transform EN VIVO desde el canvas (drag/resize): actualiza el compositor
-    /// a cada tick sin golpear disco; persiste al soltar (commitItemDrag).
+    /// Transform desde los controles (sliders, chips, centrar): pasa por
+    /// `config` y persiste. Para el ARRASTRE usa `setItemRectLive`.
     func setItemRect(_ id: UUID, _ rect: CGRect, persist: Bool) {
         guard let sIdx = config.scenes.firstIndex(where: { $0.id == config.activeSceneID }),
               let iIdx = config.scenes[sIdx].items.firstIndex(where: { $0.id == id }) else { return }
@@ -591,8 +952,144 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         if persist { config.save() }
     }
 
+    /// Rect VIVO mientras se arrastra (en el canvas del Estudio o en el espejo).
+    /// Vive FUERA de `@Published config` A PROPÓSITO: el mouse manda 60-120
+    /// eventos por segundo y CADA asignación a `config` invalida la jerarquía
+    /// SwiftUI entera. Es exactamente la lección de v2.8 (el vúmetro a 15 Hz ya
+    /// dejó el preview a 3 fps con la cámara sana): nada de alta frecuencia pasa
+    /// por un `@Published` que observa la ventana completa.
+    private var liveDrag: (id: UUID, rect: CGRect)?
+
+    /// Arrastre EN VIVO: alimenta al compositor (sceneBox, thread-safe) y al
+    /// espejo con una copia detachada de la escena. `config` no se toca hasta
+    /// soltar. Es el camino que usan LOS DOS arrastres — el del preview y el del
+    /// espejo — para que no haya dos verdades.
+    func setItemRectLive(_ id: UUID, _ rect: CGRect) {
+        guard var scene = activeScene,
+              let i = scene.items.firstIndex(where: { $0.id == id }) else { return }
+        liveDrag = (id, rect)
+        scene.items[i].rect = rect
+        engine.setActiveScene(scene)
+        previewView?.refreshOverlay()
+        syncMirror(scene: scene)
+    }
+
+    /// El rect que la UI debe pintar para ese item AHORA: el vivo si se está
+    /// arrastrando, el persistido si no.
+    func liveRect(of id: UUID) -> CGRect? {
+        if let d = liveDrag, d.id == id { return d.rect }
+        return activeScene?.items.first(where: { $0.id == id })?.rect
+    }
+
+    /// Soltar el mouse: AQUÍ (y solo aquí) se escribe `config` y se persiste.
     func commitItemDrag() {
+        guard let d = liveDrag else { config.save(); return }
+        liveDrag = nil
+        setItemRect(d.id, d.rect, persist: true)
+    }
+
+    // MARK: - EL ESPEJO (v2.9)
+
+    /// Cablea el espejo con el controller. El arrastre del espejo entra por el
+    /// MISMO camino vivo que el del preview; los chips de tamaño entran por
+    /// el camino normal, que sí persiste.
+    private func wireMirror() {
+        mirror.onDragLive = { [weak self] r in
+            guard let self, let id = self.mirror.mirroredItemID else { return }
+            self.setItemRectLive(id, r)
+        }
+        mirror.onDragCommit = { [weak self] in self?.commitItemDrag() }
+        // Tamaño desde los chips / el menú: entra por el camino normal (persiste
+        // de una). `circle` viene puesto solo en el tamaño completo, que igual
+        // que en el Loom deja de ser círculo y pasa a rectángulo redondeado.
+        mirror.onResize = { [weak self] r, circle in
+            guard let self, let id = self.mirror.mirroredItemID else { return }
+            self.updateItem(id) {
+                $0.rect = r
+                if let circle { $0.circleMask = circle }
+            }
+        }
+        mirror.onRequestClose = { [weak self] in
+            guard let self, self.config.mirrorEnabled else { return }
+            self.toggleMirror()
+        }
+        mirror.onStateChange = { [weak self] in self?.refreshMirrorFlags() }
+    }
+
+    /// El botón Espejo del top bar (y el chip de cerrar del propio espejo).
+    func toggleMirror() {
+        config.mirrorEnabled.toggle()
         config.save()
+        if config.mirrorEnabled {
+            engine.occlusion.reset()
+            mirrorEnergy = -1
+            syncMirror()
+            if let why = mirror.unavailable {
+                raiseAlert("Espejo prendido, pero \(why.reason).", critical: false)
+            }
+        } else {
+            mirror.setOccluding(false)
+            mirror.hide()
+            mirrorOccluding = false
+            refreshMirrorFlags()
+        }
+        Log.info("Espejo: \(config.mirrorEnabled ? "prendido" : "apagado")"
+                 + (mirror.unavailable.map { " (\($0.reason))" } ?? ""))
+    }
+
+    /// Reconcilia el espejo con lo que hay AHORA. Idempotente y barata: la
+    /// llaman el push de escena, cada tick del arrastre y el timer de 1 Hz.
+    func syncMirror(scene: StudioScene? = nil) {
+        // La compuerta es el MOTOR, no la ventana: si Daniel minimiza el Estudio
+        // (o lo manda al otro monitor) a mitad de una toma, el espejo tiene que
+        // seguir ahí. `mirror.sync` ya resuelve el caso de motor abajo.
+        guard config.mirrorEnabled else {
+            if mirror.isVisible { mirror.hide() }
+            refreshMirrorFlags()
+            return
+        }
+        mirror.sync(scene: scene ?? activeScene,
+                    canvas: engine.canvasSize,
+                    session: engine.cameraCaptureSession,
+                    mirrored: engine.cameraMirroredInProgram,
+                    engineRunning: engine.isRunning)
+        refreshMirrorFlags()
+    }
+
+    /// Publica los booleanos del espejo SOLO si cambiaron.
+    private func refreshMirrorFlags() {
+        let note = config.mirrorEnabled ? mirror.unavailable?.reason : nil
+        if note != mirrorNote { mirrorNote = note }
+        if mirror.locked != mirrorLocked { mirrorLocked = mirror.locked }
+        if mirror.xray != mirrorXray { mirrorXray = mirror.xray }
+    }
+
+    /// Pide una medición de lo que la burbuja tapa (~2 Hz, fuera de main). Sin
+    /// espejo vivo no hay rect que medir ni a quién avisarle.
+    private func probeOcclusion() {
+        guard config.mirrorEnabled, mirror.isVisible,
+              let geo = mirror.geometry, let id = mirror.mirroredItemID,
+              let item = activeScene?.items.first(where: { $0.id == id }) else { return }
+        engine.occlusion.request(sourceRect: geo.sourceRect(fromCanvas: geo.canvasRect(of: item)),
+                                 frames: engine.frames)
+    }
+
+    /// Lee el sensor y prende/apaga el aviso. Publica SOLO cuando el booleano
+    /// cambia — el número crudo se mueve siempre y re-renderizar por eso sería
+    /// pagar el mismo precio que costó v2.8.
+    private func readOcclusion() {
+        guard config.mirrorEnabled, mirror.isVisible,
+              let (energy, age) = engine.occlusion.latest(), age < 4 else { return }
+        mirrorEnergy = energy
+        let on = energy >= OcclusionProbe.threshold
+        mirror.setOccluding(on)
+        if on != mirrorOccluding { mirrorOccluding = on }
+    }
+
+    /// Lectura del sensor para el tooltip / QA.
+    var mirrorEnergyText: String {
+        guard mirrorEnergy >= 0 else { return "sin medir" }
+        return String(format: "%.4f (umbral %.3f)", mirrorEnergy, OcclusionProbe.threshold)
     }
 
     /// Ajustes → Aplicar EN CALIENTE, estilo OBS: el motor NO se reinicia (el
@@ -708,6 +1205,9 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
 
     private func pushActiveScene() {
         engine.setActiveScene(activeScene)
+        // Punto único por donde pasa TODO cambio de escena/fuente: el espejo se
+        // entera aquí y no en cada sitio que muta (que sería donde se olvidaría).
+        syncMirror()
     }
 
     // MARK: - grabación
@@ -788,10 +1288,15 @@ final class StudioPreviewNSView: NSView {
 
     private func viewRect(of item: SceneItem) -> CGRect {
         let f = fittedRect()
-        return CGRect(x: f.minX + item.rect.minX * f.width,
-                      y: f.minY + item.rect.minY * f.height,
-                      width: item.rect.width * f.width,
-                      height: item.rect.height * f.height)
+        // El rect VIVO: durante un arrastre el valor bueno no está en `config`
+        // (que solo se escribe al soltar), sino en el camino vivo del
+        // controller. Sin esto, arrastrar el ESPEJO movería el programa pero
+        // dejaría el recuadro de selección del preview clavado — dos verdades.
+        let r = controller?.liveRect(of: item.id) ?? item.rect
+        return CGRect(x: f.minX + r.minX * f.width,
+                      y: f.minY + r.minY * f.height,
+                      width: r.width * f.width,
+                      height: r.height * f.height)
     }
 
     private func handlePoints(_ r: CGRect) -> [CGPoint] {
@@ -860,7 +1365,7 @@ final class StudioPreviewNSView: NSView {
         }
         r.size.width = max(minS, r.size.width)
         r.size.height = max(minS, r.size.height)
-        c.setItemRect(id, r, persist: false)
+        c.setItemRectLive(id, r)   // mismo camino vivo que el arrastre del espejo
         refreshOverlay()
     }
 
@@ -1082,6 +1587,7 @@ struct StudioRootView: View {
             .help(c.screenOK ? "Captura de pantalla activa"
                              : "Clic para aprobar «Grabación de pantalla» (tras un update se re-pide una vez). Se engancha solo al aprobar.")
             statusChip("Cámara", ok: c.cameraOK, starving: c.starved.contains(.camera))
+            mirrorButton
             if c.camFPS >= 0 { fpsChip }
             if let err = c.recordError {
                 Text(err)
@@ -1108,6 +1614,75 @@ struct StudioRootView: View {
                     .foregroundStyle(.red)
             }
         }
+    }
+
+    /// EL BOTÓN ESPEJO (v2.9). Clic = prender/apagar; el chevron abre rayos X,
+    /// fijar/soltar y la lectura cruda del sensor de oclusión.
+    ///
+    /// Vive AQUÍ, entre los sensores del top bar, y no en el panel Fuentes,
+    /// porque no es una propiedad de la fuente (eso es el rect, que ya está en
+    /// Fuentes): es un modo de trabajo que se prende y se apaga sin dejar de
+    /// mirar la toma. Al lado del chip Cámara porque de la cámara habla.
+    private var mirrorButton: some View {
+        let on = c.config.mirrorEnabled
+        let blocked = on && c.mirrorNote != nil
+        let warn = on && c.mirrorOccluding
+        let tint: Color = !on ? StudioSkin.dim
+            : (warn ? .orange : (blocked ? StudioSkin.dim : StudioSkin.mostaza))
+        var label = "Espejo"
+        if on, let note = c.mirrorNote { label = "Espejo — \(note)" }
+        else if warn { label = "Espejo · tapando" }
+        return Menu {
+            // RAYOS X y FIJAR viven AQUÍ, en el Estudio, y no en chips sobre el
+            // círculo (Daniel, 9 ago). Son decisiones de sesión: se toman una
+            // vez y se olvidan. Sobre la burbuja solo va lo que se hace
+            // mirándola — el tamaño.
+            Button { c.mirror.toggleXray() } label: {
+                Label(c.mirrorXray ? "Quitar rayos X" : "Rayos X (ver qué hay debajo)",
+                      systemImage: c.mirrorXray ? "eye.slash" : "eye")
+            }
+            Button { c.mirror.setLocked(!c.mirrorLocked) } label: {
+                Label(c.mirrorLocked ? "Soltar el espejo (que vuelva a recibir clics)"
+                                     : "Fijar el espejo (que no reciba clics)",
+                      systemImage: c.mirrorLocked ? "lock.open" : "lock")
+            }
+            Divider()
+            Section("Tamaño (los del Loom)") {
+                ForEach(CameraBubble.Size.allCases, id: \.self) { s in
+                    Button(s.label) { c.mirror.applySize(s) }
+                }
+            }
+            Divider()
+            Text("Detalle bajo la burbuja: \(c.mirrorEnergyText)")
+            Divider()
+            Button { c.toggleMirror() } label: {
+                Label(on ? "Apagar el espejo" : "Prender el espejo",
+                      systemImage: on ? "xmark.circle" : "circle.dashed")
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: on ? "circle.dashed.inset.filled" : "circle.dashed")
+                    .font(.system(size: 10))
+                Text(label).font(.system(size: 11))
+                if on && c.mirrorLocked {
+                    Image(systemName: "lock").font(.system(size: 9))
+                }
+                if on && c.mirrorXray {
+                    Image(systemName: "eye").font(.system(size: 9))
+                }
+            }
+            .foregroundStyle(tint)
+        } primaryAction: {
+            c.toggleMirror()
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .padding(.horizontal, 8).padding(.vertical, 3)
+        .background(on ? tint.opacity(0.14) : StudioSkin.panel)
+        .clipShape(Capsule())
+        .help(on
+              ? "La burbuja del programa, proyectada sobre la pantalla que se graba. Arrástrala ahí y el programa la sigue. Es invisible en el video."
+              : "Proyecta la burbuja sobre la pantalla que se graba, para ver qué estás tapando. Arrástrala y el programa la sigue. Nunca sale en el video.")
     }
 
     /// SENSOR a la vista (invariante 5b): fps de cámara entrando vs fps del
@@ -1418,6 +1993,13 @@ struct SourcesPanel: View {
                 Button("Cambiar cámara…") {
                     c.selectedItemID = item.id
                     cameraPickerItem = item.id
+                }
+                // El espejo también aquí: el botón vive en el top bar, pero
+                // quien viene a mover la burbuja llega por esta fila.
+                Button { c.toggleMirror() } label: {
+                    Label(c.config.mirrorEnabled ? "Quitar el espejo de la pantalla"
+                                                 : "Espejo en la pantalla",
+                          systemImage: c.config.mirrorEnabled ? "xmark.circle" : "circle.dashed")
                 }
                 Divider()
             }

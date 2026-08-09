@@ -36,6 +36,25 @@ let studioBenchSeconds: Int? = {
     return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 60
 }()
 
+/// QA DEL ESPEJO (`--mirrortest N`): prende el espejo sobre la config REAL y
+/// mide lo que no se puede suponer — que el panel NO se cuela en la captura
+/// (si se colara, la cara saldría duplicada en el video), que cae donde el
+/// programa dice, que el arrastre mueve el rect de escena y persiste, y cuánto
+/// cuesta en fps. Ver `StudioController.runMirrorTest`.
+let mirrorTestSeconds: Int? = {
+    guard let i = cliArgs.firstIndex(of: "--mirrortest") else { return nil }
+    return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 6
+}()
+
+/// QA VISUAL del espejo (`--mirrorlook N`): lo muestra N segundos CAPTURABLE
+/// (y solo en este modo) para poder revisar el diseño con un screenshot,
+/// paseándolo por los cuatro tamaños del Loom. Sin esto no hay forma de MIRAR
+/// el espejo: por diseño es invisible a cualquier captura.
+let mirrorLookSeconds: Int? = {
+    guard let i = cliArgs.firstIndex(of: "--mirrorlook") else { return nil }
+    return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 12
+}()
+
 /// QA del compresor (`--compresstest <dir>`): corre Transcoder sobre una COPIA
 /// del directorio dado y reporta antes/después. Existe porque comprimir es lo
 /// único del flujo que toca el MP4 en sitio: quiero poder probar el camino real
@@ -143,6 +162,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.info("SFCast arriba (demo=\(demo.map(String.init) ?? "no") selftest=\(selftest.map(String.init) ?? "no"))")
         if cliArgs.contains("--glowtest") {
             Task { @MainActor in await StudioController.shared.runGlowTest() }
+        } else if let seconds = mirrorLookSeconds {
+            Task { @MainActor in await StudioController.shared.runMirrorLook(seconds: seconds) }
+        } else if let seconds = mirrorTestSeconds {
+            Task { @MainActor in await StudioController.shared.runMirrorTest(seconds: seconds) }
         } else if let seconds = studioBenchSeconds {
             Task { @MainActor in await StudioController.shared.runBench(seconds: seconds) }
         } else if let seconds = studioTestSeconds {

@@ -64,7 +64,6 @@ final class StudioMirror: NSObject {
 
     private(set) var panel: MirrorPanel?
     private var content: MirrorContentView?
-    private var previewLayer: AVCaptureVideoPreviewLayer?
     private var chips: MirrorChipsPanel?
     private var chipHideTimer: Timer?
     private var placeholder: NSTextField?
@@ -89,8 +88,6 @@ final class StudioMirror: NSObject {
     /// RAYOS X: baja la opacidad para ver QUÉ hay debajo. Cero heurística, cero
     /// falsos positivos — el complemento honesto del sensor de oclusión.
     private(set) var xray = false
-    /// El sensor de oclusión encendió el aviso (aro punteado ámbar por fuera).
-    private(set) var occluding = false
 
     var isVisible: Bool { panel?.isVisible ?? false }
     var windowNumber: Int { panel?.windowNumber ?? -1 }
@@ -153,13 +150,30 @@ final class StudioMirror: NSObject {
                                   glow: cam.glow, opacity: cam.opacity,
                                   screenNumber: screen.displayNumber,
                                   screenMinSide: min(screen.frame.width, screen.frame.height))
-        if panel == nil { build(session: session, mirrored: mirrored) }
+        if panel == nil { build(hasCamera: session != nil) }
         if applied != layout {
             applied = layout
             apply(layout)
         }
         if !(panel?.isVisible ?? false) { panel?.orderFrontRegardless() }
         return true
+    }
+
+    /// EL MISMO FRAME QUE EL PROGRAMA. Antes el panel colgaba un
+    /// `AVCaptureVideoPreviewLayer` de la sesión: un segundo camino de render de
+    /// AVFoundation, compitiendo por GPU con el compositor sobre un display 5K.
+    /// Costaba caro de verdad — el render loop bajaba de 29 a 17 fps, y ese loop
+    /// alimenta AL ARCHIVO, no solo al preview: se habría grabado a 17 fps.
+    ///
+    /// Ahora recibe el CVPixelBuffer que YA está en el store, el mismísimo que
+    /// el compositor le pega al video. Cero capturas nuevas, cero render extra,
+    /// y la paridad deja de ser algo que hay que mantener: es la misma imagen.
+    /// A 15 Hz, que para un monitor sobra (Daniel: "no parten de la misma
+    /// función" — tenía razón, y esta es la cura de raíz).
+    func showFrame(_ pb: CVPixelBuffer?) {
+        guard isVisible, let pb,
+              let s = CVPixelBufferGetIOSurface(pb)?.takeUnretainedValue() else { return }
+        content?.showSurface(unsafeBitCast(s, to: IOSurface.self))
     }
 
     func hide() { _ = teardown(nil) }
@@ -183,12 +197,7 @@ final class StudioMirror: NSObject {
         dragAnchor = nil
         hideChips()
         chips = nil
-        if let l = previewLayer {
-            l.session = nil            // <- lo que de verdad libera la sesión
-            l.removeFromSuperlayer()
-        }
-        previewLayer = nil
-        content?.videoLayer = nil
+        content?.showSurface(nil)
         placeholder = nil
         content = nil
         panel?.orderOut(nil)
@@ -199,7 +208,7 @@ final class StudioMirror: NSObject {
 
     // MARK: - construcción
 
-    private func build(session: AVCaptureSession?, mirrored: Bool) {
+    private func build(hasCamera: Bool) {
         let p = MirrorPanel(contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: false)
@@ -218,20 +227,6 @@ final class StudioMirror: NSObject {
 
         let view = MirrorContentView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
         view.mirror = self
-        if let session {
-            let l = AVCaptureVideoPreviewLayer(session: session)
-            l.videoGravity = .resizeAspectFill
-            // El programa NO espejea (el compositor pega los frames crudos del
-            // data-output). Si aquí espejeáramos "porque se ve más natural", el
-            // espejo mentiría sobre el encuadre: se copia lo que trae la
-            // conexión real, no lo que se sienta bonito.
-            if let conn = l.connection, conn.isVideoMirroringSupported {
-                conn.automaticallyAdjustsVideoMirroring = false
-                conn.isVideoMirrored = mirrored
-            }
-            view.videoLayer = l
-            previewLayer = l
-        }
         p.contentView = view
         content = view
         panel = p
@@ -239,8 +234,8 @@ final class StudioMirror: NSObject {
         view.addTrackingArea(NSTrackingArea(rect: view.bounds,
                                             options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
                                             owner: view, userInfo: nil))
-        if session == nil { setPlaceholder("sin cámara") }
-        Log.info("Espejo: panel creado (sharingType=.none, espejeado=\(mirrored))")
+        if !hasCamera { setPlaceholder("sin cámara") }
+        Log.info("Espejo: panel creado (sharingType=.none, frames del compositor)")
     }
 
     private func apply(_ l: MirrorLayout) {
@@ -289,16 +284,6 @@ final class StudioMirror: NSObject {
     }
 
     func toggleXray() { setXray(!xray) }
-
-    /// Aviso del SENSOR de oclusión: aro punteado ámbar POR FUERA del aro real.
-    /// A propósito NO se repinta el aro del programa de otro color — el espejo
-    /// tiene que seguir enseñando cómo se ve el video, y la alarma debe leerse
-    /// como lo que es: UI, no programa.
-    func setOccluding(_ on: Bool) {
-        guard occluding != on else { return }
-        occluding = on
-        content?.setWarning(on)
-    }
 
     // MARK: - arrastre (lo que pidió Daniel: muevo aquí, se mueve el programa)
 
@@ -479,7 +464,7 @@ struct MirrorLayout: Equatable {
             let box = CGRect(x: local.midX - d / 2, y: local.midY - d / 2, width: d, height: d)
             return CGPath(roundedRect: box, cornerWidth: d / 2, cornerHeight: d / 2, transform: nil)
         }
-        let r = minSide * 0.035
+        let r = minSide * SceneGlow.cornerFraction
         return CGPath(roundedRect: local, cornerWidth: r, cornerHeight: r, transform: nil)
     }
 }
@@ -603,14 +588,13 @@ final class MirrorContentView: NSView {
 
     private let glowLayer = CALayer()        // sombra = halo (sin clip, respira)
     private let clipLayer = CALayer()        // el recorte del video vive aquí
-    private let warnLayer = CAShapeLayer()   // aviso de oclusión (punteado ámbar)
 
-    var videoLayer: AVCaptureVideoPreviewLayer? {
-        didSet {
-            oldValue?.removeFromSuperlayer()
-            if let v = videoLayer { clipLayer.addSublayer(v) }
-        }
-    }
+    /// CALayer pelón alimentado con el IOSurface del frame de cámara — el
+    /// MISMO que compone el programa. `resizeAspectFill` reproduce el
+    /// aspect-fill de `Compositor.place`; el recorte lo pone `clipLayer`.
+    private let videoLayer = CALayer()
+
+    func showSurface(_ s: IOSurface?) { videoLayer.contents = s }
 
     private var shape: CGPath?
     private var dragging = false
@@ -623,13 +607,11 @@ final class MirrorContentView: NSView {
         glowLayer.masksToBounds = false
         clipLayer.masksToBounds = true
         clipLayer.backgroundColor = NSColor.black.cgColor
-        warnLayer.fillColor = nil
-        warnLayer.strokeColor = NSColor(calibratedRed: 1.0, green: 0.567, blue: 0.004, alpha: 0.95).cgColor
-        warnLayer.lineDashPattern = [7, 5]
-        warnLayer.isHidden = true
+        videoLayer.contentsGravity = .resizeAspectFill
+        videoLayer.masksToBounds = true
+        clipLayer.addSublayer(videoLayer)
         layer?.addSublayer(glowLayer)
         layer?.addSublayer(clipLayer)
-        layer?.addSublayer(warnLayer)
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -639,38 +621,71 @@ final class MirrorContentView: NSView {
         shape = path
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        // El video se escala a LLENAR el rect del item y se recorta con la forma
-        // — exactamente el orden de `Compositor.place` (aspect-fill sobre el
-        // rect, máscara circular después).
-        clipLayer.frame = local
-        let mask = CAShapeLayer()
-        mask.path = path.shifted(dx: -local.minX, dy: -local.minY)
-        clipLayer.mask = mask
+        // RECORTE POR `cornerRadius`, NO por capa-máscara. Una `mask` obliga al
+        // window server a componer fuera de pantalla en CADA frame de cámara; con
+        // la ZV-E10 real eso le costaba al compositor la MITAD de su ritmo (el
+        // preview del Estudio caía de 28.9 a 15.4 fps con el espejo encendido —
+        // medido el 9 ago, y justo lo que Daniel notó a ojo). `cornerRadius` +
+        // `masksToBounds` es el camino rápido de CoreAnimation y da la misma
+        // figura, porque nuestras dos formas son exactamente eso: un círculo
+        // (radio = lado/2) o un rectángulo redondeado.
+        //
+        // El video sigue escalándose a LLENAR el rect del item y recortándose a
+        // la forma — el mismo orden de `Compositor.place`. Por eso la capa de
+        // recorte mide la FORMA y el video va dentro, desplazado: si el video
+        // midiera la forma, un rect no cuadrado se encuadraría distinto que en
+        // el programa.
+        let box = path.boundingBoxOfPath
+        clipLayer.frame = box
+        clipLayer.cornerRadius = l.circle ? min(box.width, box.height) / 2
+                                          : l.minSide * SceneGlow.cornerFraction
+        clipLayer.masksToBounds = true
+        clipLayer.mask = nil
         clipLayer.opacity = Float(l.opacity)
-        videoLayer?.frame = CGRect(origin: .zero, size: local.size)
+        videoLayer.frame = CGRect(x: local.minX - box.minX, y: local.minY - box.minY,
+                                  width: local.width, height: local.height)
 
+        // HALO HORNEADO. Una sombra VIVA de CALayer se vuelve a componer cada
+        // vez que cambia el árbol de capas — o sea, en cada frame de cámara — y
+        // sobre un display 5K eso le costaba al compositor del Estudio un tercio
+        // de su ritmo (preview de 28 a 20 fps con el espejo encendido, medido el
+        // 9 ago). Cocida a imagen UNA vez por layout, el halo deja de existir
+        // para el camino caliente: es exactamente lo que hace `glowCache` en el
+        // compositor, y por eso los dos aguantan lo mismo.
         glowLayer.frame = bounds
-        if let rgb = l.glow.rgb {
-            glowLayer.shadowColor = CGColor(srgbRed: rgb.r, green: rgb.g, blue: rgb.b, alpha: 1)
-            glowLayer.shadowOpacity = Float(SceneGlow.haloAlpha * l.opacity)
-            // CALayer difumina la sombra con un radio ~2σ, y CIGaussianBlur usa
-            // σ directo. Sin el 0.5 el halo del espejo salía el doble de ancho
-            // que el del video — que es justo la paridad que se busca aquí.
-            glowLayer.shadowRadius = l.halo * 0.5
-            glowLayer.shadowOffset = .zero
-            glowLayer.shadowPath = path
-        } else {
-            glowLayer.shadowOpacity = 0
-        }
-        // El aviso de oclusión vive FUERA de la forma: el espejo enseña cómo se
-        // ve el video, y la alarma se lee como UI.
-        let out = max(4.0, l.minSide * 0.02)
-        warnLayer.path = l.shapePath(in: local.insetBy(dx: -out, dy: -out))
-        warnLayer.lineWidth = max(1.5, l.minSide * 0.006)
+        glowLayer.shadowOpacity = 0
+        glowLayer.contents = l.glow.rgb == nil ? nil : bakeHalo(l, path: path)
+        glowLayer.contentsGravity = .center
+        glowLayer.contentsScale = window?.backingScaleFactor ?? 2
         CATransaction.commit()
     }
 
-    func setWarning(_ on: Bool) { warnLayer.isHidden = !on }
+    /// Dibuja el halo a bitmap: la forma rellena con su color, y CoreGraphics
+    /// pone el difuminado con `setShadow`. El interior lo tapa el video, así que
+    /// de esta imagen solo se ve el aura de alrededor.
+    ///
+    /// El blur de CoreGraphics es ~2σ, igual que la sombra de CALayer, mientras
+    /// `CIGaussianBlur` (el del compositor) usa σ directo: de ahí el 0.5, que es
+    /// lo que mantiene el mismo grosor de halo en el panel y en el video.
+    private func bakeHalo(_ l: MirrorLayout, path: CGPath) -> CGImage? {
+        guard let rgb = l.glow.rgb else { return nil }
+        let scale = window?.backingScaleFactor ?? 2
+        let w = Int((bounds.width * scale).rounded()), h = Int((bounds.height * scale).rounded())
+        guard w > 0, h > 0,
+              let cs = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: cs,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        ctx.scaleBy(x: scale, y: scale)
+        let color = CGColor(srgbRed: rgb.r, green: rgb.g, blue: rgb.b,
+                            alpha: SceneGlow.haloAlpha * l.opacity)
+        ctx.setShadow(offset: .zero, blur: l.halo * 0.5, color: color)
+        ctx.setFillColor(color)
+        ctx.addPath(path)
+        ctx.fillPath()
+        return ctx.makeImage()
+    }
 
     /// Solo la FORMA recibe clics — las esquinas del cuadro que sobran alrededor
     /// del círculo siguen siendo de la app que estés usando.

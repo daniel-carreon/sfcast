@@ -78,6 +78,12 @@ enum SceneGlow: String, Codable, CaseIterable {
     static func halo(itemMinSide: Double, canvasMinSide: Double) -> Double {
         min(itemMinSide * haloFraction, canvasMinSide * haloCap)
     }
+
+    /// Radio de esquina de una cámara rectangular, en fracción del lado menor.
+    /// Vive AQUÍ y no duplicado en cada lado porque el compositor y el espejo
+    /// tienen que redondear igual: que no lo hicieran fue el bug del 9 ago (el
+    /// panel redondeado y el video a escuadra).
+    static let cornerFraction: Double = 0.035
 }
 
 /// Un item DENTRO de una escena: qué fuente, dónde y cómo.

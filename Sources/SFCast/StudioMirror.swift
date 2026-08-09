@@ -377,27 +377,27 @@ final class StudioMirror: NSObject {
         onResize?(geo.normalizedRect(fromScreen: r), true)
     }
 
-    /// Un escalón arriba o abajo en la escalera del Loom (S → M → L → completo).
-    /// Arranca desde el tamaño MÁS CERCANO al actual, para que el primer clic
-    /// haga algo sensato aunque la burbuja venga de un arrastre a mano.
-    fileprivate func stepSize(bigger: Bool) {
-        let ladder = CameraBubble.Size.allCases   // s, m, l, full
-        let d = currentDiameter ?? CameraBubble.Size.m.diameter
-        var idx = 0
-        var best = CGFloat.greatestFiniteMagnitude
-        for (i, s) in ladder.enumerated() where s != .full {
-            let gap = abs(s.diameter - d)
-            if gap < best { best = gap; idx = i }
+    /// El tamaño actual, como uno de los CUATRO del Loom: el más cercano por
+    /// diámetro. Lo necesita `cycleSize` para saber de dónde parte cuando la
+    /// burbuja viene de un arrastre a mano.
+    var currentSize: CameraBubble.Size {
+        guard let d = currentDiameter else { return .m }
+        if let l = applied, !l.circle, l.rect.width > CameraBubble.Size.l.diameter { return .full }
+        var best = CameraBubble.Size.m
+        var gap = CGFloat.greatestFiniteMagnitude
+        for s in CameraBubble.Size.allCases where s != .full {
+            let g = abs(s.diameter - d)
+            if g < gap { gap = g; best = s }
         }
-        // Si ya es más grande que L, el siguiente escalón hacia arriba es
-        // "completo"; hacia abajo se entra por L.
-        if d > CameraBubble.Size.l.diameter * 1.05 {
-            idx = bigger ? ladder.count - 1 : ladder.firstIndex(of: .l) ?? 2
-            if bigger { applySize(.full); return }
-            applySize(.l); return
-        }
-        let next = max(0, min(ladder.count - 1, idx + (bigger ? 1 : -1)))
-        applySize(ladder[next])
+        return best
+    }
+
+    /// Doble clic = siguiente tamaño, EXACTAMENTE como la burbuja del Loom
+    /// (`CameraBubble.cycleSize`). Mismo gesto, mismo orden, misma escalera.
+    fileprivate func cycleSize() {
+        let all = CameraBubble.Size.allCases
+        let idx = all.firstIndex(of: currentSize) ?? 0
+        applySize(all[(idx + 1) % all.count])
     }
 
     // MARK: - chips al hover (el mismo idioma que los del Loom)
@@ -436,13 +436,9 @@ final class StudioMirror: NSObject {
     /// son decisiones de sesión, no gestos sobre el círculo (pedido de Daniel,
     /// 9 ago: "el ojo pensaba verlo en el studio, no en el círculo").
     @objc fileprivate func chipTapped(_ sender: NSButton) {
-        switch sender.identifier?.rawValue {
-        case "menos": stepSize(bigger: false)
-        case "mas":   stepSize(bigger: true)
-        case "full":  applySize(.full)
-        case "close": onRequestClose?()
-        default: break
-        }
+        guard let id = sender.identifier?.rawValue else { return }
+        if id == "close" { onRequestClose?(); return }
+        if let s = CameraBubble.Size(rawValue: id) { applySize(s) }
     }
 }
 
@@ -684,6 +680,15 @@ final class MirrorContentView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         guard let m = mirror else { return }
+        // Doble clic = ciclar tamaño, el mismo gesto que la burbuja del Loom
+        // (`BubbleView.mouseDown`). Quien ya usa el Loom no tiene que aprender
+        // nada nuevo aquí.
+        if event.clickCount == 2 {
+            dragging = false
+            dragOrigin = nil
+            m.cycleSize()
+            return
+        }
         dragging = true
         dragOrigin = NSEvent.mouseLocation
         m.dragBegan()
@@ -773,28 +778,38 @@ final class MirrorChipsPanel: NSPanel {
         stack.orientation = .horizontal
         stack.spacing = 2
         stack.edgeInsets = NSEdgeInsets(top: 3, left: 8, bottom: 3, right: 8)
-        // Iconos de LÍNEA (SF Symbols — el equivalente nativo de Lucide), cero
-        // emojis: un emoji se pinta con la fuente de color del sistema y ni
-        // hereda el tint ni pesa lo mismo en cada Mac.
-        let defs: [(String, String, String)] = [
-            ("menos", "minus", "Más chica (S · M · L, los tamaños del Loom)"),
-            ("mas", "plus", "Más grande (S · M · L, los tamaños del Loom)"),
-            ("full", "arrow.up.left.and.arrow.down.right", "Tamaño completo"),
-            ("close", "xmark", "Apagar el espejo"),
-        ]
-        for (id, symbol, tip) in defs {
-            let b = NSButton(title: "", target: nil, action: #selector(StudioMirror.chipTapped(_:)))
-            b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)?
-                .withSymbolConfiguration(.init(pointSize: 12, weight: .semibold))
-            b.imagePosition = .imageOnly
+        // LOS CHIPS DEL LOOM, no unos nuevos. Se leen de `CameraBubble.Size`
+        // (chip "S·M·L·⛶" y label "Chica/Mediana/Grande/Pantalla completa"), que
+        // es donde ya estaban pulidos: mismo gesto, mismo orden, mismas
+        // etiquetas. Si mañana el Loom gana un tamaño, el espejo lo hereda sin
+        // que nadie toque este archivo. (Daniel, 9 ago: "reutilizar lo que ya
+        // habíamos construido allá en lugar de lo que tú construiste".)
+        // Nada de esto es emoji: S/M/L son letras y ⛶ es un glifo geométrico
+        // monocromo, así que heredan el tint igual que un SF Symbol.
+        for s in CameraBubble.Size.allCases {
+            let b = NSButton(title: s.chip, target: nil, action: #selector(StudioMirror.chipTapped(_:)))
             b.bezelStyle = .inline
             b.isBordered = false
+            b.font = .systemFont(ofSize: 13, weight: .semibold)
             b.contentTintColor = .white
-            b.identifier = NSUserInterfaceItemIdentifier(id)
-            b.toolTip = tip
+            b.identifier = NSUserInterfaceItemIdentifier(s.rawValue)
+            b.toolTip = s.label
             stack.addArrangedSubview(b)
             buttons.append(b)
         }
+        // Lo único que el Loom no necesita: apagar el espejo (allá la burbuja
+        // ES la grabación, aquí es una ayuda que se quita).
+        let close = NSButton(title: "", target: nil, action: #selector(StudioMirror.chipTapped(_:)))
+        close.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Apagar el espejo")?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
+        close.imagePosition = .imageOnly
+        close.bezelStyle = .inline
+        close.isBordered = false
+        close.contentTintColor = .white
+        close.identifier = NSUserInterfaceItemIdentifier("close")
+        close.toolTip = "Apagar el espejo"
+        stack.addArrangedSubview(close)
+        buttons.append(close)
         stack.frame = host.bounds
         stack.autoresizingMask = [.width, .height]
         host.addSubview(stack)

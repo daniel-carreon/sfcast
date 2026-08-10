@@ -1130,3 +1130,213 @@ entrega un cuadro fijo, y entonces el watchdog **se declaraba satisfecho**.
 Ahora solo reintenta si la cámara ELEGIDA reapareció, cada 30 s. Y de paso: si al
 arrancar la resuelta no es la elegida, se avisa — grabar una hora con la webcam
 equivocada es un desastre silencioso, y era posible hasta hoy.
+
+## v3.4 — Los 5m53s del video de 4:28: el compresor peleaba contra la red de hoy (10 ago 2026)
+
+Daniel preguntó por qué SFCast tarda tanto en publicar comparado con Loom. Se midió
+el pipeline entero en vivo, sobre un video real de **4:28** (`ib9z3jvsvog1`):
+
+| Fase | Duración | % |
+|---|---|---|
+| Stop → link al portapapeles | instantáneo | — |
+| Cerrar MP4 + placeholder | 10s | 3% |
+| **Comprimir con ffmpeg en el Mac** | **147s** | **42%** |
+| Subir 184.6 MB por rsync | 16s | 5% |
+| Poller (cada 8s) | 5s | 1% |
+| Concat + thumbnail | 20s | 6% |
+| **Whisper en el VPS** | **153s** | **43%** |
+| LLM (título + capítulos) | 2s | 1% |
+| **TOTAL** | **5m 53s** | |
+
+Dos cerdos se comían el 85%. Lo demás era ruido.
+
+### El compresor estaba trabajando EN CONTRA (y era código correcto)
+
+`Transcoder.swift` se escribió el 15 jul sobre una premisa **medida entonces**: la
+subida iba a ~0.5 Mbps, así que comprimir 5x era comprimir la espera 5x. Impecable
+para ese mundo.
+
+Ese mundo se acabó con la mudanza a Morelia. Medición del 10 ago, con el mismo
+comando rsync que usa la app: **106 Mbps de subida (13.3 MB/s reales)**. Con eso:
+
+- **Con compresión:** 147s de encode + 16s de subida = **163s**
+- **Sin compresión:** 778.9 MB crudos a 13.3 MB/s = **59s**
+
+El compresor costaba **104 segundos netos** y encima degradaba la imagen.
+
+**La lección no es "el compresor estaba mal".** Estaba bien y sus mediciones eran
+honestas. Lo que faltó fue el **sensor de su propia premisa**: nadie volvió a medir
+el ancho de banda, así que el órgano siguió optimizando para una restricción que ya
+no existía. Es el patrón del órgano sin sensor otra vez, pero en su forma más
+tramposa: no falla, no hace ruido, y sigue haciendo bien un trabajo que ya no hay
+que hacer.
+
+### La raíz de TODO: se capturaba a 4096x2304
+
+`SCRecordingOutput` no expone bitrate, y a nativo Retina el archivo NACÍA a
+**23 Mbps** (778.9 MB por 4:28). Ese tamaño explicaba las dos cosas a la vez:
+
+- `targetBitrate` escala por píxeles ⇒ objetivo 1200 × 4.55 = **5461 kbps**.
+- El encoder por hardware, que a 1080p corre a ~7x tiempo real, **a 4K cae a 0.55x**
+  (de ahí los 147s para 268s de video).
+
+Ahora `AppSettings.captureMaxHeight = 1440` capa la captura. Medido en la prueba E2E:
+4096x2304 → **2560x1440** (escalado exacto, sin deformar) y el archivo baja de
+23 Mbps a **7.7 Mbps**: **3x más chico desde el origen**, sin re-encodear nada.
+
+Loom, para referencia, graba a 1080p.
+
+### La pre-subida mientras grabas, y por qué no puede costar un video
+
+Es el truco por el que Loom se siente instantáneo: cuando le das stop, ya tiene
+arriba casi todo. `Uploader.liveSync` hace `rsync --inplace --append` del directorio
+de sesión cada 20s mientras `state == .recording`.
+
+`--append` **asume** que el remoto es un prefijo del local. Un MP4 en escritura lo
+cumple casi siempre (el mdat crece secuencial, el moov se escribe al cerrar), pero
+la garantía no puede depender de eso. La garantía real es que **el rsync del stop
+corre SIN `--append`** — delta completo — y deja el remoto byte a byte igual al
+local pase lo que pase.
+
+Eso se verificó rompiendo el remoto a propósito: 10 MB de ceros en medio del archivo
+más la cola truncada. El rsync final lo dejó **idéntico en 2.1s**. La pre-subida solo
+puede ahorrar tiempo, jamás costar un video.
+
+Dos detalles que sí importan:
+
+- **Nunca crea `UPLOAD_DONE`.** Es ese marcador el que hace visible una sesión al
+  poller; sin él, el worker no puede ver una sesión a medias.
+- **Cancelar una grabación borra lo pre-subido** (`Uploader.discardRemote`). Sin eso,
+  cada cancelación dejaría un directorio a medias en `incoming/` que nadie mira nunca
+  — que es exactamente la basura que encontramos del 15 jul: 2 sesiones huérfanas,
+  95 MB, 26 días invisibles.
+
+### Resultado medido (demo E2E sin manos, contra un incoming de pruebas)
+
+```
+captura: 4096x2304 → 2560x1440 (tope 1440p)
+live-sync: 2 tandas pre-subidas durante la grabación
+Upload OK → … (intento 1, 5.5s de cola)      ← 163s en la ruta vieja
+```
+
+Sin línea de `Transcoder:` (compresión apagada) y los dos segmentos llegaron con
+**md5 idéntico** al local.
+
+El segundo de "cola" en `Upload OK` es el **sensor del live-sync**: con la pre-subida
+funcionando tiene que quedar en pocos segundos aunque el video pese cientos de MB.
+Si vuelve a crecer, el live-sync dejó de servir y hay que mirarlo.
+
+### Lo que quedó FUERA y por qué
+
+El lado VPS (publicación en dos tiempos, transcript por Groq, transcode a H.264) NO
+se tocó en esta tanda: otra sesión estaba trabajando `infra/sfcast_worker.py` sin
+commitear y corriendo un backfill a R2. Dos plumas sobre el mismo archivo se pisan.
+
+Queda medido y listo para quien lo tome:
+
+- **Groq `whisper-large-v3-turbo`: 2.0s contra los 153s de faster-whisper**
+  estrangulado por `CPUQuota=200%` (2 de 8 cores). Transcript equivalente: 97
+  segmentos / 3,925 chars contra 107 / 3,969. Costo $0.003 por video.
+- **La página espera al transcript sin necesidad.** El `video.mp4` estuvo
+  reproducible en el servidor 2m35s antes de que el worker escribiera el viewer.
+  Loom publica el reproductor en cuanto el media aterriza y mete el transcript
+  después.
+- **Se sirve HEVC 4096x2304, y eso NO reproduce en Chrome/Windows** ni en Firefox
+  ni en buena parte de Android. Verificado también contra R2: mismo archivo, mismo
+  códec. El transcode a H.264 no es optimización, es corrección — y tiene que
+  correr ANTES del espejo a R2 para no subir dos veces.
+
+## v3.5 — El VPS: publicar en tres fases, y el códec que nadie estaba mirando (10 ago 2026)
+
+Continuación de v3.4, ya con el lado VPS. Mismo video de referencia (`ib9z3jvsvog1`,
+4:28): antes **5m53s** de punta a punta.
+
+### El reproductor ya no espera al transcript
+
+El `video.mp4` estaba reproducible en el servidor **2m35s antes** de que la página
+dejara de decir "Procesando". Se hacía esperar a un video por su transcript, que es
+justo lo que nadie necesita para ver un video.
+
+`process_session` ahora corre en tres fases:
+
+1. **Se puede VER** — concat + thumbnail → publica con `ready:false`.
+2. **Se puede LEER** — transcript + título + capítulos → republica con `ready:true`.
+3. **Se puede DISTRIBUIR** — transcode a H.264 → espejo a R2.
+
+La página abierta se completa **sola**: sondea `data.json` cada 4s y pinta lo que
+falta sin recargar y sin tocar el `<video>`. Recargar habría reiniciado el video que
+la persona ya está viendo — por eso se pinta en vez de refrescar.
+
+Medido con una sesión real de 45s: **reproducible en 1s, completa en 4s.**
+
+### Groq: 2.0s contra 153s, y por qué el local se queda
+
+El cuello no era el modelo, era el techo: el servicio corre con `CPUQuota=200%`
+sobre 3 cores permitidos — **2 de los 8** del EPYC — y ese techo existe para que una
+clase en vivo del Meet siempre gane. Subirlo habría sido romper un invariante bueno
+para arreglar el síntoma.
+
+Groq hace lo mismo en 2.0s y el transcript es equivalente (97 segmentos / 3,925
+chars contra 107 / 3,969). $0.003 por video, ~2 centavos al mes a la cadencia real.
+
+`faster-whisper` se queda de red de seguridad a propósito: así un corte de internet
+o una llave vencida **degradan** el servicio (más lento) en vez de **tumbarlo** (sin
+transcript). Solo se carga si se usa, o sea que ya no cuesta 1.4 GB de RAM ni 80s de
+arranque.
+
+### El hallazgo que nadie estaba buscando: se servía HEVC
+
+`SCRecordingOutput` **solo** escribe HEVC — está forzado en el Mac a propósito,
+porque esquiva el tope de H.264 a 4096x2304 en Retina/5K. Excelente para grabar.
+Pésimo para distribuir: HEVC no reproduce en Chrome/Windows sin la extensión de pago
+de Microsoft, ni en Firefox en varias plataformas, ni en buena parte de Android.
+
+Verificado el mismo día contra R2: el video del anuncio a ~570 miembros se servía
+como `hevc/hvc1 4096x2304`, 193 MB. **Reproductor en negro para una parte de la
+comunidad, y en silencio** — un video que no carga no genera reporte; la gente asume
+que está roto y se va.
+
+Por eso la fase 3 no es optimización, es corrección. Y va **antes** del espejo a R2:
+subir el HEVC y reemplazarlo después es pagar la subida dos veces y dejar un rato el
+archivo malo como el público.
+
+Resultado en el video del anuncio: **194 MB → 27 MB**, `h264/avc1 2560x1440`, 92s de
+transcode que nadie esperó. `backfill_h264.py` cerró el pasado: 10 casts nativos en
+HEVC (los 52 importados de Loom ya venían compatibles y se saltaron solos).
+
+### Las huérfanas: recuperar antes que borrar
+
+El sensor nuevo (`orphans()`) delató 2 sesiones del 15 jul sin `UPLOAD_DONE` — 26
+días invisibles, porque el poller solo mira lo que tiene el marcador. Un órgano sin
+sensor se ve idéntico a uno sano.
+
+Lo fácil era borrarlas: 95 MB de basura de un día de pruebas. Antes de tocarlas se
+revisó, y resultó que **eran las únicas copias** (sin respaldo local, fuera del
+historial de la app) y estaban **truncadas** — el meta decía 45.9s y el archivo tenía
+39.9s: la subida murió a media transferencia.
+
+Se procesaron en vez de borrarse. Salieron «Edición de Video: Ajuste de Elementos y
+Transición a IA» y «Mejoras en la interfaz de grabación de SaaS Factory». Contenido
+real. **Ante la duda, recuperar: borrar es la única operación que no se deshace.**
+
+### Un sensor propio que exageraba, cazado en el acto
+
+`sin_distribuir_h264` contaba "sin marcador" como "sin distribuir", y marcaba 51
+pendientes que en realidad ya eran H.264 (los importados de Loom, que nunca pasaron
+por el transcodificador porque no lo necesitaban).
+
+Es exactamente el defecto que se le señaló ese mismo día al verificador de
+`publish_cast_r2.py` (decía 0/9 publicados y las 9 URLs respondían 200). Un sensor
+que exagera se deja de leer, y el día que tenga razón nadie le va a creer. Se
+estamparon los marcadores de los ya-compatibles y el contador dice la verdad: 0.
+
+### El antes y el después
+
+| | Antes | Después |
+|---|---|---|
+| Stop → se puede VER | 5m 53s | **~40s** (1s de worker + subida ya casi hecha) |
+| Stop → transcript listo | 5m 53s | **~45s** |
+| Transcript | 153s (2 de 8 cores) | **2.0s** (Groq) |
+| Compresión en el Mac | 147s | **0s** (murió) |
+| Cola de subida al detener | 163s | **5.5s** |
+| Códec servido | HEVC 4K (negro en Chrome) | **H.264 1440p** |

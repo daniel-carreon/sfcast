@@ -61,6 +61,16 @@ final class CaptureEngine: NSObject {
             cfg.height = Int(w.frame.height * scale)
         }
 
+        // TOPE DE RESOLUCIÓN (10 ago 2026). Ver `AppSettings.captureMaxHeight`
+        // para las mediciones: capturar nativo daba 4096x2304 / 23 Mbps y ESE
+        // tamaño era la raíz de toda la lentitud del pipeline, no el VPS.
+        let capped = Self.cap(width: cfg.width, height: cfg.height,
+                              maxHeight: settings.captureMaxHeight)
+        if capped != (cfg.width, cfg.height) {
+            Log.info("captura: \(cfg.width)x\(cfg.height) → \(capped.0)x\(capped.1) (tope \(settings.captureMaxHeight)p)")
+            cfg.width = capped.0
+            cfg.height = capped.1
+        }
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(settings.fps))
         cfg.showsCursor = true
         cfg.capturesAudio = settings.systemAudioEnabled
@@ -130,6 +140,23 @@ final class CaptureEngine: NSObject {
     func reset() {
         segmentURLs = []
         segIndex = 0
+    }
+
+    /// Reduce a `maxHeight` conservando el aspecto. `maxHeight <= 0` o una
+    /// captura que ya es más chica se devuelven intactas (nunca se AGRANDA:
+    /// escalar hacia arriba solo inventa píxeles y engorda el archivo).
+    ///
+    /// GOTCHA: las dimensiones salen PARES a la fuerza. yuv420p submuestrea
+    /// croma 2x2, así que un ancho o alto impar hace que el encoder rechace la
+    /// configuración y el segmento no arranque.
+    static func cap(width: Int, height: Int, maxHeight: Int) -> (Int, Int) {
+        guard maxHeight > 0, width > 0, height > 0, height > maxHeight else {
+            return (width, height)
+        }
+        let scale = Double(maxHeight) / Double(height)
+        let w = max(2, Int((Double(width) * scale).rounded()) & ~1)
+        let h = max(2, maxHeight & ~1)
+        return (w, h)
     }
 
     /// startCapture con RED DE SEGURIDAD real: si en `seconds` no arrancó (tccd

@@ -26,13 +26,19 @@ final class RecordingController {
     var settings = AppSettings.load()
     var noUpload = false                 // modo --demo --no-upload
 
-    private(set) var state: State = .idle { didSet { onStateChange?() } }
+    private(set) var state: State = .idle {
+        didSet {
+            onStateChange?()
+            liveSyncFollow(from: oldValue, to: state)
+        }
+    }
     private(set) var mode: Mode = .screen
     private(set) var videoID = ""
     private var sessionDir: URL!
     private var startedAt = Date()
     private var windowTarget: SCWindow?
     private var generation = 0           // candado anti-resurrección (ver header)
+    private var liveSyncTask: Task<Void, Never>?
 
     // camOnly: grabación directa de la cámara (mismo session de la burbuja)
     private var movieOutput: AVCaptureMovieFileOutput?
@@ -341,6 +347,7 @@ final class RecordingController {
             // editar) y NO se sube. Se empuja al VPS luego desde el Historial
             // ("↑ subir"). Dejamos meta.json escrito para ese push y abrimos el
             // Finder en la carpeta (queda a la mano para arrastrar al editor).
+            await liveSyncSettle()
             writeMeta(to: dir, id: id, modeRaw: modeRaw, began: began,
                       duration: duration, segments: segments)
             notify("SFCast — guardado en tu Mac 💾",
@@ -356,6 +363,8 @@ final class RecordingController {
                 stoppedAt: ISO8601DateFormatter().string(from: Date()),
                 durationSeconds: duration,
                 segments: segments)
+            // ANTES del rsync final: deja cerrar el pre-sync en vuelo.
+            await liveSyncSettle()
             ok = await performUpload(id: id, dir: dir, url: url,
                                      uploaderSettings: uploaderSettings, meta: meta,
                                      openBrowser: true)
@@ -363,6 +372,36 @@ final class RecordingController {
             History.upsert(entry)
         }
         return (url, ok)
+    }
+
+    /// Prende y apaga la pre-subida siguiendo el estado, sin que ninguna ruta de
+    /// arranque o de cancelación tenga que acordarse de hacerlo a mano.
+    ///
+    /// Vive solo mientras se GRABA: en pausa se apaga (no hay nada creciendo) y
+    /// al reanudar vuelve. Al entrar a `.stopping` se corta ANTES de que arranque
+    /// el rsync final, que es la razón de ser de todo esto: dos rsync escribiendo
+    /// el mismo archivo remoto a la vez es justo lo que no queremos.
+    private func liveSyncFollow(from old: State, to new: State) {
+        guard old != new else { return }
+        if new == .recording {
+            guard settings.liveSyncWhileRecording, !noUpload, settings.autoUpload,
+                  liveSyncTask == nil, let dir = sessionDir else { return }
+            let uploader = Uploader(settings: settings)
+            let id = videoID
+            liveSyncTask = Task { await uploader.liveSync(sessionDir: dir, id: id) }
+        } else if old == .recording {
+            liveSyncTask?.cancel()
+        }
+    }
+
+    /// Espera a que la pre-subida termine de verdad. `cancel()` solo pide la
+    /// salida; si hay un rsync EN VUELO hay que dejarlo cerrar antes de lanzar
+    /// el final, o los dos escriben el mismo archivo remoto.
+    private func liveSyncSettle() async {
+        guard let t = liveSyncTask else { return }
+        t.cancel()
+        await t.value
+        liveSyncTask = nil
     }
 
     /// El tail de subida al VPS: placeholder → navegador → comprime → rsync →
@@ -475,7 +514,13 @@ final class RecordingController {
             }
             bubble.hide()
             panel.hide()
+            let discardedID = videoID
+            let discardSettings = settings
             try? FileManager.default.removeItem(at: sessionDir)
+            // La pre-subida pudo dejar bytes arriba: sin UPLOAD_DONE el poller
+            // ni los mira, así que se quedarían de basura invisible en el VPS.
+            await liveSyncSettle()
+            Task { await Uploader(settings: discardSettings).discardRemote(id: discardedID) }
             Log.info("Grabación cancelada y descartada")
             state = .idle
         }

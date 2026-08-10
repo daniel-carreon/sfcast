@@ -94,6 +94,66 @@ struct Uploader {
         """
     }
 
+    /// Pre-sube la sesión MIENTRAS sigues grabando, para que al detener solo
+    /// quede la COLA por subir. Es el truco por el que Loom se siente
+    /// instantáneo: cuando le das stop, ya tiene arriba casi todo.
+    ///
+    /// CORRECTITUD (lo único que de verdad importa aquí): usa `--inplace
+    /// --append`, que asume que el archivo remoto es un PREFIJO del local. Un
+    /// MP4 en escritura lo cumple casi siempre — el mdat crece secuencial y el
+    /// moov se escribe al cerrar — pero si el writer escribiera hacia atrás, el
+    /// remoto quedaría mal. NO IMPORTA: el rsync del stop corre SIN `--append`,
+    /// o sea delta completo, y deja el remoto byte a byte igual al local pase lo
+    /// que pase. Este lazo solo puede AHORRAR tiempo, jamás costar un video.
+    ///
+    /// Nunca crea UPLOAD_DONE: el worker del VPS no puede ver una sesión a
+    /// medias porque es ESE marcador el que la hace visible al poller.
+    ///
+    /// Silencioso a propósito: nada de lo que pase aquí toca la UI ni el
+    /// historial. Si el VPS no responde, se reintenta al siguiente tick.
+    func liveSync(sessionDir: URL, id: String, everySeconds: Double = 20) async {
+        let remoteDir = "\(settings.remoteIncoming)/\(id)"
+        var ticks = 0, bootstrapped = false
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: UInt64(everySeconds * 1_000_000_000))
+            if Task.isCancelled { break }
+            if !bootstrapped {
+                guard (try? await run("/usr/bin/ssh",
+                    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                     settings.sshHost, "mkdir -p '\(remoteDir)'"])) != nil else { continue }
+                bootstrapped = true
+            }
+            let ok: Void? = try? await run("/usr/bin/rsync",
+                ["-a", "--inplace", "--append", "--partial",
+                 "-e", "/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=10",
+                 sessionDir.path + "/", "\(settings.sshHost):\(remoteDir)/"])
+            if ok != nil { ticks += 1 }
+        }
+        if ticks > 0 { Log.info("live-sync: \(ticks) tandas pre-subidas durante la grabación") }
+    }
+
+    /// Borra en el VPS lo que la pre-subida haya alcanzado a dejar de una sesión
+    /// que terminaste cancelando.
+    ///
+    /// Sin esto, cada grabación cancelada dejaría un directorio a medias en
+    /// `incoming/` para siempre — sin `UPLOAD_DONE` el poller ni lo mira, así
+    /// que nadie se enteraría nunca. Es exactamente la basura silenciosa que
+    /// encontramos del 15 jul: 2 sesiones huérfanas, 95 MB, 26 días invisibles.
+    ///
+    /// El id se valida contra la MISMA gramática que exige el worker, para que
+    /// esto no pueda apuntar fuera de `remoteIncoming`.
+    func discardRemote(id: String) async {
+        guard id.range(of: "^[a-z0-9-]{4,40}$", options: .regularExpression) != nil else {
+            Log.error("discardRemote: id inválido «\(id)» — no borro nada")
+            return
+        }
+        let remoteDir = "\(settings.remoteIncoming)/\(id)"
+        try? await run("/usr/bin/ssh",
+                       ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                        settings.sshHost, "rm -rf -- '\(remoteDir)'"])
+        Log.info("Pre-subida descartada en el VPS → \(remoteDir)")
+    }
+
     func upload(sessionDir: URL, meta: Meta) async throws {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -102,6 +162,7 @@ struct Uploader {
         let remoteDir = "\(settings.remoteIncoming)/\(meta.id)"
         var lastError: Error?
         for attempt in 1...3 {
+            let t0 = Date()
             do {
                 try await run("/usr/bin/ssh",
                               ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
@@ -116,7 +177,12 @@ struct Uploader {
                 try await run("/usr/bin/ssh",
                               ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
                                settings.sshHost, "touch '\(remoteDir)/UPLOAD_DONE'"])
-                Log.info("Upload OK → \(remoteDir) (intento \(attempt))")
+                // El SEGUNDO es el sensor del live-sync: con la pre-subida
+                // funcionando esto tiene que quedar en pocos segundos aunque el
+                // video pese cientos de MB. Si vuelve a crecer, el live-sync
+                // dejó de servir y hay que mirarlo (lección: órgano sin sensor).
+                Log.info(String(format: "Upload OK → %@ (intento %d, %.1fs de cola)",
+                                remoteDir, attempt, Date().timeIntervalSince(t0)))
                 return
             } catch {
                 lastError = error

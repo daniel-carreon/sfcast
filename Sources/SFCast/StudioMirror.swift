@@ -277,6 +277,28 @@ final class StudioMirror: NSObject {
 
     // MARK: - modos (fijar / rayos X / aviso de oclusión)
 
+    /// ACUSE DEL MARCADOR — un destello en el aro del espejo.
+    ///
+    /// Va AQUÍ y no en la ventana del Estudio por dos razones: el espejo está en
+    /// la pantalla que Daniel mira mientras presenta (la ventana está en el otro
+    /// monitor, lección repetida cuatro veces hoy), y lleva `sharingType = .none`,
+    /// así que **lo ve él y no sale en el video**. Sin acuse, un marcador se pulsa
+    /// dos veces "por si acaso" y deja de ser una señal limpia.
+    func flash(_ color: FlashColor) {
+        guard let content else { return }
+        content.flash(color)
+    }
+
+    enum FlashColor {
+        case ambar, verde
+        var cg: CGColor {
+            switch self {
+            case .ambar: return CGColor(red: 1.0, green: 0.567, blue: 0.004, alpha: 1)
+            case .verde: return CGColor(red: 0.2, green: 0.85, blue: 0.4, alpha: 1)
+            }
+        }
+    }
+
     func setLocked(_ on: Bool) {
         locked = on
         panel?.ignoresMouseEvents = on
@@ -637,6 +659,29 @@ final class MirrorContentView: NSView {
         layer?.addSublayer(clipLayer)
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Un anillo de color que aparece y se desvanece en ~0.9 s. Capa PROPIA:
+    /// tocar el halo real cambiaría lo que el espejo está enseñando, y el espejo
+    /// tiene que seguir siendo fiel al programa (invariante de v2.9).
+    func flash(_ color: StudioMirror.FlashColor) {
+        let ring = CALayer()
+        ring.frame = bounds
+        ring.borderColor = color.cg
+        ring.borderWidth = 10
+        ring.cornerRadius = clipLayer.cornerRadius > 0 ? clipLayer.cornerRadius + 6 : 12
+        ring.shadowColor = color.cg
+        ring.shadowOpacity = 0.95
+        ring.shadowRadius = 18
+        ring.shadowOffset = .zero
+        ring.opacity = 0
+        layer?.addSublayer(ring)
+        let anim = CAKeyframeAnimation(keyPath: "opacity")
+        anim.values = [0, 1, 1, 0]
+        anim.keyTimes = [0, 0.12, 0.55, 1]
+        anim.duration = 0.9
+        ring.add(anim, forKey: "flash")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.95) { ring.removeFromSuperlayer() }
+    }
 
     func applyLayout(_ l: MirrorLayout) {
         let local = CGRect(x: l.pad, y: l.pad, width: l.rect.width, height: l.rect.height)

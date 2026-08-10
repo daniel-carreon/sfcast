@@ -28,6 +28,12 @@ final class StudioRecorder {
     private var screenRawFiles: [String] = []
     private var health: Task<Void, Never>?
     private var lowDiskWarned = false
+    /// Lo que Daniel marcó en vivo y los tramos con imagen congelada. Los dos
+    /// viajan al manifest: son el cable entre lo que pasó AL GRABAR y lo que el
+    /// editor necesita saber DESPUÉS (v3.2).
+    private var markers: [StudioManifest.Marker] = []
+    private var deadZones: [StudioManifest.DeadZone] = []
+    private var frozenSince: [String: Double] = [:]
 
     var isRecording: Bool { state == .recording }
     var elapsed: TimeInterval { state == .recording ? Date().timeIntervalSince(startedAt) : 0 }
@@ -271,6 +277,36 @@ final class StudioRecorder {
         }
     }
 
+    /// MARCADOR EN VIVO. Devuelve el total para que la UI lo enseñe.
+    ///
+    /// No valida ni "corrige" el instante: Daniel pulsa cuando se da cuenta, y
+    /// esa señal cruda es más útil que un rango inventado — el editor tiene el
+    /// transcript con tiempos por palabra para encontrar la frontera de la frase.
+    @discardableResult
+    func mark(_ kind: String, label: String? = nil) -> Int {
+        guard state == .recording else { return markers.count }
+        let t = Date().timeIntervalSince(startedAt)
+        markers.append(.init(t: t, kind: kind, label: label))
+        Log.info(String(format: "Estudio: MARCADOR '%@' en %.1fs (total %d)", kind, t, markers.count))
+        return markers.count
+    }
+
+    var markerCount: Int { markers.count }
+
+    /// Una fuente se congeló o volvió. El tramo se cierra cuando vuelve (o al
+    /// detener), y va al manifest para que el editor no use esos segundos.
+    func noteFrozen(_ source: String, frozen: Bool, reason: String) {
+        guard state == .recording else { return }
+        let t = Date().timeIntervalSince(startedAt)
+        if frozen {
+            if frozenSince[source] == nil { frozenSince[source] = t }
+        } else if let desde = frozenSince.removeValue(forKey: source) {
+            deadZones.append(.init(from: desde, to: t, source: source, reason: reason))
+            Log.error(String(format: "Estudio: TRAMO CONGELADO de %@ — %.1fs a %.1fs (%@)",
+                             source, desde, t, reason))
+        }
+    }
+
     /// El switch de escena EN VIVO queda en el timeline (va al manifest).
     func sceneSwitched(_ scene: StudioScene) {
         guard state == .recording else { return }
@@ -286,6 +322,16 @@ final class StudioRecorder {
         health?.cancel(); health = nil
         engine.onNeedNewScreenRawURL = nil
         let duration = Date().timeIntervalSince(startedAt)
+        // Un tramo congelado que seguía abierto al detener se cierra AQUÍ: si no,
+        // el daño más grave (la fuente que nunca volvió) sería justo el que no
+        // quedaría registrado.
+        for (source, desde) in frozenSince {
+            deadZones.append(.init(from: desde, to: duration, source: source,
+                                   reason: "seguía congelada al detener"))
+            Log.error(String(format: "Estudio: TRAMO CONGELADO de %@ — %.1fs al final (%.1fs)",
+                             source, desde, duration - desde))
+        }
+        frozenSince.removeAll()
         let dir = sessionDir!
         let id = videoID
 
@@ -335,7 +381,9 @@ final class StudioRecorder {
             sceneTimeline: timeline,
             scenes: config.scenes,
             micEnabled: config.micEnabled,
-            systemAudioEnabled: config.systemAudioEnabled)
+            systemAudioEnabled: config.systemAudioEnabled,
+            markers: markers,
+            deadZones: deadZones)
         manifest.write(to: dir)
 
         // meta.json de compat: si hay programa, el push "↑ subir" del Historial y

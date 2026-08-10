@@ -3,6 +3,7 @@ import SwiftUI
 import IOSurface
 import CoreImage
 import CoreVideo
+import Carbon.HIToolbox
 
 /// MODO ESTUDIO — vista desktop. Anatomía OBS/Streamlabs (Escenas + Fuentes +
 /// Preview/Programa + Mixer + Salidas), piel Screen Studio: oscura, limpia,
@@ -81,6 +82,10 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     // Pascua a Ramos — nada del arrastre ni de la energía cruda pasa por aquí.
     /// Por qué el espejo no se ve estando prendido (nil = se ve). Un espejo que
     /// desaparece en silencio sería el patrón de bug del 25 jul otra vez.
+    /// Acuse de marcador para la UI (cuántos van y cuál fue el último).
+    @Published var markerCount = 0
+    @Published var lastMarkerKind = ""
+    @Published var markerFlashUntil = Date.distantPast
     @Published var mirrorNote: String?
     @Published var mirrorLocked = false
     @Published var mirrorXray = false
@@ -146,6 +151,11 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
             // Estudio, que está en el otro monitor mientras Daniel presenta. Un
             // sensor que no alcanza al humano en el momento en que importa es un
             // sensor apagado.
+            // El daño que los watchdogs detectan VIAJA AL MANIFEST, no se queda
+            // en el log: el editor tiene que saber qué segundos son una foto fija.
+            engine.onSourceFrozen = { [weak self] source, frozen, reason in
+                self?.recorder.noteFrozen(source, frozen: frozen, reason: reason)
+            }
             engine.onCadenceChange = { [weak self] efectivo, pedido in
                 guard let self else { return }
                 if efectivo < pedido {
@@ -169,6 +179,7 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
             // motor no arranca no hay dónde ni con qué proyectarlo.
             Task { await engine.start(config: config); pullEngineStatus(); syncMirror() }
         }
+        registrarAtajosDeMarcador()
         if StudioConfig.weightFixJustApplied {
             raiseAlert("Apagué los RAW de pantalla y cámara: nada los usaba y eran ~9x el peso "
                        + "del programa. Están a un clic en Salidas si los quieres.",
@@ -181,6 +192,43 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                        critical: false, sticky: true)
         }
         startMeters()
+    }
+
+
+    // MARK: - MARCADORES EN VIVO (v3.2)
+
+    private var hotkeyRetoma: GlobalHotKey?
+    private var hotkeyBueno: GlobalHotKey?
+
+    /// ⌘⇧X = "la regué, corta esto" · ⌘⇧M = "esto estuvo bueno".
+    ///
+    /// GLOBALES a propósito: cuando Daniel se traba está presentando en SFPoint
+    /// o en el navegador, no mirando SFCast. Un atajo que exija traer la app al
+    /// frente no lo usaría nunca — y el punto entero es que no interrumpa la toma.
+    private func registrarAtajosDeMarcador() {
+        guard hotkeyRetoma == nil else { return }
+        hotkeyRetoma = GlobalHotKey(key: kVK_ANSI_X, mods: UInt32(cmdKey | shiftKey),
+                                    descripcion: "⌘⇧X marcar retoma") { [weak self] in
+            self?.marcar("retoma")
+        }
+        hotkeyBueno = GlobalHotKey(key: kVK_ANSI_M, mods: UInt32(cmdKey | shiftKey),
+                                   descripcion: "⌘⇧M marcar bueno") { [weak self] in
+            self?.marcar("bueno")
+        }
+    }
+
+    /// Anota el marcador y da acuse VISIBLE — sin sonido y sin nada que salga en
+    /// la grabación. Si no hay acuse, Daniel no sabe si quedó y va a pulsar dos
+    /// veces "por si acaso": un marcador sin confirmación no sirve.
+    func marcar(_ kind: String) {
+        guard recorder.isRecording else { return }
+        let n = recorder.mark(kind)
+        markerCount = n
+        lastMarkerKind = kind
+        // El destello vive en el ESPEJO, que lleva sharingType = .none: lo ve
+        // Daniel y NO sale en el video.
+        mirror.flash(kind == "retoma" ? .ambar : .verde)
+        markerFlashUntil = Date().addingTimeInterval(1.2)
     }
 
     /// El modo Loom arranca → el Estudio se hace a un lado (misma regla que el
@@ -1726,8 +1774,15 @@ struct StudioRootView: View {
             .help("Ajustes del Estudio (video · audio · salida)")
             if c.isRecording {
                 RecTimer(m: c.meters)
-                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.red)
+                // Las marcas, a la vista: es el acuse persistente (el destello
+                // del espejo dura un segundo). Sin un número que suba, Daniel no
+                // sabría si el atajo llegó.
+                if c.markerCount > 0 {
+                    Text("✂︎ \(c.markerCount)")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(StudioSkin.mostaza)
+                        .help("Marcas puestas con ⌘⇧X (corta) / ⌘⇧M (bueno). Van al manifest para la edición.")
+                }
             }
         }
     }

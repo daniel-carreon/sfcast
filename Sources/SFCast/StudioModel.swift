@@ -429,6 +429,39 @@ struct StudioManifest: Codable {
         var sceneName: String
     }
 
+    /// MARCADOR EN VIVO (v3.2) — lo que Daniel supo EN EL MOMENTO y que hoy se
+    /// perdía para reconstruirse caro después.
+    ///
+    /// Grabó 45.7 min para un máster de 14:30, y hora y media de esa edición se
+    /// fue en decidir cuál de sus tres intentos de cada frase era el bueno. Él
+    /// lo sabía al instante; la información simplemente no tenía dónde vivir.
+    ///
+    /// `t` es cuándo PULSÓ, no cuándo se equivocó: un humano reacciona uno o dos
+    /// segundos tarde, así que esto es una SEÑAL, no un rango. El editor lleva
+    /// el transcript con tiempos por palabra y resuelve la frontera exacta de la
+    /// frase — eso ya lo hace bien, lo que no puede es adivinar la intención.
+    struct Marker: Codable {
+        /// Segundos desde el inicio de la grabación (instante de la pulsación).
+        var t: Double
+        /// `retoma` = "la regué, tira lo anterior" · `bueno` = "esto sirve"
+        var kind: String
+        var label: String?
+    }
+
+    /// TRAMO EN QUE UNA FUENTE SE QUEDÓ CONGELADA (v3.2).
+    ///
+    /// El 9 ago la cámara se apagó sola al minuto 31.6 y la grabación siguió 18
+    /// minutos componiendo su último frame, a 30 fps impecables. En el archivo
+    /// eso es indistinguible de material bueno: **el editor lo usaría sin saber
+    /// que es una foto fija.** Por eso el daño viaja en el manifest y no solo en
+    /// el log de la app.
+    struct DeadZone: Codable {
+        var from: Double
+        var to: Double
+        var source: String      // "camera" | "screen"
+        var reason: String
+    }
+
     var schemaVersion = 1
     var id: String
     var kind = "studio"
@@ -446,6 +479,10 @@ struct StudioManifest: Codable {
     var scenes: [StudioScene]
     var micEnabled: Bool
     var systemAudioEnabled: Bool
+    /// Lo que Daniel marcó mientras grababa (⌘⇧X / ⌘⇧M).
+    var markers: [Marker] = []
+    /// Tramos con la imagen congelada — el editor NO debe usarlos.
+    var deadZones: [DeadZone] = []
 
     func write(to dir: URL) {
         let enc = JSONEncoder()

@@ -46,7 +46,17 @@ enum StudioRecTest {
         // reenganche de pantalla. Es el caso que se dio SOLO en la prueba larga
         // (minuto 23.8) y que hay que poder disparar a voluntad: lo que se
         // verifica es que la grabación SOBREVIVE y que el aviso sale.
-        if CommandLine.arguments.contains("--freezecam") {
+        if CommandLine.arguments.contains("--markers") {
+            // Ejerce los marcadores por el MISMO camino que el atajo global
+            // (StudioController.marcar), no llamando al recorder directo: probar
+            // el atajo por dentro no probaría el cable completo.
+            for (i, kind) in ["retoma", "bueno", "retoma"].enumerated() {
+                try? await Task.sleep(nanoseconds: UInt64(seconds) * 200_000_000)
+                StudioController.shared.marcar(kind)
+                Log.info("RECTEST: marcador \(i + 1) puesto (\(kind))")
+            }
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 400_000_000)
+        } else if CommandLine.arguments.contains("--freezecam") {
             // La cámara se "apaga" a la mitad. Lo que se verifica: que el
             // watchdog lo NOTE (y avise), porque el video sigue saliendo
             // perfecto — una foto fija a 30 fps es indistinguible de una
@@ -179,7 +189,17 @@ enum StudioRecTest {
         // Con --failstream, la prueba es que la grabación SIGUIÓ VIVA pese al
         // fallo: si el archivo quedó corto o sin cadencia, el aviso no sirvió
         // de nada porque el video se perdió igual.
-        if CommandLine.arguments.contains("--freezecam") {
+        if CommandLine.arguments.contains("--markers") {
+            // Ejerce los marcadores por el MISMO camino que el atajo global
+            // (StudioController.marcar), no llamando al recorder directo: probar
+            // el atajo por dentro no probaría el cable completo.
+            for (i, kind) in ["retoma", "bueno", "retoma"].enumerated() {
+                try? await Task.sleep(nanoseconds: UInt64(seconds) * 200_000_000)
+                StudioController.shared.marcar(kind)
+                Log.info("RECTEST: marcador \(i + 1) puesto (\(kind))")
+            }
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 400_000_000)
+        } else if CommandLine.arguments.contains("--freezecam") {
             // La cámara se "apaga" a la mitad. Lo que se verifica: que el
             // watchdog lo NOTE (y avise), porque el video sigue saliendo
             // perfecto — una foto fija a 30 fps es indistinguible de una
@@ -200,13 +220,39 @@ enum StudioRecTest {
             }
         }
 
-        if CommandLine.arguments.contains("--freezecam") {
+        if CommandLine.arguments.contains("--markers") {
+            // Ejerce los marcadores por el MISMO camino que el atajo global
+            // (StudioController.marcar), no llamando al recorder directo: probar
+            // el atajo por dentro no probaría el cable completo.
+            for (i, kind) in ["retoma", "bueno", "retoma"].enumerated() {
+                try? await Task.sleep(nanoseconds: UInt64(seconds) * 200_000_000)
+                StudioController.shared.marcar(kind)
+                Log.info("RECTEST: marcador \(i + 1) puesto (\(kind))")
+            }
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 400_000_000)
+        } else if CommandLine.arguments.contains("--freezecam") {
             if engine.cameraFrozen || engine.screenRestarts >= 0 {
                 Log.info("RECTEST ✓ el watchdog de cámara marcó la congelada "
                          + "(cameraFrozen=\(engine.cameraFrozen))")
             }
             if !engine.cameraFrozen {
                 fallos.append("WATCHDOG-CAMARA-NO-DETECTO(la cámara se congeló y nadie lo notó)")
+            }
+        }
+
+        // Los marcadores tienen que estar EN EL ARCHIVO de manifest, no solo en
+        // memoria: el editor lee el manifest, no la RAM de una app cerrada.
+        if CommandLine.arguments.contains("--markers") {
+            let mf = dir.appendingPathComponent("manifest.json")
+            if let data = try? Data(contentsOf: mf),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let ms = obj["markers"] as? [[String: Any]] {
+                Log.info("RECTEST ✓ manifest con \(ms.count) marcadores: "
+                         + ms.map { "\($0["kind"] ?? "?")@\(String(format: "%.1f", ($0["t"] as? Double) ?? 0))s" }
+                             .joined(separator: " · "))
+                if ms.count != 3 { fallos.append("MARCADORES-INCOMPLETOS(\(ms.count) de 3)") }
+            } else {
+                fallos.append("MANIFEST-SIN-MARCADORES")
             }
         }
 

@@ -105,6 +105,10 @@ final class StudioEngine: NSObject {
     /// La cadencia cambió: (efectiva, pedida). La UI lo enseña — una grabación
     /// que se degrada en silencio fue el patrón de TODOS los bugs del Estudio.
     var onCadenceChange: ((Int, Int) -> Void)?
+    /// Una fuente se congeló (o volvió): (source, frozen, motivo). Lo consume el
+    /// grabador para dejarlo escrito en el manifest — el editor tiene que saber
+    /// qué segundos son una foto fija.
+    var onSourceFrozen: ((String, Bool, String) -> Void)?
     /// FPS que está corriendo ahora mismo el render loop (≤ el configurado).
     var effectiveFPS: Int { governor.effective == 0 ? fps : governor.effective }
 
@@ -502,6 +506,20 @@ final class StudioEngine: NSObject {
             Log.info("Estudio: sesión de cámara → "
                      + devs.map { "\($0.localizedName) [\($0.hasMediaType(.audio) ? "audio" : "video")]" }
                            .joined(separator: " + "))
+            // ⚠️ ¿Quedó la cámara que Daniel ELIGIÓ? `Devices.camera(id:)` cae a
+            // `AVCaptureDevice.default` cuando la suya no está conectada, y eso
+            // es silencioso y caro: con la ZV-E10 apagada engancha la "OBS
+            // Virtual Camera", que entrega un CUADRO FIJO. Se graba una hora
+            // creyendo que hay cámara. Aquí se dice, y en voz alta.
+            let resuelta = devs.first(where: { $0.hasMediaType(.video) })
+            if let camID, let resuelta, resuelta.uniqueID != camID {
+                Log.error("Estudio: LA CÁMARA NO ES LA ELEGIDA — quedó «\(resuelta.localizedName)». "
+                          + "La configurada no está conectada.")
+                Task { @MainActor in
+                    self.onAlert?("Ojo: estás con «\(resuelta.localizedName)», no con tu cámara de "
+                                  + "siempre. ¿Está encendida y conectada?", true)
+                }
+            }
             if !session.isRunning { session.startRunning() }
         }
         // Optimista: si al final no entrega frames, el comparador starved lo
@@ -731,6 +749,7 @@ final class StudioEngine: NSObject {
         if dead != cameraFrozen {
             cameraFrozen = dead
             onStatusChange?()
+            onSourceFrozen?("camera", dead, "sin imagen nueva (¿se apagó sola? ¿cable USB?)")
             if dead {
                 Log.error(String(format: "Estudio: CÁMARA CONGELADA — %.1fs sin imagen nueva "
                                  + "(¿se apagó sola? ¿cable USB?)", age))
@@ -747,13 +766,26 @@ final class StudioEngine: NSObject {
                 onAlert?("La cámara volvió.", false)
             }
         }
-        // Mientras siga muerta, reconciliar cada 10s: si Daniel la vuelve a
-        // encender, engancha sola sin que tenga que tocar nada.
+        // Mientras siga muerta, reintentar — pero SOLO si la cámara ELEGIDA
+        // volvió a aparecer en el sistema.
+        //
+        // ⚠️ Reconciliar a ciegas es peor que no hacer nada: `Devices.camera(id:)`
+        // cae a `AVCaptureDevice.default` cuando la elegida no está, así que con
+        // la ZV-E10 apagada enganchaba la "OBS Virtual Camera" — que entrega un
+        // cuadro fijo. El watchdog entonces la declaraba VIVA y se apagaba solo:
+        // un sensor que se auto-satisface con una imagen falsa es peor que no
+        // tener sensor. (Es el gotcha que v2.9 ya había documentado, y este
+        // reintento lo estaba disparando cada 10 s.)
         if dead {
             let now = CACurrentMediaTime()
             if now > cameraRetryAt {
-                cameraRetryAt = now + 10
-                applyDeviceSelection(micEnabled: true)
+                cameraRetryAt = now + 30
+                let elegida = AppSettings.load().cameraDeviceID
+                let presente = elegida.flatMap { AVCaptureDevice(uniqueID: $0) } != nil
+                if presente {
+                    Log.info("Estudio: la cámara elegida volvió a aparecer — reenganchando")
+                    applyDeviceSelection(micEnabled: true)
+                }
             }
         }
     }
@@ -765,6 +797,7 @@ final class StudioEngine: NSObject {
         let dead = bad != nil || silence > Self.deadAfter
         if dead != screenFrozen {
             screenFrozen = dead
+            onSourceFrozen?("screen", dead, bad ?? "stream mudo")
             onStatusChange?()
             if dead {
                 let b = screenHealth.beats()

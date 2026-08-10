@@ -131,6 +131,23 @@ enum StudioRecTest {
             }
         }
 
+        // 3b) CALIDAD REAL DE LA CADENCIA: no basta con que el archivo tenga 30
+        //     fps si la mitad son repetidos. Este es el número que dice si la
+        //     Mac está de verdad al día o solo disimulando.
+        let repes = engine.cadence.repeatedFrames
+        let totalF = Int((videoFPS > 0 ? videoFPS : Double(engine.fps)) * Double(seconds))
+        if totalF > 0 {
+            let pct = Double(repes) / Double(totalF) * 100
+            Log.info(String(format: "RECTEST cadencia: %d frames, %d rellenados (%.1f%% repetidos)",
+                            totalF, repes, pct))
+            // Sin ahogo artificial, más de un 15%% de repetidos significa que la
+            // Mac no está siguiendo el ritmo de verdad — el archivo se ve bien
+            // pero el movimiento no es fluido.
+            if choke == 0, pct > 15 {
+                fallos.append(String(format: "DEMASIADOS-REPETIDOS(%.1f%%)", pct))
+            }
+        }
+
         // 3) NADA EN SILENCIO
         Log.info(String(format: "RECTEST compositor: p50 %.2f ms · máx %.2f ms · sin-buffer %d",
                         cs.composeMsP50, cs.composeMsMax, cs.bufferFailures))

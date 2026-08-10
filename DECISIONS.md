@@ -945,3 +945,93 @@ open -W /Applications/SFCast.app --args --rectest 22 --chokems 60 # ejerce el go
 open -W /Applications/SFCast.app --args --synctest 12             # latencia real por fuente
 ./.build/debug/SFCast --compbench 60                              # costo/memoria por lienzo (headless)
 ```
+
+---
+
+## v3.1 — Por qué OBS no se traba y nosotros sí: **no era componer, era ESPERAR** (9 ago 2026)
+
+Daniel, después de ver el semáforo del governor: *"¿de qué me sirve esta madre con
+semáforo si me va a dar pocos fps? ¿cómo logramos que sean estables a pesar de
+todo, que no se bajen?"*. Tenía toda la razón: v3.0 construyó un **termómetro**
+cuando lo que pidió es que no haya fiebre.
+
+### La medición que lo resolvió (por FASE, no en bloque)
+
+El agregado decía "compose cuesta 20 ms" y con eso no se puede decidir nada: podía
+ser la GPU, el pool, el encoder o el preview — cuatro curas opuestas. Desglosado:
+
+```
+preview          0.0 ms
+encode           0.1 ms          ← el encoder NO era el cuello
+grafo (CPU)      0.58 ms
+buffer (pool)    0.02 ms
+RENDER (GPU)    22.32 ms         ← el 97%
+```
+
+Y el mismo render costaba **2 ms en el bench sintético**. La diferencia no era el
+trabajo: era que **`CIContext.render` es SÍNCRONO** y la GPU no es nuestra —
+WindowServer compone dos monitores 4K, el encoder HEVC codifica, el preview y el
+espejo pintan. Estábamos parados esperando cola ajena **en el único hilo que marca
+la cadencia**.
+
+Eso —y no "mejor código"— es la diferencia con OBS. Ellos no bloquean.
+
+### Las dos piezas
+
+**1. Pipelining (`Compositor.composePipelined`).** El frame N lanza su render con
+`startTask` y NO lo espera; el N+1 recoge el resultado que la GPU pintó mientras
+tanto. Cuesta un frame de latencia, y por eso **el `hostTime` viaja pegado al
+buffer**: lo que se entrega es del tick anterior y debe llevar el timestamp de ESE
+tick, o reintroduciríamos el desfase de audio que v3.0 acababa de matar.
+
+| | antes | después |
+|---|---|---|
+| compose p50 | 21.3 ms | **3.7 ms** |
+| RENDER (GPU) | 22.3 ms | **2.8 ms** |
+| fps del archivo | 29.85 | **29.99** |
+| costo del espejo | −2.5 fps | **−0.2 fps** |
+
+**2. `CadenceKeeper` — por qué a OBS "no se le bajan los fps".** Un
+`DispatchSourceTimer` con `repeating` **no recupera disparos perdidos**: si el
+sistema lo posterga 70 ms, esos dos ticks no vuelven y el archivo queda con un
+hueco. Ahí nacían los saltos de 750 ms. Ahora, cuando faltan ticks, se reemiten los
+timestamps que faltan con el último contenido — los *lagged frames* de OBS.
+
+La clave conceptual: **un frame repetido y un frame que nunca se compuso muestran
+exactamente lo mismo en pantalla.** La diferencia está en el contenedor, y 30 fps
+constantes es lo que cualquier editor quiere (los NLEs sufren el VFR). OBS no
+siempre alcanza — simplemente nunca deja huecos.
+
+### La prueba que cierra la promesa
+
+Con `--chokems 60` (ahogo del **doble** del presupuesto):
+
+```
+antes:  archivo a 14.53 fps
+ahora:  archivo a 29.72 fps   (446 frames rellenados, pistas alineadas 0 ms)
+        el compositor bajó a 15 fps — y el archivo salió a 30 igual
+```
+
+### El governor cambia de sentido (y de mensaje)
+
+Ya no baja "la grabación": baja **cuántos frames nuevos compone**, para darle aire a
+la GPU, mientras el archivo sigue saliendo a los fps pedidos. El mensaje al usuario
+se reescribió por eso — decirle *"bajé tu grabación a 19"* cuando su archivo sale a
+30 sería mentirle y asustarlo de gratis.
+
+### Lo que NO se hizo, a propósito
+
+**Damage tracking** (no recomponer el fondo cuando la pantalla no cambió) quedó
+fuera: con 3.7 ms de 33.3 ya hay 9x de margen, y añadir invalidación de caché sobre
+un compositor que ya funciona es riesgo de artefactos visuales a cambio de un margen
+que no hace falta. Queda documentado como palanca si algún día la hiciera falta.
+
+Los modos de `CIContext` (sin color management, Metal explícito) se midieron: 1.14x.
+Se quedaron porque son gratis, pero el grueso era el bloqueo, no el color.
+
+### La lección
+
+**Un agregado no es una medición.** "Compose cuesta 20 ms" fue verdad todo el tiempo
+y no permitía decidir nada; el desglose por fase señaló la cura en un intento. Y la
+segunda: cuando algo tarda, la pregunta no es solo *"¿cómo lo hago más rápido?"*
+sino *"¿por qué lo estoy ESPERANDO?"*.

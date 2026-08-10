@@ -248,7 +248,8 @@ final class StudioRecorder {
                                 camFPS, prevFPS, prevDrops, Self.gb(free),
                                 cs.composeMsP50, cs.bufferFailures,
                                 engine.effectiveFPS, engine.fps, sync.appliedMs,
-                                Self.gb(Self.availableRAM())))
+                                Self.gb(Self.availableRAM()))
+                 + String(format: " rellenados:%d", engine.cadence.repeatedFrames))
                 // PERFIL POR FASE cada 4 latidos (1 min): con un solo numero
                 // agregado no se puede distinguir GPU de encoder de pool, y son
                 // curas opuestas.

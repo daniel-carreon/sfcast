@@ -322,6 +322,20 @@ por escena + PNG de la ventana. Restaura `scenes.json` al salir.
    mal. Y **las dos pistas arrancan en el mismo instante**: el warmup del audio se
    mide contra el primer AUDIO, jamás contra el primer video (eso dejaba
    `audio start_time = 0.152` en todas las grabaciones).
+6d. **El render de la GPU JAMÁS se espera en el hilo de la cadencia** (v3.1).
+   `CIContext.render` es síncrono y la GPU es compartida (WindowServer con dos
+   monitores 4K, el encoder, el preview, el espejo): esperar ahí costaba 22 ms de
+   un presupuesto de 33. Ahora el frame N **lanza** su render (`startTask`) y el
+   N+1 recoge el resultado. Consecuencia obligatoria: **el `hostTime` viaja pegado
+   a su buffer** — el frame que se entrega es del tick anterior y estamparlo con
+   "ahora" reintroduce el desfase de audio. Y al parar o cambiar de lienzo hay que
+   `drainPipeline()`, o queda un buffer del pool viejo retenido para siempre.
+6e. **La cadencia del archivo no depende de que la Mac alcance.** Un
+   `DispatchSourceTimer` no recupera disparos perdidos; `CadenceKeeper` reemite los
+   timestamps que falten con el último contenido (los *lagged frames* de OBS). Un
+   frame repetido y uno que nunca se compuso muestran lo MISMO en pantalla: la
+   diferencia es el contenedor, y 30 fps constantes es lo que el editor quiere.
+   El relleno usa el fps **pedido**, nunca el efectivo del governor.
 6c. **Lo que puede fallar en silencio se cuenta en el sitio donde falla.** Un
    `return nil` en el camino caliente es un frame que desaparece del archivo sin
    aparecer en ningún contador — fue exactamente el bug del 9 ago. Y **ninguna

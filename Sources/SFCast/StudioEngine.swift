@@ -60,7 +60,16 @@ final class StudioEngine: NSObject {
     /// Sink de grabación (nil = no se está grabando). Lo pone StudioRecorder.
     let sink = SinkBox()
 
-    private let renderQueue = DispatchQueue(label: "so.saasfactory.sfcast.studio.render", qos: .userInitiated)
+    /// ⚠️ `.userInteractive`, NO `.userInitiated` (9 ago 2026). Con el render ya
+    /// canalizado, compose cuesta ~4 ms de 33 y aun así el governor bajaba: el
+    /// trabajo no era el problema, el SCHEDULER sí. Bajo carga, macOS posterga
+    /// una cola `.userInitiated` y el timer pierde disparos — que es
+    /// exactamente el hueco que el `CadenceKeeper` tiene que rellenar con
+    /// frames repetidos. Subir la prioridad no hace el trabajo más rápido:
+    /// hace que nos toque el turno a tiempo, y así los frames son NUEVOS en vez
+    /// de repetidos. Es el mismo motivo por el que los motores de audio corren
+    /// con prioridad de tiempo real.
+    private let renderQueue = DispatchQueue(label: "so.saasfactory.sfcast.studio.render", qos: .userInteractive)
     private let videoQueue = DispatchQueue(label: "so.saasfactory.sfcast.studio.video", qos: .userInitiated)
     private let audioQueue = DispatchQueue(label: "so.saasfactory.sfcast.studio.audio", qos: .userInitiated)
     /// TODA la cirugía del AVCaptureSession (begin/commitConfiguration, start/

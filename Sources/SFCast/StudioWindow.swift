@@ -8,6 +8,28 @@ import CoreVideo
 /// Preview/Programa + Mixer + Salidas), piel Screen Studio: oscura, limpia,
 /// acento mostaza de marca. La ventana lleva `sharingType = .none` (invisible a
 /// cualquier captura — como el pill); SOLO en --studiotest se deja capturable.
+
+/// LOS CONTADORES QUE LATEN — fuera del controller a propósito (9 ago 2026).
+///
+/// fps de cámara/preview y el cronómetro de grabación cambian ~1 vez por
+/// segundo. Vivían como `@Published` del `StudioController`, y en SwiftUI eso
+/// significa que CADA latido invalidaba todo lo que observa ese controller:
+/// la barra, el panel de escenas y **la lista de fuentes con su menú abierto**.
+///
+/// El síntoma que lo delató (Daniel, 9 ago): *"es muy difícil clickear el botón
+/// porque desaparece bien fácil"*. No era puntería — era que el menú se
+/// reconstruía debajo del cursor una vez por segundo.
+///
+/// Aquí solo lo observan el chip de fps y el cronómetro, que son justo las dos
+/// cosas que TIENEN que redibujarse a ese ritmo. Hermano de la cura del vúmetro
+/// en v2.8, por el lado de los menús.
+final class StudioMeters: ObservableObject {
+    @Published var camFPS = -1        // -1 = sin dato aún
+    @Published var prevFPS = -1
+    @Published var renderStarving = false
+    @Published var elapsed: TimeInterval = 0
+}
+
 @MainActor
 final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     static let shared = StudioController()
@@ -22,7 +44,7 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     @Published var selectedItemID: UUID? { didSet { previewView?.refreshOverlay() } }
     @Published var showSettings = false
     @Published var isRecording = false
-    @Published var elapsed: TimeInterval = 0
+
     // Vúmetro SIN @Published — v2.8. Publicar los niveles a 15 Hz invalidaba
     // la jerarquía SwiftUI COMPLETA (todos los paneles observan este objeto):
     // cada pase de layout de la ventana cuesta ~60-70 ms, 30 publicaciones/s
@@ -36,11 +58,20 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     private var sysSmooth: Float = 0
     /// SENSOR (invariante 5b): fps medidos de cámara y preview, para VER que
     /// lo que se ve es lo que se graba. Publica ~1 Hz y solo si cambió.
-    @Published var camFPS = -1        // -1 = sin dato aún
-    @Published var prevFPS = -1
+    /// ⚠️ Los contadores que laten CADA SEGUNDO viven en su propio observable
+    /// (9 ago 2026). Estaban aquí como `@Published`, y cada latido invalidaba la
+    /// jerarquía ENTERA que observa este controller — incluida la lista de
+    /// fuentes. Consecuencia que Daniel sufrió: abría el clic derecho de la
+    /// Cámara y, al segundo siguiente, `prevFPS` pasaba de 30 a 29 y **el menú
+    /// se le cerraba en la cara**, sin importar la puntería del ratón.
+    ///
+    /// Es la misma lección de v2.8 (el vúmetro re-layouteando la ventana), ahora
+    /// por el lado de los menús: nada que cambie ~1 vez por segundo puede vivir
+    /// en un objeto que observa media UI.
+    let meters = StudioMeters()
     /// true = el compositor NO alcanza a componer (no es la compuerta tirando).
     /// Distinción crítica: esto SÍ le baja los fps al archivo. Ver refreshFlowSensor.
-    @Published var renderStarving = false
+
     private var lastFlow: StudioFlowCounts?
     private var lastFlowAt: Double = 0
     @Published var screenOK = false
@@ -924,7 +955,7 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                 // entera — carga gratuita en main justo mientras se graba.
                 if self.isRecording {
                     let e = self.recorder.elapsed
-                    if Int(e) != Int(self.elapsed) { self.elapsed = e }
+                    if Int(e) != Int(self.meters.elapsed) { self.meters.elapsed = e }
                 }
                 self.tick += 1
                 if self.tick % 15 == 0 {                                        // ~1s
@@ -972,9 +1003,9 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         // pasa lo segundo, y el chip tiene que decirlo.
         let dropped = flow.previewDropped - last.previewDropped
         let slow = dropped == 0 && prev + 5 < cam
-        if slow != renderStarving { renderStarving = slow }
-        if cam != camFPS { camFPS = cam }
-        if prev != prevFPS { prevFPS = prev }
+        if slow != meters.renderStarving { meters.renderStarving = slow }
+        if cam != meters.camFPS { meters.camFPS = cam }
+        if prev != meters.prevFPS { meters.prevFPS = prev }
     }
 
 
@@ -1303,7 +1334,7 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
             Task {
                 let dir = await recorder.stop(engine: engine, config: config)
                 isRecording = false
-                elapsed = 0
+                meters.elapsed = 0
                 lastSessionDir = dir
                 if let dir, !testMode {
                     NSWorkspace.shared.activateFileViewerSelecting([dir])
@@ -1673,7 +1704,7 @@ struct StudioRootView: View {
             .help(c.screenOK ? "Captura de pantalla activa"
                              : "Clic para aprobar «Grabación de pantalla» (tras un update se re-pide una vez). Se engancha solo al aprobar.")
             statusChip("Cámara", ok: c.cameraOK, starving: c.starved.contains(.camera))
-            if c.camFPS >= 0 { fpsChip }
+            if c.meters.camFPS >= 0 { fpsChip }
             if let err = c.recordError {
                 Text(err)
                     .font(.system(size: 11))
@@ -1694,7 +1725,7 @@ struct StudioRootView: View {
             .disabled(c.isRecording)
             .help("Ajustes del Estudio (video · audio · salida)")
             if c.isRecording {
-                Text(timeString(c.elapsed))
+                RecTimer(m: c.meters)
                     .font(.system(size: 14, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.red)
             }
@@ -1705,20 +1736,7 @@ struct StudioRootView: View {
     /// preview pintándose. Si el preview va detrás, el chip se pone naranja —
     /// y avisa que la GRABACIÓN no se entera (el sink drena en renderQueue).
     /// El "preview a 3 fps" del 7 ago fue invisible justo por no tener esto.
-    private var fpsChip: some View {
-        let lag = c.prevFPS >= 0 && c.prevFPS + 5 < c.camFPS
-        let grave = c.renderStarving            // el compositor no alcanza → el ARCHIVO también baja
-        return Text("cámara \(max(c.camFPS, 0)) · preview \(max(c.prevFPS, 0)) fps"
-                    + (grave ? " · también el archivo" : ""))
-            .font(.system(size: 10.5, design: .monospaced))
-            .foregroundStyle(grave ? Color.red : (lag ? Color.orange : StudioSkin.dim))
-            .padding(.horizontal, 8).padding(.vertical, 3)
-            .background(StudioSkin.panel)
-            .clipShape(Capsule())
-            .help(grave ? "El COMPOSITOR no alcanza a componer, y de ese mismo loop come el writer: el archivo se está grabando a estos fps, no a los configurados. Suele ser el espejo encendido sobre un lienzo grande — apágalo, o baja el lienzo en Ajustes → Video."
-                  : lag ? "El preview va detrás de la cámara (main ocupado). La grabación NO se afecta: el programa se compone y escribe fuera de main."
-                        : "FPS medidos por conteo de frames: cámara entrando · preview pintado. Lo que ves es lo que se graba.")
-    }
+    private var fpsChip: some View { FPSChip(m: c.meters) }
 
     private func statusChip(_ label: String, ok: Bool, starving: Bool) -> some View {
         HStack(spacing: 4) {
@@ -1741,6 +1759,38 @@ func timeString(_ t: TimeInterval) -> String {
 }
 
 // MARK: - panel Escenas
+
+/// El chip de fps, aislado en su PROPIA vista observando solo `StudioMeters`.
+/// Así el latido de 1 Hz redibuja este chip y NADA más — antes invalidaba la
+/// jerarquía entera y cerraba los menús contextuales abiertos.
+struct FPSChip: View {
+    @ObservedObject var m: StudioMeters
+    var body: some View {
+        let lag = m.prevFPS >= 0 && m.prevFPS + 5 < m.camFPS
+        let grave = m.renderStarving   // el compositor no alcanza → el ARCHIVO también baja
+        return Text("cámara \(max(m.camFPS, 0)) · preview \(max(m.prevFPS, 0)) fps"
+                    + (grave ? " · también el archivo" : ""))
+            .font(.system(size: 10.5, design: .monospaced))
+            .foregroundStyle(grave ? Color.red : (lag ? Color.orange : StudioSkin.dim))
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(StudioSkin.panel)
+            .clipShape(Capsule())
+            .help(grave ? "El COMPOSITOR no alcanza a componer, y de ese mismo loop come el writer: el archivo se está grabando a estos fps, no a los configurados. Suele ser el espejo encendido sobre un lienzo grande — apágalo, o baja el lienzo en Ajustes → Video."
+                  : lag ? "El preview va detrás de la cámara (main ocupado). La grabación NO se afecta: el programa se compone y escribe fuera de main."
+                        : "FPS medidos por conteo de frames: cámara entrando · preview pintado. Lo que ves es lo que se graba.")
+    }
+}
+
+/// El cronómetro de grabación, por el mismo motivo: cambia cada segundo.
+struct RecTimer: View {
+    @ObservedObject var m: StudioMeters
+    var body: some View {
+        let t = Int(m.elapsed)
+        return Text(String(format: "%02d:%02d", t / 60, t % 60))
+            .font(.system(size: 14, weight: .semibold, design: .monospaced))
+            .foregroundStyle(.red)
+    }
+}
 
 struct ScenesPanel: View {
     @EnvironmentObject var c: StudioController
@@ -1951,47 +2001,43 @@ struct SourcesPanel: View {
         }
     }
 
-    /// Todo el espejo, en el clic derecho de la fuente Cámara: prender/apagar,
-    /// rayos X, fijar, los cuatro tamaños del Loom y la lectura cruda del
-    /// sensor de oclusión. Las opciones solo aparecen si el espejo está vivo —
-    /// un menú lleno de cosas apagadas es ruido.
-    @ViewBuilder private var mirrorSubmenu: some View {
+    /// El espejo en el clic derecho de la fuente Cámara — **PLANO, sin submenú**
+    /// (9 ago 2026, feedback de Daniel: *"es muy difícil clickear el botón porque
+    /// desaparece bien fácil"*).
+    ///
+    /// Era un `Menu` anidado, y los submenús de SwiftUI en macOS no tienen
+    /// "triángulo seguro": el cursor viaja en diagonal desde el renglón padre
+    /// hacia el submenú y, en cuanto roza el renglón de abajo, el padre pierde
+    /// el hover y todo se cierra. No es algo que se pueda ajustar — es cómo
+    /// funciona el control. La cura es no anidar.
+    ///
+    /// Los cuatro tamaños del Loom NO se pierden: viven en los chips que salen
+    /// al pasar el cursor SOBRE el espejo, que es donde se deciden mirándolo
+    /// (v2.9). Aquí quedan solo las decisiones de sesión.
+    @ViewBuilder private var mirrorMenuItems: some View {
         let on = c.config.mirrorEnabled
-        Menu {
-            Button { c.toggleMirror() } label: {
-                Label(on ? "Apagar el espejo" : "Prender el espejo",
-                      systemImage: on ? "xmark.circle" : "circle.dashed")
+        Button { c.toggleMirror() } label: {
+            Label(on ? "✓ Espejo en la pantalla" : "Espejo en la pantalla",
+                  systemImage: "circle.dashed")
+        }
+        if on {
+            Button { c.mirror.toggleXray() } label: {
+                Label(c.mirrorXray ? "Quitar rayos X" : "Rayos X (ver qué hay debajo)",
+                      systemImage: c.mirrorXray ? "eye.slash" : "eye")
             }
-            if on {
-                Divider()
-                Button { c.mirror.toggleXray() } label: {
-                    Label(c.mirrorXray ? "Quitar rayos X" : "Rayos X (ver qué hay debajo)",
-                          systemImage: c.mirrorXray ? "eye.slash" : "eye")
-                }
-                Button { c.mirror.setLocked(!c.mirrorLocked) } label: {
-                    Label(c.mirrorLocked ? "Soltar el espejo (que vuelva a recibir clics)"
-                                         : "Fijar el espejo (que no reciba clics)",
-                          systemImage: c.mirrorLocked ? "lock.open" : "lock")
-                }
-                Divider()
-                Button { c.flipMirroredCamera() } label: {
-                    Label(c.mirroredCameraFlipped ? "Quitar el volteo horizontal"
-                                                  : "Voltear la cámara en horizontal",
-                          systemImage: "arrow.left.arrow.right")
-                }
-                Divider()
-                Section("Tamaño (los del Loom)") {
-                    ForEach(CameraBubble.Size.allCases, id: \.self) { s in
-                        Button(s.label) { c.mirror.applySize(s) }
-                    }
-                }
-                if let note = c.mirrorNote {
-                    Divider()
-                    Text("No se ve: \(note)")
-                }
+            Button { c.mirror.setLocked(!c.mirrorLocked) } label: {
+                Label(c.mirrorLocked ? "Soltar el espejo (que reciba clics)"
+                                     : "Fijar el espejo (que no reciba clics)",
+                      systemImage: c.mirrorLocked ? "lock.open" : "lock")
             }
-        } label: {
-            Label("Espejo en la pantalla", systemImage: "circle.dashed")
+            Button { c.flipMirroredCamera() } label: {
+                Label(c.mirroredCameraFlipped ? "Quitar el volteo horizontal"
+                                              : "Voltear la cámara en horizontal",
+                      systemImage: "arrow.left.arrow.right")
+            }
+            if let note = c.mirrorNote {
+                Text("No se ve: \(note)")
+            }
         }
     }
 
@@ -2073,7 +2119,7 @@ struct SourcesPanel: View {
                 // barra es para SENSORES, y el espejo es una propiedad de esta
                 // fuente. Lo que sí quedó arriba es nada; el estado se ve en el
                 // punto de esta misma fila y en el propio espejo.
-                mirrorSubmenu
+                mirrorMenuItems
                 Divider()
             }
             ForEach(SceneGlow.allCases, id: \.self) { g in

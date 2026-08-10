@@ -1069,3 +1069,64 @@ propósito): **detectado en 5.3 s**, `cameraFrozen=true`, notificación enviada.
 
 Las dos pruebas largas corrieron **en paralelo** (dos pipelines de video a la vez en
 la misma Mac), que de paso es la prueba de estrés más realista que se hizo.
+
+---
+
+## v3.2 — El cable a la edición: marcadores en vivo, zonas y daño declarado (10 ago 2026)
+
+Daniel, después de preguntar qué más se podía exportar para facilitar la edición:
+*"debemos armar conectores entre sfstudio y edición de video skill, ese opino será
+el verdadero MOAT de todo esto"*. Es exactamente el diagnóstico: cualquiera puede
+pedirle a un LLM que corte un video; **nadie más tiene la cámara hablándole al
+editor.**
+
+### El problema, con su número
+
+Grabó **45.7 minutos** para un máster de **14:30**. De la hora y media que tardó la
+edición, la mayor parte no fue diseño ni animación: fue **decidir cuál de sus tres
+intentos de cada frase era el bueno**, con seis sub-agentes leyendo transcript.
+
+Él sabía cuál era el bueno **en el momento**. Esa información simplemente no tenía
+dónde vivir, así que se tiraba y luego se reconstruía cara.
+
+### Lo que ahora viaja en el manifest
+
+- **`markers`** — ⌘⇧X ("la regué, corta") y ⌘⇧M ("esto estuvo bueno"), **globales**
+  (`RegisterEventHotKey` de Carbon, que NO pide el permiso de Monitorización de
+  entrada; esta app ya pagó caro esa moneda). Funcionan mientras presenta en otra
+  app, que es justo cuando se traba.
+- **`deadZones`** — los tramos con la imagen CONGELADA. En el archivo son
+  indistinguibles de material sano: el 9 ago la cámara se apagó al minuto 31.6 y la
+  grabación siguió 18 minutos de foto fija a 30 fps impecables. El editor los usaría
+  sin saberlo.
+- **`sceneTimeline`** ya existía y nadie lo leía. Ahora el conector lo traduce a
+  ZONAS con su clase (`talking` / `pantalla`), que es lo que decide la intensidad de
+  edición — algo que el pipeline venía **adivinando** del transcript o de los frames.
+
+El traductor vive del lado de la edición:
+`.claude/skills/edicion-de-video/scripts/sfcast_manifest.py`, y la skill lo declara
+como **PASO 0.1, antes de sondear el raw**.
+
+### Dos decisiones de diseño que importan
+
+**El marcador es una SEÑAL, no un rango.** `t` es cuándo Daniel PULSÓ, y un humano
+reacciona uno o dos segundos tarde. Inventar el rango sería fingir precisión: el
+editor ya tiene el transcript con tiempos por palabra y encuentra la frontera de la
+frase. Él aporta la intención, el editor la precisión.
+
+**El acuse va en el aro del ESPEJO.** No en la ventana del Estudio (está en el otro
+monitor — lección repetida cuatro veces el 9 ago) y no con sonido (se grabaría). El
+espejo lleva `sharingType = .none`: lo ve él y no sale en el video. Sin acuse, un
+marcador se pulsa dos veces "por si acaso" y deja de ser una señal limpia.
+
+### Un bug propio, cazado en vivo el mismo día
+
+El watchdog de cámara (v3.1b, de hace unas horas) reconciliaba la sesión cada 10 s
+mientras la cámara estuviera muerta. Con la ZV-E10 apagada, `Devices.camera(id:)`
+cae a `AVCaptureDevice.default` → enganchaba la **"OBS Virtual Camera"**, que
+entrega un cuadro fijo, y entonces el watchdog **se declaraba satisfecho**.
+
+**Un sensor que se auto-satisface con una imagen falsa es peor que no tener sensor.**
+Ahora solo reintenta si la cámara ELEGIDA reapareció, cada 30 s. Y de paso: si al
+arrancar la resuelta no es la elegida, se avisa — grabar una hora con la webcam
+equivocada es un desastre silencioso, y era posible hasta hoy.

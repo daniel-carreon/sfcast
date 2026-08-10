@@ -179,7 +179,6 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
             // motor no arranca no hay dónde ni con qué proyectarlo.
             Task { await engine.start(config: config); pullEngineStatus(); syncMirror() }
         }
-        registrarAtajosDeMarcador()
         if StudioConfig.weightFixJustApplied {
             raiseAlert("Apagué los RAW de pantalla y cámara: nada los usaba y eran ~9x el peso "
                        + "del programa. Están a un clic en Salidas si los quieres.",
@@ -200,21 +199,38 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     private var hotkeyRetoma: GlobalHotKey?
     private var hotkeyBueno: GlobalHotKey?
 
-    /// ⌘⇧X = "la regué, corta esto" · ⌘⇧M = "esto estuvo bueno".
+    /// ⌥X = "la regué, corta esto" · ⌥C = "esto estuvo bueno".
     ///
-    /// GLOBALES a propósito: cuando Daniel se traba está presentando en SFPoint
-    /// o en el navegador, no mirando SFCast. Un atajo que exija traer la app al
-    /// frente no lo usaría nunca — y el punto entero es que no interrumpa la toma.
-    private func registrarAtajosDeMarcador() {
+    /// Las eligió Daniel (10 ago) por ergonomía y tiene razón: ⌘⇧X pedía dos
+    /// manos, y con dos manos ocupadas nadie marca nada a mitad de una toma.
+    /// ⌥X y ⌥C se pulsan con la izquierda, dedos vecinos, sin mirar.
+    ///
+    /// GLOBALES: cuando se traba está presentando en SFPoint, no mirando SFCast.
+    /// Un atajo que exija traer la app al frente no se usaría nunca.
+    ///
+    /// ⚠️ **Solo vivos MIENTRAS SE GRABA.** Un hotkey global SE COME la tecla, y
+    /// en macOS ⌥C escribe `ç` y ⌥X escribe `≈`: dejarlos puestos siempre le
+    /// quitaría esos caracteres en TODAS sus apps a cambio de nada, porque fuera
+    /// de una grabación no hay nada que marcar. Se registran al dar REC y se
+    /// sueltan al detener.
+    func registrarAtajosDeMarcador() {
         guard hotkeyRetoma == nil else { return }
-        hotkeyRetoma = GlobalHotKey(key: kVK_ANSI_X, mods: UInt32(cmdKey | shiftKey),
-                                    descripcion: "⌘⇧X marcar retoma") { [weak self] in
+        hotkeyRetoma = GlobalHotKey(key: kVK_ANSI_X, mods: UInt32(optionKey),
+                                    descripcion: "⌥X marcar retoma") { [weak self] in
             self?.marcar("retoma")
         }
-        hotkeyBueno = GlobalHotKey(key: kVK_ANSI_M, mods: UInt32(cmdKey | shiftKey),
-                                   descripcion: "⌘⇧M marcar bueno") { [weak self] in
+        hotkeyBueno = GlobalHotKey(key: kVK_ANSI_C, mods: UInt32(optionKey),
+                                   descripcion: "⌥C marcar bueno") { [weak self] in
             self?.marcar("bueno")
         }
+    }
+
+    /// Devuelve las teclas al sistema en cuanto termina la toma.
+    func soltarAtajosDeMarcador() {
+        guard hotkeyRetoma != nil || hotkeyBueno != nil else { return }
+        hotkeyRetoma = nil
+        hotkeyBueno = nil
+        Log.info("Atajos de marcador liberados (⌥X y ⌥C vuelven a escribir ≈ y ç)")
     }
 
     /// Anota el marcador y da acuse VISIBLE — sin sonido y sin nada que salga en
@@ -1379,6 +1395,7 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
 
     func toggleRecord() {
         if recorder.isRecording {
+            soltarAtajosDeMarcador()
             Task {
                 let dir = await recorder.stop(engine: engine, config: config)
                 isRecording = false
@@ -1394,6 +1411,11 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                 try recorder.start(engine: engine, config: config, activeScene: activeScene)
                 recordError = nil
                 isRecording = true
+                markerCount = 0
+                // Las teclas se toman prestadas justo ahora y se devuelven al
+                // detener: fuera de la toma no hay nada que marcar, y ⌥X/⌥C
+                // escriben caracteres que Daniel debe conservar.
+                registrarAtajosDeMarcador()
             } catch {
                 recordError = error.localizedDescription
             }

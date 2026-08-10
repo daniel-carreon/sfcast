@@ -38,6 +38,8 @@ enum StudioRecTest {
         }
         do {
             try recorder.start(engine: engine, config: config, activeScene: scene)
+            // Mismo camino que el botón: los atajos viven solo durante la toma.
+            StudioController.shared.registrarAtajosDeMarcador()
         } catch {
             Log.error("RECTEST_FAIL start: \(error.localizedDescription)")
             exit(1)
@@ -75,6 +77,7 @@ enum StudioRecTest {
             try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
         }
 
+        StudioController.shared.soltarAtajosDeMarcador()
         let sync = engine.syncReport()
         let cs = engine.compositorStats()
         let efectivo = engine.effectiveFPS

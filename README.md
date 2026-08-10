@@ -307,6 +307,30 @@ por escena + PNG de la ventana. Restaura `scenes.json` al salir.
 
 ---
 
+## 9b. MARCADORES EN VIVO (v3.2) — lo que sabes al grabar, para quien edita
+
+Mientras grabas, con la mano izquierda y sin mirar:
+
+| Tecla | Significa |
+|---|---|
+| **⌥X** | *"la regué, corta esto"* — tira la toma que ACABA aquí |
+| **⌥C** | *"esto estuvo bueno"* — candidato a highlight / cold open |
+
+Van a `manifest.json` (`markers`) y el editor los lee con
+`edicion-de-video/scripts/sfcast_manifest.py`. **Acuse:** el aro del espejo
+destella (ámbar = corte, verde = bueno) y sube un contador `✂︎N` en la barra —
+el espejo lleva `sharingType = .none`, así que lo ves tú y no sale en el video.
+
+⚠️ **Solo están vivos MIENTRAS SE GRABA.** Un hotkey global se come la tecla, y
+⌥C escribe `ç` y ⌥X escribe `≈`: dejarlos puestos siempre te quitaría esos
+caracteres en todas tus apps a cambio de nada. Se registran al dar REC y se
+sueltan al detener.
+
+⚠️ **Pulsa cuando te des cuenta, no intentes ser preciso.** Se guarda el instante
+de la pulsación sabiendo que un humano reacciona 1-2 s tarde; el editor tiene el
+transcript con tiempos por palabra y encuentra la frontera de la frase hacia
+atrás. Tú pones la intención, él la precisión.
+
 ## 10. Invariantes (para quien toque el código — Levy incluido)
 
 1. **Una grabación JAMÁS se pierde.** Todo lo opcional es best-effort: sin

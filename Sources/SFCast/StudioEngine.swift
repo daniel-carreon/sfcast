@@ -6,6 +6,7 @@ import CoreImage
 import CoreMedia
 import CoreVideo
 import IOSurface
+import Metal
 
 /// MODO ESTUDIO — motor de frames y compositor del programa.
 ///
@@ -77,6 +78,10 @@ final class StudioEngine: NSObject {
     let programClock = ProgramClock()
     /// Baja (y sube) la cadencia cuando la Mac no da el ritmo pedido.
     let governor = RenderGovernor()
+    /// Dónde se van los milisegundos del loop, por fase.
+    let profile = RenderProfile()
+    /// Rellena los ticks que el timer pierda: cadencia SIN huecos en el archivo.
+    let cadence = CadenceKeeper()
     /// La cadencia cambió: (efectiva, pedida). La UI lo enseña — una grabación
     /// que se degrada en silencio fue el patrón de TODOS los bugs del Estudio.
     var onCadenceChange: ((Int, Int) -> Void)?
@@ -212,6 +217,7 @@ final class StudioEngine: NSObject {
         screenRecOutput = nil
         screenAvailable = false
         stopCameraTap()
+        compositor.drainPipeline()
         frames.clear()
         _ = previewGate.take()   // suelta el último IOSurface retenido
         onStatusChange?()
@@ -569,12 +575,17 @@ final class StudioEngine: NSObject {
     private func restartRenderLoop() {
         renderTimer?.cancel()
         renderTimer = nil
+        // El frame en vuelo pertenece al lienzo VIEJO: soltarlo antes de
+        // re-armar, o quedaría un buffer del pool anterior retenido para
+        // siempre (y con el tamaño equivocado).
+        compositor.drainPipeline()
         startRenderLoop()
     }
 
     private func startRenderLoop() {
         let timer = DispatchSource.makeTimerSource(queue: renderQueue)
         governor.reset(target: fps, now: CACurrentMediaTime())
+        cadence.reset()
         timer.schedule(deadline: .now(), repeating: .init(1.0 / Double(fps)), leeway: .milliseconds(3))
         let comp = compositor
         let frames = frames
@@ -584,6 +595,8 @@ final class StudioEngine: NSObject {
         let preview = previewGate
         let clock = programClock
         let gov = governor
+        let prof = profile
+        let cad = cadence
         let targetFPS = fps
         // QA: ahoga el loop a propósito para ejercer el governor (--chokems).
         let chokeNs = UInt32(max(0, StudioRecTest.chokeMs)) * 1000
@@ -594,12 +607,19 @@ final class StudioEngine: NSObject {
             // el error crecería justo cuando la Mac va peor. Ver ProgramClock.
             let hostNow = CMClockGetTime(CMClockGetHostTimeClock())
             let t = CACurrentMediaTime()
+            let tStart = t
             if chokeNs > 0 { usleep(chokeNs) }
             var starved: Set<StudioSourceKind> = []
             var stale: Set<StudioSourceKind> = []
-            guard let pb = comp.compose(scene: scene, canvas: canvas, t: t,
-                                        frames: frames, starved: &starved,
-                                        stale: &stale) else { return }
+            // CANALIZADO: lanza el render de este tick y recoge el del anterior
+            // (que la GPU pintó mientras tanto). Lo que sale es del tick previo
+            // y trae SU hostTime — por eso el timestamp viaja pegado al buffer.
+            guard let listo = comp.composePipelined(scene: scene, canvas: canvas, t: t,
+                                                    hostNow: hostNow, frames: frames,
+                                                    starved: &starved,
+                                                    stale: &stale) else { return }
+            let pb = listo.buffer
+            let tCompose = CACurrentMediaTime()
             // preview → main por la COMPUERTA: un solo hop en vuelo, siempre el
             // frame más nuevo. Si main va atrás, aquí se TIRAN frames de preview
             // (gratis) en vez de apilarlos — el apilado era el "1 fps al minuto
@@ -616,6 +636,7 @@ final class StudioEngine: NSObject {
                     }
                 }
             }
+            let tPreview = CACurrentMediaTime()
             // grabación del programa (salida B) — best-effort, jamás bloquea.
             // La fuente crítica del lip-sync es la CÁMARA (es la cara que se
             // mira); si no hay, la pantalla. Se usa la de la cámara aunque la
@@ -623,16 +644,32 @@ final class StudioEngine: NSObject {
             // mueve el reloj y no se oye ningún ajuste al cortar.
             if let s = sink.get() {
                 let lat = frames.latency(.camera) ?? frames.latency(.screen)
-                s.appendVideo(pb, hostTime: clock.stamp(hostNow: hostNow, target: lat))
+                // `listo.hostTime` = el instante del tick en que se LANZÓ este
+                // frame, no el de ahora. Usar `hostNow` aquí metería el frame de
+                // latencia del pipeline como desfase de audio — justo lo que
+                // acabamos de matar.
+                //
+                // Y si el timer perdió disparos, el guardián devuelve TAMBIÉN
+                // los timestamps que faltan: el mismo contenido, sin huecos en
+                // la cadencia. Un mp4 de 30 fps constantes es lo que el editor
+                // quiere; los saltos de 750 ms del 9 ago eran justo esto.
+                for ts in cad.timestamps(for: listo.hostTime, fps: targetFPS) {
+                    s.appendVideo(pb, hostTime: clock.stamp(hostNow: ts, target: lat))
+                }
             }
+            let tEncode = CACurrentMediaTime()
+            prof.add(compose: (tCompose - tStart) * 1000,
+                     preview: (tPreview - tCompose) * 1000,
+                     encode: (tEncode - tPreview) * 1000,
+                     total: (tEncode - tStart) * 1000)
             // GOVERNOR: si la Mac no sostiene la cadencia pedida, se le pide
             // menos — pero REGULAR. Re-agendar el mismo timer es barato y no
             // toca la captura ni el writer.
             if let nuevo = gov.frameComposed(now: t, target: targetFPS) {
                 timer.schedule(deadline: .now(), repeating: .init(1.0 / Double(nuevo)),
                                leeway: .milliseconds(3))
-                Log.info("Estudio: cadencia ajustada a \(nuevo) fps (pedidos \(targetFPS)) — "
-                         + "la Mac no sostenía el ritmo; mejor \(nuevo) parejos que \(targetFPS) a tirones")
+                Log.info("Estudio: compongo a \(nuevo) fps (pedidos \(targetFPS)) para darle aire a la "
+                         + "GPU — el ARCHIVO sigue saliendo a \(targetFPS) constantes (frames rellenados)")
                 DispatchQueue.main.async { [weak self] in self?.onCadenceChange?(nuevo, targetFPS) }
             }
         }
@@ -745,6 +782,7 @@ final class StudioEngine: NSObject {
     /// llegaron a existir por falta de buffer. Es el hilo que alimenta al
     /// archivo, así que esto predice los fps del MP4 antes de abrirlo.
     func compositorStats() -> Compositor.Stats { compositor.stats() }
+    func compositorSubFases() -> (grafo: Double, buffer: Double, render: Double) { compositor.subFases() }
     func resetCompositorWindow() { compositor.resetWindow() }
 
     /// Latencia de captura medida por fuente (segundos) + corrección aplicada.
@@ -840,10 +878,98 @@ extension StudioEngine: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureA
 /// N fuentes + layout de escena → UN frame de programa (CVPixelBuffer BGRA,
 /// IOSurface-backed). CoreImage = GPU sin shaders propios ni deps externas.
 final class Compositor: @unchecked Sendable {
-    private let context = CIContext(options: [.cacheIntermediates: false])
+
+    /// Cómo se construye el CIContext y cómo se rinde. NO es una preferencia de
+    /// gusto: se eligió MIDIENDO (`--compbench`), porque CoreImage por default
+    /// convierte cada entrada a un espacio de trabajo lineal y vuelve a
+    /// convertir a la salida — un peaje que aquí no compra nada, porque el
+    /// compositor solo PEGA imágenes (no aplica filtros de color).
+    enum Modo: String, CaseIterable {
+        /// Lo que había hasta el 9 ago: working space por default + salida sRGB.
+        case clasico
+        /// Sin espacio de trabajo: los valores de píxel pasan tal cual.
+        case sinColorManagement
+        /// Sin color management + Metal explícito + prioridad baja de caché.
+        case sinColorMasMetal
+    }
+
+    private let modo: Modo
+    private let context: CIContext
     private var pool: CVPixelBufferPool?
     private var poolSize = CGSize.zero
     private let lock = NSLock()   // render loop vs snapshot de QA
+
+    init(modo: Modo = .sinColorMasMetal) {
+        self.modo = modo
+        switch modo {
+        case .clasico:
+            context = CIContext(options: [.cacheIntermediates: false])
+        case .sinColorManagement:
+            context = CIContext(options: [
+                .cacheIntermediates: false,
+                .workingColorSpace: NSNull(),
+                .outputColorSpace: NSNull(),
+            ])
+        case .sinColorMasMetal:
+            // El device explícito evita que CoreImage elija por su cuenta (y en
+            // una Mac con GPU integrada + WindowServer peleando, elegir mal
+            // cuesta milisegundos por frame).
+            if let dev = MTLCreateSystemDefaultDevice() {
+                context = CIContext(mtlDevice: dev, options: [
+                    .cacheIntermediates: false,
+                    .workingColorSpace: NSNull(),
+                    .outputColorSpace: NSNull(),
+                    .highQualityDownsample: false,
+                ])
+            } else {
+                context = CIContext(options: [
+                    .cacheIntermediates: false,
+                    .workingColorSpace: NSNull(),
+                    .outputColorSpace: NSNull(),
+                ])
+            }
+        }
+    }
+
+    /// El espacio de salida del render. Con color management apagado se pasa
+    /// `nil`: pedir sRGB ahí reintroduciría justo la conversión que quitamos.
+    private var renderColorSpace: CGColorSpace? {
+        modo == .clasico ? CGColorSpace(name: CGColorSpace.sRGB) : nil
+    }
+
+    // MARK: - PIPELINING (la cura de raíz, 9 ago 2026)
+    //
+    // Medición que lo motiva, en vivo con la escena real de Daniel:
+    //
+    //     grafo (CPU)   0.58 ms
+    //     buffer (pool) 0.02 ms
+    //     RENDER (GPU) 22.32 ms   ← el 97%
+    //
+    // `CIContext.render(_:to:…)` es SÍNCRONO: se queda esperando a que la GPU
+    // termine. Y la GPU no es nuestra — WindowServer compone dos monitores 4K,
+    // el encoder HEVC codifica, el preview y el espejo pintan. Componer no es
+    // caro; ESPERAR en el hilo que marca la cadencia, sí.
+    //
+    // Esta es la diferencia real con OBS, y no es "mejor código": es que ellos
+    // no bloquean. Aquí se hace igual — el trabajo de la GPU se SOLAPA con el
+    // siguiente tick: en el frame N se LANZA el render sin esperar, y en el
+    // N+1 se recoge el resultado (que la GPU pintó mientras tanto) y se manda
+    // al encoder. El handler pasa de esperar 22 ms a gastar ~0.6.
+    //
+    // Cuesta UN frame de latencia (33 ms), y por eso el hostTime viaja PEGADO
+    // a su buffer: el frame que se entrega es el del tick anterior y tiene que
+    // llevar el timestamp de ESE tick, o reintroduciríamos el desfase de audio
+    // que acabamos de matar.
+    private var pendingTask: CIRenderTask?
+    private var pendingBuffer: CVPixelBuffer?
+    private var pendingHostTime: CMTime?
+    private var pipelineFallos = 0
+
+    /// Frame LISTO (el del tick anterior) + su timestamp, o nil si aún no hay.
+    struct Listo {
+        let buffer: CVPixelBuffer
+        let hostTime: CMTime
+    }
 
     // MARK: - SENSOR del compositor (invariante 5b)
 
@@ -859,6 +985,9 @@ final class Compositor: @unchecked Sendable {
         var composeMsMax = 0.0
     }
     private var composeMs: [Double] = []
+    private var grafoMs: [Double] = []
+    private var bufferMs: [Double] = []
+    private var renderMs: [Double] = []
     private var composed = 0
     private var bufferFailures = 0
 
@@ -874,13 +1003,63 @@ final class Compositor: @unchecked Sendable {
     /// Vacía la ventana de tiempos (el heartbeat mide por tramo, no acumulado —
     /// un promedio de 45 min esconde un colapso de 4).
     func resetWindow() {
-        lock.lock(); composeMs.removeAll(keepingCapacity: true); lock.unlock()
+        lock.lock()
+        composeMs.removeAll(keepingCapacity: true)
+        grafoMs.removeAll(keepingCapacity: true)
+        bufferMs.removeAll(keepingCapacity: true)
+        renderMs.removeAll(keepingCapacity: true)
+        lock.unlock()
     }
 
     func compose(scene: StudioScene, canvas: CGSize, t: Double,
                  frames: LatestFrameStore, starved: inout Set<StudioSourceKind>,
                  stale: inout Set<StudioSourceKind>) -> CVPixelBuffer? {
         lock.lock(); defer { lock.unlock() }
+        let t0 = CACurrentMediaTime()
+        let image = buildImage(scene: scene, canvas: canvas, t: t,
+                               frames: frames, starved: &starved, stale: &stale)
+        let tGrafo = CACurrentMediaTime()
+        guard let pb = makeBuffer(canvas) else {
+            // NO es un no-op: es un frame que no va a existir en el archivo.
+            // Se cuenta aquí porque más arriba (el render loop) ya no hay a
+            // quién contárselo — ver Stats.
+            bufferFailures += 1
+            return nil
+        }
+        let tBuffer = CACurrentMediaTime()
+        context.render(image, to: pb, bounds: CGRect(origin: .zero, size: canvas),
+                       colorSpace: renderColorSpace)
+        let tRender = CACurrentMediaTime()
+        composed += 1
+        composeMs.append((tRender - t0) * 1000)
+        // Las TRES sub-fases por separado: armar el grafo (CPU), sacar buffer
+        // del pool (memoria) y renderizar (GPU, y `render` es SÍNCRONO: si
+        // WindowServer tiene la GPU ocupada con dos monitores 4K, aquí se
+        // ESPERA). Sin este desglose, "compose cuesta 20 ms" no dice si la cura
+        // es menos trabajo, más memoria o no bloquear.
+        grafoMs.append((tGrafo - t0) * 1000)
+        bufferMs.append((tBuffer - tGrafo) * 1000)
+        renderMs.append((tRender - tBuffer) * 1000)
+        if composeMs.count > 600 {
+            // El exceso se calcula UNA vez y ANTES de tocar nada: usar
+            // `composeMs.count` después del primer removeFirst borraba los
+            // otros tres arrays enteros (medían 0.00 ms, que era imposible).
+            let exceso = composeMs.count - 600
+            composeMs.removeFirst(exceso)
+            if grafoMs.count >= exceso { grafoMs.removeFirst(exceso) }
+            if bufferMs.count >= exceso { bufferMs.removeFirst(exceso) }
+            if renderMs.count >= exceso { renderMs.removeFirst(exceso) }
+        }
+        return pb
+    }
+
+    /// Arma el grafo CoreImage de la escena (CPU pura, ~0.6 ms medidos). No
+    /// toca la GPU: eso pasa al renderizar. Lo comparten la vía síncrona (QA)
+    /// y la canalizada (producción) para que no puedan divergir.
+    private func buildImage(scene: StudioScene, canvas: CGSize, t: Double,
+                            frames: LatestFrameStore,
+                            starved: inout Set<StudioSourceKind>,
+                            stale: inout Set<StudioSourceKind>) -> CIImage {
         var image = CIImage(color: CIColor(red: 0.04, green: 0.04, blue: 0.05))
             .cropped(to: CGRect(origin: .zero, size: canvas))
         for item in scene.items where item.enabled {
@@ -901,20 +1080,100 @@ final class Compositor: @unchecked Sendable {
             }
             image = place(src, item: item, canvas: canvas).composited(over: image)
         }
-        let t0 = CACurrentMediaTime()
-        guard let pb = makeBuffer(canvas) else {
-            // NO es un no-op: es un frame que no va a existir en el archivo.
-            // Se cuenta aquí porque más arriba (el render loop) ya no hay a
-            // quién contárselo — ver Stats.
-            bufferFailures += 1
-            return nil
+        return image
+    }
+
+    /// Recorte de las ventanas de medición (mismo exceso para las cuatro).
+    private func trimVentanas() {
+        guard composeMs.count > 600 else { return }
+        let exceso = composeMs.count - 600
+        composeMs.removeFirst(exceso)
+        if grafoMs.count >= exceso { grafoMs.removeFirst(exceso) }
+        if bufferMs.count >= exceso { bufferMs.removeFirst(exceso) }
+        if renderMs.count >= exceso { renderMs.removeFirst(exceso) }
+    }
+
+    /// COMPOSICIÓN CANALIZADA — lanza el render de ESTE frame sin esperarlo y
+    /// devuelve el del tick ANTERIOR, ya terminado por la GPU.
+    ///
+    /// El contrato con el llamador cambia: lo que sale NO es el frame que
+    /// acabas de pedir, es el de hace un tick — por eso trae su propio
+    /// `hostTime`. Devolver nil es normal en el primer tick (todavía no hay
+    /// nada anterior que entregar).
+    func composePipelined(scene: StudioScene, canvas: CGSize, t: Double,
+                          hostNow: CMTime, frames: LatestFrameStore,
+                          starved: inout Set<StudioSourceKind>,
+                          stale: inout Set<StudioSourceKind>) -> Listo? {
+        lock.lock(); defer { lock.unlock() }
+
+        // 1) RECOGER lo que la GPU pintó mientras tanto. Si por lo que sea no
+        //    terminó, se espera aquí — pero ese tiempo ya se solapó con el
+        //    trabajo del tick anterior, que es justamente la ganancia.
+        var listo: Listo?
+        if let task = pendingTask, let buf = pendingBuffer, let ht = pendingHostTime {
+            do {
+                try task.waitUntilCompleted()
+                listo = Listo(buffer: buf, hostTime: ht)
+            } catch {
+                // Un render fallido no puede matar la grabación: se cuenta y se
+                // sigue (el frame se pierde, pero jamás en silencio).
+                pipelineFallos += 1
+                bufferFailures += 1
+            }
+            pendingTask = nil; pendingBuffer = nil; pendingHostTime = nil
         }
-        context.render(image, to: pb, bounds: CGRect(origin: .zero, size: canvas),
-                       colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
-        composed += 1
-        composeMs.append((CACurrentMediaTime() - t0) * 1000)
-        if composeMs.count > 600 { composeMs.removeFirst(composeMs.count - 600) }
-        return pb
+
+        // 2) ARMAR y LANZAR el de este tick, sin esperarlo.
+        let t0 = CACurrentMediaTime()
+        let image = buildImage(scene: scene, canvas: canvas, t: t,
+                               frames: frames, starved: &starved, stale: &stale)
+        let tGrafo = CACurrentMediaTime()
+        guard let pb = makeBuffer(canvas) else {
+            bufferFailures += 1
+            return listo
+        }
+        let tBuffer = CACurrentMediaTime()
+        let dest = CIRenderDestination(pixelBuffer: pb)
+        dest.colorSpace = renderColorSpace
+        do {
+            pendingTask = try context.startTask(toRender: image,
+                                                from: CGRect(origin: .zero, size: canvas),
+                                                to: dest, at: .zero)
+            pendingBuffer = pb
+            pendingHostTime = hostNow
+            composed += 1
+        } catch {
+            pipelineFallos += 1
+            bufferFailures += 1
+        }
+        let tLanzado = CACurrentMediaTime()
+        composeMs.append((tLanzado - t0) * 1000)
+        grafoMs.append((tGrafo - t0) * 1000)
+        bufferMs.append((tBuffer - tGrafo) * 1000)
+        renderMs.append((tLanzado - tBuffer) * 1000)
+        trimVentanas()
+        return listo
+    }
+
+    /// Suelta el frame en vuelo (al parar el motor o cambiar de lienzo): sin
+    /// esto, un buffer del pool viejo quedaría retenido para siempre.
+    func drainPipeline() {
+        lock.lock()
+        if let t = pendingTask { try? t.waitUntilCompleted() }
+        pendingTask = nil; pendingBuffer = nil; pendingHostTime = nil
+        lock.unlock()
+    }
+
+    var pipelineFailures: Int { lock.lock(); defer { lock.unlock() }; return pipelineFallos }
+
+    /// Desglose de compose() en sus tres sub-fases (p50 de cada una).
+    func subFases() -> (grafo: Double, buffer: Double, render: Double) {
+        lock.lock(); defer { lock.unlock() }
+        func p50(_ x: [Double]) -> Double {
+            guard !x.isEmpty else { return 0 }
+            let s = x.sorted(); return s[s.count / 2]
+        }
+        return (p50(grafoMs), p50(bufferMs), p50(renderMs))
     }
 
     private func sourceImage(kind: StudioSourceKind, t: Double, canvas: CGSize,
@@ -1117,6 +1376,122 @@ final class Compositor: @unchecked Sendable {
         var pb: CVPixelBuffer?
         CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
         return pb
+    }
+}
+
+/// EL GUARDIÁN DE LA CADENCIA — por qué a OBS "no se le bajan los fps".
+///
+/// Con el render ya canalizado, el handler cuesta ~3.7 ms de 33.3. Pero un
+/// `DispatchSourceTimer` con `repeating` **no recupera los disparos perdidos**:
+/// si el sistema lo posterga 70 ms (un hipo de scheduler, un pico de
+/// WindowServer), esos dos ticks no vuelven y el archivo queda con un hueco.
+/// Eso es lo que producía los saltos de 750 ms del 9 ago.
+///
+/// La cura no es componer más rápido — es **no dejar huecos en la cadencia**:
+/// cuando faltan ticks, se reemiten los frames que faltan con el ÚLTIMO
+/// contenido disponible. Un frame repetido y un frame que nunca se compuso
+/// muestran EXACTAMENTE lo mismo en pantalla; la diferencia está en el
+/// contenedor, y un mp4 de 30 fps constantes es lo que cualquier editor quiere
+/// (los NLEs sufren el frame-rate variable). Es literalmente lo que hace OBS
+/// con sus "lagged frames".
+final class CadenceKeeper: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastEmitted: CMTime = .invalid
+    private var repetidos = 0
+    private var maxRelleno = 8
+
+    func reset() {
+        lock.lock(); lastEmitted = .invalid; repetidos = 0; lock.unlock()
+    }
+
+    var repeatedFrames: Int { lock.lock(); defer { lock.unlock() }; return repetidos }
+
+    /// Devuelve los timestamps que hay que emitir para llegar a `target` sin
+    /// dejar huecos: los de relleno primero (con el contenido anterior) y el
+    /// del frame nuevo al final.
+    ///
+    /// El relleno se topa a `maxRelleno`: si el hueco es enorme (la app estuvo
+    /// suspendida, el disco se atoró) no tiene sentido inventar dos segundos de
+    /// imagen congelada — ahí el hueco es información honesta.
+    func timestamps(for target: CMTime, fps: Int) -> [CMTime] {
+        lock.lock(); defer { lock.unlock() }
+        let paso = 1.0 / Double(max(fps, 1))
+        guard lastEmitted.isValid else {
+            lastEmitted = target
+            return [target]
+        }
+        let hueco = CMTimeGetSeconds(CMTimeSubtract(target, lastEmitted))
+        guard hueco > paso * 1.6 else {
+            lastEmitted = target
+            return [target]
+        }
+        let faltan = min(Int((hueco / paso).rounded()) - 1, maxRelleno)
+        guard faltan > 0 else { lastEmitted = target; return [target] }
+        var out: [CMTime] = []
+        for i in 1...faltan {
+            out.append(CMTimeAdd(lastEmitted,
+                                 CMTime(seconds: paso * Double(i), preferredTimescale: 90_000)))
+        }
+        repetidos += faltan
+        out.append(target)
+        lastEmitted = target
+        return out
+    }
+}
+
+/// PERFIL DEL RENDER LOOP — dónde se van los milisegundos, por fase.
+///
+/// El 9 ago el compositor medía 4 ms en el bench aislado y **23 ms en vivo**.
+/// Con un solo número agregado no hay forma de saber si eso es la GPU
+/// componiendo, el pool dando buffers, el encoder tragando o el preview: son
+/// cuatro curas distintas y opuestas. Esto las separa.
+final class RenderProfile: @unchecked Sendable {
+    private let lock = NSLock()
+    private var compose: [Double] = []
+    private var preview: [Double] = []
+    private var encode: [Double] = []
+    private var total: [Double] = []
+
+    func add(compose c: Double, preview p: Double, encode e: Double, total t: Double) {
+        lock.lock()
+        compose.append(c); preview.append(p); encode.append(e); total.append(t)
+        if compose.count > 900 {
+            compose.removeFirst(300); preview.removeFirst(300)
+            encode.removeFirst(300); total.removeFirst(300)
+        }
+        lock.unlock()
+    }
+
+    func reset() {
+        lock.lock()
+        compose.removeAll(); preview.removeAll(); encode.removeAll(); total.removeAll()
+        lock.unlock()
+    }
+
+    struct Fase { var p50 = 0.0; var p95 = 0.0; var max = 0.0 }
+    private static func stat(_ xs: [Double]) -> Fase {
+        guard !xs.isEmpty else { return Fase() }
+        let s = xs.sorted()
+        return Fase(p50: s[s.count / 2],
+                    p95: s[min(s.count - 1, Int(Double(s.count) * 0.95))],
+                    max: s[s.count - 1])
+    }
+
+    func snapshot() -> (compose: Fase, preview: Fase, encode: Fase, total: Fase, n: Int) {
+        lock.lock(); defer { lock.unlock() }
+        return (Self.stat(compose), Self.stat(preview), Self.stat(encode),
+                Self.stat(total), compose.count)
+    }
+
+    /// Una línea legible para el log/QA.
+    func line() -> String {
+        let s = snapshot()
+        return String(format: "compose %.1f/%.1f/%.1f · preview %.1f/%.1f · encode %.1f/%.1f/%.1f "
+                      + "· TOTAL %.1f/%.1f/%.1f ms (p50/p95/max, n=%d)",
+                      s.compose.p50, s.compose.p95, s.compose.max,
+                      s.preview.p50, s.preview.p95,
+                      s.encode.p50, s.encode.p95, s.encode.max,
+                      s.total.p50, s.total.p95, s.total.max, s.n)
     }
 }
 

@@ -118,14 +118,14 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
             engine.onCadenceChange = { [weak self] efectivo, pedido in
                 guard let self else { return }
                 if efectivo < pedido {
-                    self.raiseAlert("La Mac no daba \(pedido) fps: bajé la grabación a \(efectivo) "
-                                    + "parejos (mejor eso que \(pedido) a tirones).", critical: true)
-                    if self.recorder.isRecording {
-                        notify("SFCast", "Grabando a \(efectivo) fps: la Mac no da \(pedido). "
-                               + "Cierra algo o baja el lienzo.")
-                    }
+                    // OJO con el mensaje: desde el guardián de cadencia, el
+                    // ARCHIVO sigue saliendo a los fps pedidos. Lo que baja es
+                    // cuántos frames NUEVOS alcanza a componer la GPU. Decirle
+                    // "bajé tu grabación" sería mentirle y asustarlo de gratis.
+                    self.raiseAlert("La GPU va cargada: compongo a \(efectivo) fps para darle aire. "
+                                    + "Tu archivo sigue saliendo a \(pedido) constantes.", critical: false)
                 } else {
-                    self.raiseAlert("La Mac respira otra vez: cadencia de vuelta a \(efectivo) fps.",
+                    self.raiseAlert("La GPU respira: componiendo otra vez a \(efectivo) fps.",
                                     critical: false)
                 }
             }

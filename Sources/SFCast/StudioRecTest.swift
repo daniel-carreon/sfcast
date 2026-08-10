@@ -98,9 +98,21 @@ enum StudioRecTest {
         //    objetivo: eso es éxito, no fallo. Sin ahogo se espera sostener.
         if choke > 0 {
             if efectivo < engine.fps {
-                Log.info("RECTEST ✓ governor actuó: \(engine.fps) → \(efectivo) fps")
+                Log.info("RECTEST ✓ governor actuó: \(engine.fps) → \(efectivo) fps de composición")
             } else {
                 fallos.append("GOVERNOR-NO-ACTUO(seguía en \(efectivo) con ahogo de \(choke)ms)")
+            }
+            // LA PRUEBA QUE IMPORTA: con la GPU ahogada a propósito, el ARCHIVO
+            // tiene que salir IGUAL a la cadencia pedida. Es la promesa entera
+            // ("que no se bajen los fps") hecha aserción.
+            if videoFPS > 0, videoFPS < Double(engine.fps) * 0.95 {
+                fallos.append(String(format:
+                    "CADENCIA-ROTA-BAJO-AHOGO(%.1f de %d — el relleno no cubrió los huecos)",
+                    videoFPS, engine.fps))
+            } else {
+                Log.info(String(format: "RECTEST ✓ CADENCIA SOSTENIDA bajo ahogo de %d ms: "
+                                + "archivo a %.2f fps de %d pedidos (%d frames rellenados)",
+                                choke, videoFPS, engine.fps, engine.cadence.repeatedFrames))
             }
         } else if videoFPS > 0, videoFPS < Double(engine.fps) * 0.9 {
             // Distinguir las DOS causas, porque piden acciones opuestas: si el
@@ -122,6 +134,10 @@ enum StudioRecTest {
         // 3) NADA EN SILENCIO
         Log.info(String(format: "RECTEST compositor: p50 %.2f ms · máx %.2f ms · sin-buffer %d",
                         cs.composeMsP50, cs.composeMsMax, cs.bufferFailures))
+        Log.info("RECTEST ⏱ " + engine.profile.line())
+        let sub = engine.compositorSubFases()
+        Log.info(String(format: "RECTEST ⏱ dentro de compose: grafo %.2f ms · buffer %.2f ms · RENDER(GPU) %.2f ms",
+                        sub.grafo, sub.buffer, sub.render))
         if let cam = sync.camera {
             Log.info(String(format: "RECTEST sync: latencia cámara %.0f ms · corrección aplicada %.0f ms",
                             cam * 1000, sync.appliedMs))

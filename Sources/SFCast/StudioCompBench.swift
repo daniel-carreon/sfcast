@@ -88,6 +88,27 @@ enum StudioCompBench {
         print("\n" + String(repeating: "─", count: 78))
         print("Nota: arriba mide SOLO compose() con el buffer libre al instante.")
 
+        // ── LOS MODOS DE CONTEXTO, medidos en vez de elegidos por gusto ──
+        // CoreImage por default convierte cada entrada a un espacio de trabajo
+        // lineal y vuelve a convertir a la salida. Aquí el compositor solo PEGA
+        // imágenes: ese peaje no compra NADA. Esto lo cuantifica.
+        print("\nMODOS DE CONTEXTO (escena Burbuja derecha, lienzo 2560×1440)")
+        print("  modo                       p50 ms    p95 ms    vs clásico")
+        let canvas1440 = CGSize(width: 2560, height: 1440)
+        var base = 0.0
+        for modo in Compositor.Modo.allCases {
+            let c = Compositor(modo: modo)
+            let ms = measure(compositor: c, scene: burbuja, canvas: canvas1440,
+                             frames: frames, iterations: iterations)
+            guard !ms.isEmpty else { continue }
+            let p50 = percentile(ms, 0.50), p95 = percentile(ms, 0.95)
+            if modo == .clasico { base = p50 }
+            let rel = base > 0 ? String(format: "%.2fx", base / p50) : "—"
+            let pad = String(repeating: " ", count: max(0, 24 - modo.rawValue.count))
+            print("  \(modo.rawValue)\(pad) "
+                  + String(format: "%8.2f  %8.2f    %@", p50, p95, rel))
+        }
+
         // FASE 2 — el pipeline COMPLETO, que es lo que de verdad predice una
         // grabación: timer real a 30 Hz + compose + writer HEVC de verdad +
         // buffers RETENIDOS como los retienen el encoder, el preview y el

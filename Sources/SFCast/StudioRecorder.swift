@@ -249,6 +249,10 @@ final class StudioRecorder {
                                 cs.composeMsP50, cs.bufferFailures,
                                 engine.effectiveFPS, engine.fps, sync.appliedMs,
                                 Self.gb(Self.availableRAM())))
+                // PERFIL POR FASE cada 4 latidos (1 min): con un solo numero
+                // agregado no se puede distinguir GPU de encoder de pool, y son
+                // curas opuestas.
+                if ticks % 4 == 0 { Log.info("Estudio ⏱ " + engine.profile.line()) }
                 if free < Self.stopFreeBytes {
                     Log.error("Estudio: DISCO CASI LLENO (\(Self.gb(free))) — deteniendo para salvar lo grabado")
                     self.onAlert?("Disco casi lleno (\(Self.gb(free))) — detuve la grabación para no corromperla", true)

@@ -37,12 +37,23 @@ final class StudioEngine: NSObject {
     /// compositor estaría RECICLANDO el último frame (la "congelada" del 25 jul).
     private(set) var screenFrozen = false
     private(set) var screenRestarts = 0
+    /// La CÁMARA lleva rato sin entregar imagen nueva. Descubierto el 9 ago en
+    /// una prueba de 50 min: la ZV-E10 se apagó sola al minuto 31.6 (las Sony
+    /// tienen auto power off) y la grabación siguió 18 minutos componiendo su
+    /// ÚLTIMO frame congelado, a 30 fps perfectos, sin UNA SOLA línea de aviso.
+    /// Es exactamente la pantalla congelada del 25 jul por el otro lado — y el
+    /// caso más probable de Daniel, porque su cámara se apaga sola.
+    private(set) var cameraFrozen = false
+    private var cameraRetryAt: Double = 0
     var onStatusChange: (() -> Void)?
     /// Aviso de alto nivel para la UI (congelada / disco / recuperada).
     var onAlert: ((String, Bool) -> Void)?       // (mensaje, esCrítico)
 
     /// Solo para marcar "esta fuente lleva rato sin imagen nueva" en la UI.
     /// NO dispara nada: una pantalla quieta es legítima.
+    /// QA: congela la entrada de cámara a propósito (`--freezecam`).
+    nonisolated(unsafe) static var qaFreezeCamera = false
+
     nonisolated static let staleAfter: Double = 3.0
     /// Silencio TOTAL del stream (video + audio) que ya no es reposo sino
     /// muerte. 5s es holgado a propósito: prefiero tardar 5s en reaccionar que
@@ -702,7 +713,48 @@ final class StudioEngine: NSObject {
     private func startWatchdog() {
         watchdog?.invalidate()
         watchdog = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.checkStreamHealth() }
+            Task { @MainActor in
+                self?.checkStreamHealth()
+                self?.checkCameraHealth()
+            }
+        }
+    }
+
+    /// El comparador de la CÁMARA. `frames.age` ya existía como sensor; lo que
+    /// faltaba era que alguien lo MIRARA y avisara: un frame viejo se compone
+    /// igual de bien que uno nuevo, así que una cámara muerta produce un video
+    /// impecable de una foto fija.
+    private func checkCameraHealth() {
+        guard isRunning, cameraAvailable else { return }
+        guard let age = frames.age(.camera) else { return }
+        let dead = age > Self.deadAfter
+        if dead != cameraFrozen {
+            cameraFrozen = dead
+            onStatusChange?()
+            if dead {
+                Log.error(String(format: "Estudio: CÁMARA CONGELADA — %.1fs sin imagen nueva "
+                                 + "(¿se apagó sola? ¿cable USB?)", age))
+                onAlert?("La cámara dejó de dar imagen: se está grabando su último frame congelado.", true)
+                if StudioController.shared.recorder.isRecording
+                    || RecordingController.shared.state != .idle {
+                    notify("SFCast — LA CÁMARA SE APAGÓ",
+                           "Llevas grabando con la imagen CONGELADA. Revisa la cámara "
+                           + "(las Sony se apagan solas).")
+                    Log.error("Estudio: NOTIFICACIÓN enviada (cámara congelada grabando)")
+                }
+            } else {
+                Log.info("Estudio: cámara viva de nuevo")
+                onAlert?("La cámara volvió.", false)
+            }
+        }
+        // Mientras siga muerta, reconciliar cada 10s: si Daniel la vuelve a
+        // encender, engancha sola sin que tenga que tocar nada.
+        if dead {
+            let now = CACurrentMediaTime()
+            if now > cameraRetryAt {
+                cameraRetryAt = now + 10
+                applyDeviceSelection(micEnabled: true)
+            }
         }
     }
 
@@ -896,6 +948,11 @@ extension StudioEngine: SCStreamOutput {
 extension StudioEngine: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
     nonisolated func captureOutput(_ output: AVCaptureOutput, didOutput sb: CMSampleBuffer, from connection: AVCaptureConnection) {
         if output is AVCaptureVideoDataOutput {
+            // QA (--freezecam): simula que la cámara se apagó sola (auto power
+            // off de las Sony) tirando sus frames en silencio, que es EXACTO lo
+            // que se vio el 9 ago: el store conserva el último y el compositor
+            // sigue produciendo 30 fps impecables de una foto fija.
+            if StudioEngine.qaFreezeCamera { return }
             guard let pb = CMSampleBufferGetImageBuffer(sb) else { return }
             // El PTS viaja con el frame: es la única forma de saber CUÁNDO se
             // capturó de verdad esta imagen y no cuándo nos llegó.

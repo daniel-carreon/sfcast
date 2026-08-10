@@ -1035,3 +1035,37 @@ Se quedaron porque son gratis, pero el grueso era el bloqueo, no el color.
 y no permitía decidir nada; el desglose por fase señaló la cura en un intento. Y la
 segunda: cuando algo tarda, la pregunta no es solo *"¿cómo lo hago más rápido?"*
 sino *"¿por qué lo estoy ESPERANDO?"*.
+
+### v3.1b — lo que la prueba larga descubrió sola: **la cámara se apaga y nadie avisa**
+
+En la corrida de 50 min, al **minuto 31.6**, la ZV-E10 dejó de entregar frames
+(`cam:30fps → cam:3fps → cam:0fps`) y **la grabación siguió 18 minutos a 30.00 fps
+perfectos componiendo su último frame congelado, sin una sola línea en el log**.
+
+Es la pantalla congelada del 25 jul otra vez, por el otro lado — y es el caso **más
+probable de Daniel**, porque las Sony tienen auto power off y él graba tomas largas.
+El sensor existía (`frames.age(.camera)`); lo que faltaba era que alguien lo MIRARA.
+
+Un frame viejo se compone igual de bien que uno nuevo: **una cámara muerta produce
+un video impecable de una foto fija.** Ahora `checkCameraHealth()` corre en el mismo
+watchdog de 1 Hz: detecta a los 5 s, avisa en la ventana, **manda notificación del
+sistema si está grabando**, y reconcilia la sesión cada 10 s para engancharla sola
+cuando Daniel la vuelva a encender.
+
+Ejercido a voluntad con `--rectest --freezecam` (tira los frames de cámara a
+propósito): **detectado en 5.3 s**, `cameraFrozen=true`, notificación enviada.
+
+### La batería completa, corrida al final
+
+| Prueba | Resultado |
+|---|---|
+| Grabación **44.8 min** (la duración del incidente) | **30.00 fps de 30 — 100%**, 0 rellenados, 0 drops |
+| **Soak 40 min**, escena compuesta, headless | **SOAK_OK** · 29.99 fps · 0.0% repetidos · RAM plana |
+| Estrés `--chokems 60` (doble del presupuesto) | archivo a **29.72 fps** (antes 14.53) |
+| `--failstream` (reenganche de pantalla falla) | grabación **sobrevive** a 29.99 fps + notificación |
+| `--freezecam` (la cámara se apaga) | detectado en **5.3 s** + notificación |
+| `--mirrortest` | alineación 0.00 px · fuga 0.0000 · costo −0.2 fps |
+| `--compbench` / `--studiotest` / `--selftest` / `validate.sh` | verdes |
+
+Las dos pruebas largas corrieron **en paralelo** (dos pipelines de video a la vez en
+la misma Mac), que de paso es la prueba de estrés más realista que se hizo.

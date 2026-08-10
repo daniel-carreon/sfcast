@@ -46,7 +46,17 @@ enum StudioRecTest {
         // reenganche de pantalla. Es el caso que se dio SOLO en la prueba larga
         // (minuto 23.8) y que hay que poder disparar a voluntad: lo que se
         // verifica es que la grabación SOBREVIVE y que el aviso sale.
-        if CommandLine.arguments.contains("--failstream") {
+        if CommandLine.arguments.contains("--freezecam") {
+            // La cámara se "apaga" a la mitad. Lo que se verifica: que el
+            // watchdog lo NOTE (y avise), porque el video sigue saliendo
+            // perfecto — una foto fija a 30 fps es indistinguible de una
+            // grabación sana si nadie mira el sensor.
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 400_000_000)
+            Log.info("RECTEST: congelando la cámara a propósito (simula auto power off)")
+            StudioEngine.qaFreezeCamera = true
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 600_000_000)
+            StudioEngine.qaFreezeCamera = false
+        } else if CommandLine.arguments.contains("--failstream") {
             try? await Task.sleep(nanoseconds: UInt64(seconds) * 500_000_000)
             Log.info("RECTEST: disparando fallo de reenganche de pantalla a propósito")
             engine.simulateRestartFailure()
@@ -169,7 +179,17 @@ enum StudioRecTest {
         // Con --failstream, la prueba es que la grabación SIGUIÓ VIVA pese al
         // fallo: si el archivo quedó corto o sin cadencia, el aviso no sirvió
         // de nada porque el video se perdió igual.
-        if CommandLine.arguments.contains("--failstream") {
+        if CommandLine.arguments.contains("--freezecam") {
+            // La cámara se "apaga" a la mitad. Lo que se verifica: que el
+            // watchdog lo NOTE (y avise), porque el video sigue saliendo
+            // perfecto — una foto fija a 30 fps es indistinguible de una
+            // grabación sana si nadie mira el sensor.
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 400_000_000)
+            Log.info("RECTEST: congelando la cámara a propósito (simula auto power off)")
+            StudioEngine.qaFreezeCamera = true
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 600_000_000)
+            StudioEngine.qaFreezeCamera = false
+        } else if CommandLine.arguments.contains("--failstream") {
             if engine.screenRestarts == 0 {
                 fallos.append("FAILSTREAM-NO-SE-EJERCIO")
             } else if videoFPS > 0, videoFPS >= Double(engine.fps) * 0.95 {
@@ -177,6 +197,16 @@ enum StudioRecTest {
                                 + "%.2f fps de %d, cámara y voz intactas", videoFPS, engine.fps))
             } else {
                 fallos.append(String(format: "GRABACION-DAÑADA-TRAS-FALLO(%.1f fps)", videoFPS))
+            }
+        }
+
+        if CommandLine.arguments.contains("--freezecam") {
+            if engine.cameraFrozen || engine.screenRestarts >= 0 {
+                Log.info("RECTEST ✓ el watchdog de cámara marcó la congelada "
+                         + "(cameraFrozen=\(engine.cameraFrozen))")
+            }
+            if !engine.cameraFrozen {
+                fallos.append("WATCHDOG-CAMARA-NO-DETECTO(la cámara se congeló y nadie lo notó)")
             }
         }
 

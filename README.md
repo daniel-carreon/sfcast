@@ -272,11 +272,23 @@ data.json con el transcript). Dile a Levy:
 /Applications/SFCast.app/Contents/MacOS/SFCast --paneltest 8      # muestra el pill sin grabar
 /Applications/SFCast.app/Contents/MacOS/SFCast --compresstest ~/Movies/SFCast/{id}   # compresor sobre una COPIA
 open -W /Applications/SFCast.app --args --studiotest 8            # QA del Modo Estudio E2E
-open -W /Applications/SFCast.app --args --rectest 14              # graba y VERIFICA el MP4 (pistas alineadas, cadencia, nada perdido)
-open -W /Applications/SFCast.app --args --rectest 22 --chokems 60 # ahoga el loop a propósito → ejerce el governor
-open -W /Applications/SFCast.app --args --synctest 12             # latencia REAL de cámara/pantalla/mic
-./.build/debug/SFCast --compbench 60                              # costo y RAM por tamaño de lienzo (headless, sin TCC)
+open -W /Applications/SFCast.app --args --rectest 14                 # graba y VERIFICA el MP4 (pistas alineadas, cadencia, nada perdido)
+open -W /Applications/SFCast.app --args --rectest 22 --chokems 60    # ahoga el loop a propósito → ejerce el governor
+open -W /Applications/SFCast.app --args --rectest 24 --failstream    # mata el reenganche de pantalla → ¿sobrevive la toma? ¿avisa?
+open -W /Applications/SFCast.app --args --synctest 12                # latencia REAL de cámara/pantalla/mic
+./.build/debug/SFCast --compbench 60                                 # costo y RAM por lienzo (headless, sin TCC)
+./.build/debug/SFCast --soak 40                                      # RESISTENCIA: 40 min con la escena compuesta, headless
 ```
+
+**`--soak` es la prueba de duración que no depende de permisos.** Las dos pruebas
+largas con la app real tienen un hueco cada una: una tuvo la escena compuesta pero
+el permiso de pantalla se cayó a mitad, y la otra corre con cámara sola porque ese
+permiso, tras un rebuild, necesita un gesto humano. `--soak` corre el pipeline
+entero (timer + compose + writer + CadenceKeeper + ProgramClock) con pantalla 4K y
+burbuja sintéticas, todo el tiempo que se le pida, y da veredicto `SOAK_OK/FAIL`
+(fps ≥ 29 · repetidos < 15% · cero drops · peor ventana de 20 s ≥ 27 fps).
+Puede correr **en paralelo** con una grabación real: dos pipelines a la vez es, de
+paso, una buena prueba de estrés.
 
 **`--rectest` es el gate del archivo (v3.0).** Verifica contra el MP4 —no contra la
 intención— las tres cosas que el 9 ago salieron mal y nadie vio hasta el día

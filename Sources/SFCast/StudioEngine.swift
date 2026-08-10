@@ -757,6 +757,19 @@ final class StudioEngine: NSObject {
             } catch {
                 Log.error("Estudio: reenganche falló: \(error.localizedDescription)")
                 onAlert?("No pude reenganchar la pantalla: \(error.localizedDescription)", true)
+                // ⚠️ Si esto pasa GRABANDO, el programa sigue escribiendo con la
+                // última imagen de pantalla CONGELADA y el resto (cámara, voz)
+                // perfecto — o sea, se ve sano. Medido el 9 ago en la prueba de
+                // 25 min: 60 segundos así, y la alerta vivía en la ventana del
+                // Estudio, que está en el OTRO monitor mientras Daniel presenta.
+                // Es el mismo patrón que costó 45 minutos esa mañana: el sensor
+                // existía y no alcanzaba al humano. Aquí sí lo alcanza.
+                if RecordingController.shared.state != .idle
+                    || StudioController.shared.recorder.isRecording {
+                    notify("SFCast — LA PANTALLA SE CAYÓ",
+                           "Sigo grabando tu cámara y tu voz, pero la PANTALLA quedó "
+                           + "congelada y no pude reengancharla. Revisa el permiso.")
+                }
                 onStatusChange?()
                 // Si el reenganche murió por permiso (fila de TCC muerta),
                 // el doctor guía la reparación; su alerta pide el clic, jamás

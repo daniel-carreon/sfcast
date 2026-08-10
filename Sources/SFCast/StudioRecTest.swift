@@ -148,6 +148,14 @@ enum StudioRecTest {
             }
         }
 
+        // 3c) ¿La pantalla aguantó viva toda la sesión? Un reenganche no invalida
+        //     la grabación (la cámara y la voz siguen), pero deja tramos con la
+        //     imagen congelada y ESO tiene que decirse con nombre y número.
+        if engine.screenRestarts > 0 {
+            Log.error("RECTEST ⚠️ la pantalla se cayó \(engine.screenRestarts) vez(ces) "
+                      + "durante la sesión — hubo tramos con la imagen congelada")
+        }
+
         // 3) NADA EN SILENCIO
         Log.info(String(format: "RECTEST compositor: p50 %.2f ms · máx %.2f ms · sin-buffer %d",
                         cs.composeMsP50, cs.composeMsMax, cs.bufferFailures))

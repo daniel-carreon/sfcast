@@ -483,6 +483,13 @@ struct StudioManifest: Codable {
     var markers: [Marker] = []
     /// Tramos con la imagen congelada — el editor NO debe usarlos.
     var deadZones: [DeadZone] = []
+    /// Qué entrada de micrófono se usó DE VERDAD. Sin esto, un diagnóstico de
+    /// audio empieza a ciegas: el Shure de Daniel cambia de formato entre
+    /// arranques y el sistema tiene cuatro entradas candidatas.
+    var micDevice: String?
+    /// Muestras de micrófono escritas. **Si es 0, la grabación NO TIENE VOZ** —
+    /// y el editor tiene que saberlo antes de invertir una hora en cortarla.
+    var micSamples: Int = 0
 
     func write(to dir: URL) {
         let enc = JSONEncoder()

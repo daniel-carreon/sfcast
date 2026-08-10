@@ -343,6 +343,27 @@ de la pulsación sabiendo que un humano reacciona 1-2 s tarde; el editor tiene e
 transcript con tiempos por palabra y encuentra la frontera de la frase hacia
 atrás. Tú pones la intención, él la precisión.
 
+## 9c. GUARD DE VOZ (v3.3) — la app NO te deja grabar en silencio
+
+El 10 ago se grabaron **35 minutos sin una sola muestra de voz**. El sensor
+existía: el latido escribió `mic:MUDO` **140 veces**, desde el segundo 15. Nadie
+hizo nada con eso. Ahora:
+
+| Cuándo | Qué pasa |
+|---|---|
+| Al dar REC | **Preflight de voz**: si el mic no entrega, aviso + notificación ANTES de hablar |
+| A los 3 s | Si van 0 muestras: alerta en pantalla + notificación al sistema |
+| A los 20 s | Si siguen 0: **DETIENE la grabación**. A los 20 s no perdiste nada; a los 35 min lo perdiste todo |
+| A los 15 s | Si llegan datos pero el pico es ~0: *"¿está muteado o con la ganancia en cero?"* |
+| A mitad | Si la voz enmudece >8 s: alerta + notificación (la imagen sigue) |
+
+Y el manifest guarda `micDevice` (qué entrada se usó DE VERDAD) y `micSamples`
+— **si es 0, la grabación no tiene voz**, y el editor lo sabe antes de invertir
+una hora en cortarla.
+
+Ejercerlo: `--rectest 90 --mutemic` (corta la entrada de mic a propósito).
+Medido: preflight avisa · alerta a los 3 s · **auto-stop a los 20 de 90 pedidos**.
+
 ## 10. Invariantes (para quien toque el código — Levy incluido)
 
 1. **Una grabación JAMÁS se pierde.** Todo lo opcional es best-effort: sin
@@ -384,6 +405,11 @@ atrás. Tú pones la intención, él la precisión.
    frame repetido y uno que nunca se compuso muestran lo MISMO en pantalla: la
    diferencia es el contenedor, y 30 fps constantes es lo que el editor quiere.
    El relleno usa el fps **pedido**, nunca el efectivo del governor.
+6f. **Un sensor sin actuador no es un sensor.** El latido decía `mic:MUDO` 140
+   veces mientras se perdían 35 minutos. Medir y no ACTUAR es la forma más cara
+   de este bug, porque deja la evidencia para el post-mortem y no salva nada.
+   Todo sensor nuevo nace con su alarma, y si el daño es irrecuperable (el
+   audio), con su freno.
 6c. **Lo que puede fallar en silencio se cuenta en el sitio donde falla.** Un
    `return nil` en el camino caliente es un frame que desaparece del archivo sin
    aparecer en ningún contador — fue exactamente el bug del 9 ago. Y **ninguna

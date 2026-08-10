@@ -40,10 +40,18 @@ final class StudioRecorder {
     /// Es el dato más barato de todo el sistema: ya está medido.
     private var envelope: [Float] = []
     private var envelopeTask: Task<Void, Never>?
+    private var voiceTask: Task<Void, Never>?
+    /// Dispositivo de micrófono que quedó DE VERDAD en la sesión (va al
+    /// manifest). El Shure cambia de formato entre arranques y sin registrar
+    /// qué entrada se usó, el próximo diagnóstico vuelve a ser a ciegas.
+    private var micDeviceName: String?
     private var deadZones: [StudioManifest.DeadZone] = []
     private var frozenSince: [String: Double] = [:]
 
     var isRecording: Bool { state == .recording }
+    /// Última carpeta escrita (la usa el QA cuando el auto-stop cerró la sesión
+    /// antes de que el test pidiera el stop).
+    private(set) var lastDir: URL?
     var elapsed: TimeInterval { state == .recording ? Date().timeIntervalSince(startedAt) : 0 }
 
     /// Avisos hacia la UI (disco, congelada, auto-stop).
@@ -182,7 +190,10 @@ final class StudioRecorder {
         Log.info("Estudio: grabando \(videoID) → [\(activated.joined(separator: ", "))] "
                  + "calidad=\(config.programQuality.rawValue) libre=\(Self.gb(free))")
         preflightRitmo(engine: engine)
+        preflightVoz(engine: engine, micEnabled: config.micEnabled)
+        micDeviceName = engine.micDeviceName
         startEnvelope(engine: engine)
+        startVoiceGuard(engine: engine, micEnabled: config.micEnabled)
         startHealthMonitor(engine: engine)
     }
 
@@ -192,6 +203,25 @@ final class StudioRecorder {
     /// REC ya hay evidencia de si esta Mac sostiene la cadencia AHORA MISMO. La
     /// alarma del 9 ago llegó cuando el video ya estaba grabado; ésta llega
     /// antes de hablar. AVISA, jamás bloquea: la grabación es de Daniel.
+    /// PREFLIGHT DE VOZ — el aviso que llega ANTES de hablar.
+    ///
+    /// El motor lleva corriendo desde que se abrió el Estudio, así que al dar
+    /// REC ya se sabe si el micrófono entrega. Avisar aquí cuesta cero y es la
+    /// diferencia entre perder 3 segundos y perder 35 minutos.
+    private func preflightVoz(engine: StudioEngine, micEnabled: Bool) {
+        guard micEnabled else { return }
+        let fresco = engine.levels.fresh().mic
+        if !fresco {
+            Log.error("Estudio: PREFLIGHT DE VOZ — el micrófono NO está entregando audio")
+            onAlert?("⚠️ El micrófono no está dando señal. Compruébalo ANTES de hablar "
+                     + "(el vúmetro del Mixer debe moverse).", true)
+            notify("SFCast — REVISA EL MICRÓFONO", "No está entrando audio al empezar a grabar.")
+        } else {
+            Log.info(String(format: "Estudio: preflight de voz OK — mic entregando (nivel %.4f)",
+                            engine.levels.get().mic))
+        }
+    }
+
     private func preflightRitmo(engine: StudioEngine) {
         let objetivo = Double(engine.fps)
         guard objetivo > 0 else { return }
@@ -244,6 +274,85 @@ final class StudioRecorder {
         if let data = try? JSONSerialization.data(withJSONObject: payload) {
             try? data.write(to: dir.appendingPathComponent("levels.json"))
             Log.info("Estudio: envolvente de audio → levels.json (\(envelope.count) muestras a 10 Hz)")
+        }
+    }
+
+    // MARK: - GUARD DE VOZ — el sensor que faltaba y costó 35 minutos
+
+    /// El 10 ago Daniel grabó **35 minutos sin una sola muestra de voz**. El
+    /// sensor EXISTÍA: el latido escribió `mic:MUDO` **140 veces seguidas**,
+    /// desde el segundo 15. Nadie hizo nada con esa información.
+    ///
+    /// Es la quinta repetición del patrón órgano-sin-sensor de este sistema, y
+    /// la más cara: la imagen se regraba, una toma sin voz es basura. La noche
+    /// anterior se construyeron alarmas para pantalla, cámara, fps, memoria y
+    /// disco — y se dejó fuera justo la del audio, que es lo único irrecuperable.
+    ///
+    /// Cubre los tres modos de fallo, que piden avisos distintos:
+    ///  1. **Nunca llega audio** (lo de hoy: cable, el micro apagado, MOTIV
+    ///     tomándolo). Aviso a los 3 s y **auto-stop a los 20** — a los 20
+    ///     segundos no has perdido nada; a los 35 minutos lo has perdido todo.
+    ///  2. **Llegan buffers pero en silencio digital** (muteado, ganancia a
+    ///     cero). `fresh()` diría que sí llega: hay que mirar el NIVEL.
+    ///  3. **Enmudece a mitad de la toma** — el caso que más duele porque ya
+    ///     llevas media hora hablando.
+    private func startVoiceGuard(engine: StudioEngine, micEnabled: Bool) {
+        voiceTask?.cancel()
+        guard micEnabled else {
+            Log.info("Estudio: guard de voz OFF (grabación sin micrófono, a propósito)")
+            return
+        }
+        voiceTask = Task { @MainActor [weak self] in
+            var pico: Float = 0
+            var avisoSinAudio = false, avisoSilencio = false, avisoCaida = false
+            var mudoDesde: Double?
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, self.state == .recording else { return }
+                let el = self.elapsed
+                let samples = self.sink?.snapshot().micSamples ?? 0
+                let fresco = engine.levels.fresh().mic
+                pico = max(pico, engine.levels.get().mic)
+
+                // 1) NUNCA llegó audio
+                if samples == 0, el >= 3, !avisoSinAudio {
+                    avisoSinAudio = true
+                    Log.error("Estudio: SIN VOZ — 3s de grabación y CERO muestras de micrófono")
+                    self.onAlert?("⚠️ NO ESTÁ ENTRANDO TU VOZ. Revisa el micrófono AHORA "
+                                  + "(¿encendido? ¿cable? ¿otra app lo tomó?).", true)
+                    notify("SFCast — NO SE OYE TU VOZ",
+                           "Llevas 3 segundos grabando y no entra audio del micrófono.")
+                }
+                if samples == 0, el >= 20 {
+                    Log.error("Estudio: SIN VOZ a los 20s — DETENIENDO para no perder media hora")
+                    self.onAlert?("Detuve la grabación: no entraba tu voz. Arregla el micrófono "
+                                  + "y vuelve a empezar.", true)
+                    notify("SFCast — GRABACIÓN DETENIDA", "No entraba tu voz. Revisa el micrófono.")
+                    self.onEmergencyStop?()
+                    return
+                }
+                // 2) llegan buffers, pero es silencio digital
+                if samples > 0, el >= 15, pico < 0.002, !avisoSilencio {
+                    avisoSilencio = true
+                    Log.error(String(format: "Estudio: MIC EN SILENCIO — llegan datos pero el pico "
+                                     + "en 15s es %.5f (¿muteado? ¿ganancia en cero?)", pico))
+                    self.onAlert?("El micrófono entrega datos pero NO capta sonido: ¿está muteado "
+                                  + "o con la ganancia en cero?", true)
+                    notify("SFCast — EL MICRÓFONO NO CAPTA", "Llega señal pero está en silencio.")
+                }
+                // 3) enmudeció a mitad
+                if samples > 0 {
+                    if fresco { mudoDesde = nil } else if mudoDesde == nil { mudoDesde = el }
+                    if let d = mudoDesde, el - d > 8, !avisoCaida {
+                        avisoCaida = true
+                        Log.error(String(format: "Estudio: LA VOZ SE CAYÓ en el minuto %.1f", el / 60))
+                        self.onAlert?("Tu voz dejó de entrar. Sigo grabando imagen, pero revisa "
+                                      + "el micrófono.", true)
+                        notify("SFCast — SE CAYÓ TU VOZ",
+                               "Dejó de entrar audio del micrófono. La imagen sigue grabando.")
+                    }
+                }
+            }
         }
     }
 
@@ -374,6 +483,7 @@ final class StudioRecorder {
         state = .stopping
         health?.cancel(); health = nil
         envelopeTask?.cancel(); envelopeTask = nil
+        voiceTask?.cancel(); voiceTask = nil
         engine.onNeedNewScreenRawURL = nil
         let duration = Date().timeIntervalSince(startedAt)
         // Un tramo congelado que seguía abierto al detener se cierra AQUÍ: si no,
@@ -437,7 +547,9 @@ final class StudioRecorder {
             micEnabled: config.micEnabled,
             systemAudioEnabled: config.systemAudioEnabled,
             markers: markers,
-            deadZones: deadZones)
+            deadZones: deadZones,
+            micDevice: micDeviceName,
+            micSamples: programStats?.micSamples ?? 0)
         manifest.write(to: dir)
         writeEnvelope(to: dir)
 
@@ -533,6 +645,7 @@ final class StudioRecorder {
             Log.error("Estudio: hubo \(engine.screenRestarts) reenganche(s) de pantalla en esta sesión")
         }
         Log.info("Estudio: sesión \(id) guardada en \(dir.path)")
+        lastDir = dir
         return dir
     }
 }

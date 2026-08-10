@@ -53,6 +53,8 @@ final class StudioEngine: NSObject {
     /// NO dispara nada: una pantalla quieta es legítima.
     /// QA: congela la entrada de cámara a propósito (`--freezecam`).
     nonisolated(unsafe) static var qaFreezeCamera = false
+    /// QA: corta la entrada de micrófono a propósito (`--mutemic`).
+    nonisolated(unsafe) static var qaMuteMic = CommandLine.arguments.contains("--mutemic")
 
     nonisolated static let staleAfter: Double = 3.0
     /// Silencio TOTAL del stream (video + audio) que ya no es reposo sino
@@ -172,6 +174,14 @@ final class StudioEngine: NSObject {
     /// sitio que nadie eligió: pasó en el QA del 9 ago, donde la ZV-E10 estaba
     /// apagada y el Estudio grabó de "OBS Virtual Camera" (un cuadro fijo, y
     /// con OBS cerrado ni eso). El nombre resuelto es el sensor de eso.
+    /// La entrada de MICRÓFONO que quedó de verdad en la sesión. Hermana de
+    /// `cameraDeviceName`, y por el mismo motivo: lo que pide settings.json no
+    /// siempre es lo que macOS entrega.
+    var micDeviceName: String? {
+        cameraSession.inputs.compactMap { ($0 as? AVCaptureDeviceInput)?.device }
+            .first(where: { $0.hasMediaType(.audio) })?.localizedName
+    }
+
     var cameraDeviceName: String? {
         cameraSession.inputs.compactMap { ($0 as? AVCaptureDeviceInput)?.device }
             .first(where: { $0.hasMediaType(.video) })?.localizedName
@@ -991,6 +1001,9 @@ extension StudioEngine: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureA
             // capturó de verdad esta imagen y no cuándo nos llegó.
             frames.set(pb, for: .camera, pts: CMSampleBufferGetPresentationTimeStamp(sb))
         } else if output is AVCaptureAudioDataOutput {
+            // QA (--mutemic): simula EXACTAMENTE el fallo del 10 ago — el mic
+            // deja de entregar y la app sigue grabando imagen impecable.
+            if StudioEngine.qaMuteMic { return }
             AudioMath.describeOnce(sb, label: "mic")
             AudioMath.traceOnce(sb, label: "mic", every: 180)
             AudioMath.noteLatency(sb)

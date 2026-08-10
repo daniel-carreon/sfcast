@@ -98,6 +98,20 @@ enum StudioRecTest {
         let cs = engine.compositorStats()
         let efectivo = engine.effectiveFPS
         guard let dir = await recorder.stop(engine: engine, config: config) else {
+            // Con --mutemic esto es el ÉXITO, no el fallo: el guard de voz
+            // detuvo la toma él solo antes de que el test lo pidiera. Un gate
+            // que confunde "el sujeto se protegió" con "el sujeto falló" enseña
+            // a ignorar los rojos.
+            if CommandLine.arguments.contains("--mutemic") {
+                Log.info("RECTEST ✓ EL GUARD DE VOZ DETUVO LA GRABACIÓN SOLO — "
+                         + "eso es exactamente lo que tenía que pasar")
+                if let d = recorder.lastDir {
+                    Log.info("RECTEST_OK \(d.lastPathComponent) (detenida por falta de voz)")
+                } else {
+                    Log.info("RECTEST_OK (detenida por falta de voz)")
+                }
+                exit(0)
+            }
             Log.error("RECTEST_FAIL la grabación no dejó carpeta")
             exit(1)
         }
@@ -296,6 +310,27 @@ enum StudioRecTest {
                 if mic.count < seconds * 5 { fallos.append("ENVOLVENTE-CORTA(\(mic.count) muestras)") }
             } else {
                 fallos.append("SIN-LEVELS-JSON")
+            }
+        }
+
+        // EL GUARD DE VOZ: con --mutemic la grabación NO debe llegar al final.
+        // Es el gate del fallo que costó 35 minutos.
+        if CommandLine.arguments.contains("--mutemic") {
+            let mf = dir.appendingPathComponent("manifest.json")
+            let obj = (try? Data(contentsOf: mf)).flatMap {
+                try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+            } ?? [:]
+            let ms = (obj["micSamples"] as? Int) ?? -1
+            let dur = (obj["outputs"] as? [[String: Any]])?
+                .compactMap { $0["durationSeconds"] as? Double }.max() ?? 0
+            Log.info(String(format: "RECTEST mutemic: micSamples=%d · duró %.1fs de %d pedidos",
+                            ms, dur, seconds))
+            if ms != 0 { fallos.append("MUTEMIC-NO-SE-EJERCIO(micSamples=\(ms))") }
+            else if dur > 30 {
+                fallos.append(String(format: "AUTO-STOP-NO-DISPARÓ(grabó %.0fs sin voz)", dur))
+            } else {
+                Log.info(String(format: "RECTEST ✓ el guard de voz cortó la toma a los %.0fs "
+                                + "en vez de dejarla llegar a %d", dur, seconds))
             }
         }
 

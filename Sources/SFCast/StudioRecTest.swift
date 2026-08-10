@@ -56,12 +56,16 @@ enum StudioRecTest {
             // Ejerce los marcadores por el MISMO camino que el atajo global
             // (StudioController.marcar), no llamando al recorder directo: probar
             // el atajo por dentro no probaría el cable completo.
-            for (i, kind) in ["retoma", "bueno", "retoma"].enumerated() {
-                try? await Task.sleep(nanoseconds: UInt64(seconds) * 200_000_000)
+            for (i, kind) in ["retoma", "bueno", "retoma", "bueno"].enumerated() {
+                try? await Task.sleep(nanoseconds: UInt64(seconds) * 160_000_000)
                 StudioController.shared.marcar(kind)
                 Log.info("RECTEST: marcador \(i + 1) puesto (\(kind))")
             }
-            try? await Task.sleep(nanoseconds: UInt64(seconds) * 400_000_000)
+            // …y deshace la última: 4 puestas − 1 deshecha = 3 en el manifest.
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 160_000_000)
+            StudioController.shared.desmarcar()
+            Log.info("RECTEST: última marca DESHECHA (⌥Z)")
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 200_000_000)
         } else if CommandLine.arguments.contains("--freezecam") {
             // La cámara se "apaga" a la mitad. Lo que se verifica: que el
             // watchdog lo NOTE (y avise), porque el video sigue saliendo
@@ -208,12 +212,16 @@ enum StudioRecTest {
             // Ejerce los marcadores por el MISMO camino que el atajo global
             // (StudioController.marcar), no llamando al recorder directo: probar
             // el atajo por dentro no probaría el cable completo.
-            for (i, kind) in ["retoma", "bueno", "retoma"].enumerated() {
-                try? await Task.sleep(nanoseconds: UInt64(seconds) * 200_000_000)
+            for (i, kind) in ["retoma", "bueno", "retoma", "bueno"].enumerated() {
+                try? await Task.sleep(nanoseconds: UInt64(seconds) * 160_000_000)
                 StudioController.shared.marcar(kind)
                 Log.info("RECTEST: marcador \(i + 1) puesto (\(kind))")
             }
-            try? await Task.sleep(nanoseconds: UInt64(seconds) * 400_000_000)
+            // …y deshace la última: 4 puestas − 1 deshecha = 3 en el manifest.
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 160_000_000)
+            StudioController.shared.desmarcar()
+            Log.info("RECTEST: última marca DESHECHA (⌥Z)")
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 200_000_000)
         } else if CommandLine.arguments.contains("--freezecam") {
             // La cámara se "apaga" a la mitad. Lo que se verifica: que el
             // watchdog lo NOTE (y avise), porque el video sigue saliendo
@@ -239,12 +247,16 @@ enum StudioRecTest {
             // Ejerce los marcadores por el MISMO camino que el atajo global
             // (StudioController.marcar), no llamando al recorder directo: probar
             // el atajo por dentro no probaría el cable completo.
-            for (i, kind) in ["retoma", "bueno", "retoma"].enumerated() {
-                try? await Task.sleep(nanoseconds: UInt64(seconds) * 200_000_000)
+            for (i, kind) in ["retoma", "bueno", "retoma", "bueno"].enumerated() {
+                try? await Task.sleep(nanoseconds: UInt64(seconds) * 160_000_000)
                 StudioController.shared.marcar(kind)
                 Log.info("RECTEST: marcador \(i + 1) puesto (\(kind))")
             }
-            try? await Task.sleep(nanoseconds: UInt64(seconds) * 400_000_000)
+            // …y deshace la última: 4 puestas − 1 deshecha = 3 en el manifest.
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 160_000_000)
+            StudioController.shared.desmarcar()
+            Log.info("RECTEST: última marca DESHECHA (⌥Z)")
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 200_000_000)
         } else if CommandLine.arguments.contains("--freezecam") {
             if engine.cameraFrozen || engine.screenRestarts >= 0 {
                 Log.info("RECTEST ✓ el watchdog de cámara marcó la congelada "
@@ -265,9 +277,25 @@ enum StudioRecTest {
                 Log.info("RECTEST ✓ manifest con \(ms.count) marcadores: "
                          + ms.map { "\($0["kind"] ?? "?")@\(String(format: "%.1f", ($0["t"] as? Double) ?? 0))s" }
                              .joined(separator: " · "))
-                if ms.count != 3 { fallos.append("MARCADORES-INCOMPLETOS(\(ms.count) de 3)") }
+                if ms.count != 3 {
+                    fallos.append("DESHACER-NO-FUNCIONO(\(ms.count) marcas, esperaba 3: 4 puestas − 1 deshecha)")
+                }
             } else {
                 fallos.append("MANIFEST-SIN-MARCADORES")
+            }
+        }
+
+        // La envolvente de audio tiene que estar EN DISCO, no en memoria.
+        if CommandLine.arguments.contains("--markers") {
+            let lv = dir.appendingPathComponent("levels.json")
+            if let data = try? Data(contentsOf: lv),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let mic = obj["mic"] as? [Double] {
+                Log.info("RECTEST ✓ levels.json con \(mic.count) muestras a \(obj["hz"] ?? "?") Hz "
+                         + "(\(String(format: "%.0f", Double(mic.count) / 10.0))s de envolvente)")
+                if mic.count < seconds * 5 { fallos.append("ENVOLVENTE-CORTA(\(mic.count) muestras)") }
+            } else {
+                fallos.append("SIN-LEVELS-JSON")
             }
         }
 

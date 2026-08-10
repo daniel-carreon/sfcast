@@ -32,6 +32,14 @@ final class StudioRecorder {
     /// viajan al manifest: son el cable entre lo que pasó AL GRABAR y lo que el
     /// editor necesita saber DESPUÉS (v3.2).
     private var markers: [StudioManifest.Marker] = []
+    /// ENVOLVENTE DEL MICRÓFONO — nivel cada 100 ms, para el corte de silencios.
+    ///
+    /// La app ya mide esto 15 veces por segundo para pintar el vúmetro… y lo
+    /// tira. Guardarlo cuesta 10 números por segundo (36 KB en 45 minutos) y le
+    /// ahorra al editor re-analizar el audio entero para encontrar los silencios.
+    /// Es el dato más barato de todo el sistema: ya está medido.
+    private var envelope: [Float] = []
+    private var envelopeTask: Task<Void, Never>?
     private var deadZones: [StudioManifest.DeadZone] = []
     private var frozenSince: [String: Double] = [:]
 
@@ -174,6 +182,7 @@ final class StudioRecorder {
         Log.info("Estudio: grabando \(videoID) → [\(activated.joined(separator: ", "))] "
                  + "calidad=\(config.programQuality.rawValue) libre=\(Self.gb(free))")
         preflightRitmo(engine: engine)
+        startEnvelope(engine: engine)
         startHealthMonitor(engine: engine)
     }
 
@@ -208,6 +217,33 @@ final class StudioRecorder {
         } else {
             Log.info(String(format: "Estudio: preflight OK — compositor %.1f ms de %.1f, RAM libre %@",
                             cs.composeMsP50, presupuesto, Self.gb(ram)))
+        }
+    }
+
+    /// Muestrea el nivel del mic a 10 Hz mientras se graba.
+    private func startEnvelope(engine: StudioEngine) {
+        envelope.removeAll()
+        envelopeTask?.cancel()
+        envelopeTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                guard let self, self.state == .recording else { return }
+                self.envelope.append(engine.levels.get().mic)
+            }
+        }
+    }
+
+    /// Escribe `levels.json` junto al video: `{hz, mic:[…]}`. Formato tonto a
+    /// propósito — que el editor no tenga que aprender nada para usarlo.
+    private func writeEnvelope(to dir: URL) {
+        guard !envelope.isEmpty else { return }
+        let payload: [String: Any] = [
+            "hz": 10,
+            "mic": envelope.map { Double(round(1000 * $0) / 1000) },
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload) {
+            try? data.write(to: dir.appendingPathComponent("levels.json"))
+            Log.info("Estudio: envolvente de audio → levels.json (\(envelope.count) muestras a 10 Hz)")
         }
     }
 
@@ -293,6 +329,23 @@ final class StudioRecorder {
 
     var markerCount: Int { markers.count }
 
+    /// DESHACER la última marca (⌥Z). Si te equivocas al marcar, hoy el dato
+    /// quedaba sucio para siempre — y una drop-list con basura es peor que no
+    /// tenerla, porque el editor la obedece.
+    @discardableResult
+    func unmark() -> StudioManifest.Marker? {
+        guard state == .recording, let ultima = markers.popLast() else { return nil }
+        Log.info(String(format: "Estudio: marca DESHECHA ('%@' en %.1fs) — quedan %d",
+                        ultima.kind, ultima.t, markers.count))
+        return ultima
+    }
+
+    /// Cuántas de cada tipo (la UI las muestra por separado).
+    var markerTally: (cortes: Int, estrellas: Int) {
+        (markers.filter { $0.kind == "retoma" }.count,
+         markers.filter { $0.kind != "retoma" }.count)
+    }
+
     /// Una fuente se congeló o volvió. El tramo se cierra cuando vuelve (o al
     /// detener), y va al manifest para que el editor no use esos segundos.
     func noteFrozen(_ source: String, frozen: Bool, reason: String) {
@@ -320,6 +373,7 @@ final class StudioRecorder {
         guard state == .recording else { return nil }
         state = .stopping
         health?.cancel(); health = nil
+        envelopeTask?.cancel(); envelopeTask = nil
         engine.onNeedNewScreenRawURL = nil
         let duration = Date().timeIntervalSince(startedAt)
         // Un tramo congelado que seguía abierto al detener se cierra AQUÍ: si no,
@@ -385,6 +439,7 @@ final class StudioRecorder {
             markers: markers,
             deadZones: deadZones)
         manifest.write(to: dir)
+        writeEnvelope(to: dir)
 
         // meta.json de compat: si hay programa, el push "↑ subir" del Historial y
         // el worker del VPS lo tratan como un video normal de 1 segmento.

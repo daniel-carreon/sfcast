@@ -202,6 +202,7 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
 
     private var hotkeyRetoma: GlobalHotKey?
     private var hotkeyBueno: GlobalHotKey?
+    private var hotkeyDeshacer: GlobalHotKey?
     /// Los dos contadores en la esquina de la pantalla que se graba.
     let markerHUD = MarkerHUD()
     private var cortesMarcados = 0
@@ -239,6 +240,25 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                                    descripcion: "⌥X marcar ESTRELLA") { [weak self] in
             self?.marcar("bueno")
         }
+        // ⌥Z = deshacer la última. Una marca puesta por error deja el dato
+        // SUCIO, y una drop-list con basura es peor que no tenerla: el editor
+        // la obedece. Z de "deshacer" es el idioma que ya tiene en los dedos.
+        hotkeyDeshacer = GlobalHotKey(key: kVK_ANSI_Z, mods: UInt32(optionKey),
+                                      descripcion: "⌥Z deshacer última marca") { [weak self] in
+            self?.desmarcar()
+        }
+    }
+
+    /// Quita la última marca y actualiza los dos contadores.
+    func desmarcar() {
+        guard recorder.isRecording, recorder.unmark() != nil else { return }
+        let t = recorder.markerTally
+        cortesMarcados = t.cortes
+        buenosMarcados = t.estrellas
+        markerCount = recorder.markerCount
+        meters.cortes = t.cortes
+        meters.estrellas = t.estrellas
+        markerHUD.update(cortes: t.cortes, buenos: t.estrellas, pulso: nil)
     }
 
     /// Auto-retrato de la ventana del Estudio (QA). La ventana lleva
@@ -261,6 +281,7 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         guard hotkeyRetoma != nil || hotkeyBueno != nil else { return }
         hotkeyRetoma = nil
         hotkeyBueno = nil
+        hotkeyDeshacer = nil
         Log.info("Atajos de marcador liberados (⌥C y ⌥X vuelven a escribir ç y ≈)")
     }
 

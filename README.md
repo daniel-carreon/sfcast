@@ -315,6 +315,7 @@ Mientras grabas, con la mano izquierda y sin mirar:
 |---|---|
 | **⌥C** | *"la regué, **C**orta esto"* — tira la toma que ACABA aquí |
 | **⌥X** | ★ *"esto estuvo bueno"* — candidato a highlight / cold open |
+| **⌥Z** | deshacer la última marca (te equivocaste al marcar) |
 
 La mnemónica no es un detalle: esto se usa **bajo presión, hablando a cámara**.
 Si hay que pensar cuál era la tecla, no se usa. (Primera versión: ⌘⇧X/⌘⇧M —

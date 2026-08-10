@@ -4,9 +4,25 @@
 Corre en el VPS (systemd sfcast-pipeline, cores 5-7, Nice 15 — SIEMPRE por
 debajo de meet-pipeline). Flujo por sesión subida a /opt/sfcast/incoming/{id}:
 
-  UPLOAD_DONE → concat segmentos (stream copy + faststart) → thumbnail →
-  transcript faster-whisper (español) → OpenRouter: título + resumen +
-  capítulos → genera viewer/embed HTML estáticos → actualiza biblioteca.
+  UPLOAD_DONE
+    │
+    ├─ FASE 1  concat (stream copy + faststart) → thumbnail → PUBLICA el
+    │          reproductor con ready:false.  ← aquí el video ya SE VE
+    ├─ FASE 2  transcript (Groq, fallback faster-whisper) → OpenRouter para
+    │          título/resumen/capítulos → republica con ready:true.
+    │          La página abierta se completa SOLA sondeando data.json.
+    └─ FASE 3  transcode a H.264 (compatibilidad real) → espejo a R2.
+
+POR QUÉ EN TRES FASES (medido el 10 ago 2026): el pipeline tardaba 5m53s en un
+video de 4:28, y el `video.mp4` estaba reproducible en el servidor 2m35s antes
+de que la página dejara de decir "Procesando". Se esperaba al transcript para
+mostrar un video que nadie necesita transcrito para verlo. Loom no hace eso.
+
+Las otras dos mediciones del mismo día:
+  · Groq whisper-large-v3-turbo tarda 2.0s donde faster-whisper tarda 153s
+    (no por el modelo: por `CPUQuota=200%`, 2 de los 8 cores del EPYC).
+  · Se servía HEVC 4096x2304, que NO reproduce en Chrome/Windows ni Firefox ni
+    buena parte de Android — reproductor en negro, en silencio, también desde R2.
 
 Además sirve en 127.0.0.1:9096: GET /health, POST /api/cast/view/{id} (vistas).
 """
@@ -16,11 +32,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from aiohttp import web, ClientSession
+from aiohttp import web, ClientSession, FormData
 
 BASE = Path("/opt/sfcast")
 INCOMING = BASE / "incoming"
@@ -42,6 +59,11 @@ if ENV_FILE.exists():
 BASE_URL = ENV.get("SFCAST_BASE_URL", "https://livekit.saasfactory.so")
 OPENROUTER_KEY = ENV.get("OPENROUTER_API_KEY", "")
 LLM_MODEL = ENV.get("SFCAST_LLM_MODEL", "google/gemini-2.5-flash")
+GROQ_KEY = ENV.get("GROQ_API_KEY", "")
+STT_MODEL = ENV.get("SFCAST_STT_MODEL", "whisper-large-v3-turbo")
+# Alto máximo del archivo de DISTRIBUCIÓN. La captura ya llega a 1440 (tope del
+# lado Mac, v3.4); esto solo defiende contra material viejo o importado en 4K.
+DIST_MAX_HEIGHT = int(ENV.get("SFCAST_DIST_MAX_HEIGHT", "1440"))
 
 _whisper_model = None
 _views_lock = asyncio.Lock()
@@ -74,6 +96,102 @@ def get_model():
     return _whisper_model
 
 
+def extract_audio(video: Path, out: Path, ss: float = 0, dur: float = 0) -> bool:
+    """Pista de audio sola, mono 16 kHz mp3 32 kbps: ~1 MB por 4:30 de video.
+
+    Whisper remuestrea a 16 kHz mono de todos modos, así que esto no tira ni un
+    bit que el modelo fuera a usar — solo evita empujar el video entero por la
+    red.
+    """
+    cmd = ["ffmpeg", "-y", "-v", "error"]
+    if ss:
+        cmd += ["-ss", f"{ss:.3f}"]
+    cmd += ["-i", str(video)]
+    if dur:
+        cmd += ["-t", f"{dur:.3f}"]
+    cmd += ["-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "32k", str(out)]
+    return run(cmd, timeout=900).returncode == 0 and out.exists() and out.stat().st_size > 0
+
+
+async def transcribe_groq(video: Path, duration: float) -> dict | None:
+    """Transcript por Groq. Devuelve None si no se puede (el que llama cae al local).
+
+    POR QUÉ (medido el 10 ago sobre el mismo audio de 4:28): faster-whisper en
+    este VPS tarda 153s — no por el modelo, sino porque el servicio corre con
+    `CPUQuota=200%` sobre 3 cores permitidos, o sea 2 de los 8 del EPYC, y ese
+    techo existe para proteger al SFU del Meet. Groq hace lo mismo en **2.0s**,
+    con transcript equivalente (97 segmentos / 3,925 chars contra 107 / 3,969) y
+    $0.003 por video.
+
+    El troceo es por si algún día entra una grabación larguísima: a 32 kbps, los
+    25 MB que acepta la API son ~1.7 horas de audio. Se corta en tramos de 1h y
+    se reajustan los tiempos de cada tramo a la línea de tiempo del video.
+    """
+    if not GROQ_KEY:
+        return None
+    t0 = time.time()
+    tmp = Path("/tmp") / f"sfcast-stt-{video.parent.name}"
+    tmp.mkdir(parents=True, exist_ok=True)
+    CHUNK = 3600.0
+    try:
+        offsets = [0.0] if duration <= CHUNK else [
+            i * CHUNK for i in range(int(duration // CHUNK) + 1)]
+        segs: list[dict] = []
+        async with ClientSession() as http:
+            for i, off in enumerate(offsets):
+                piece = tmp / f"p{i}.mp3"
+                if not extract_audio(video, piece, ss=off,
+                                     dur=CHUNK if len(offsets) > 1 else 0):
+                    return None
+                form = FormData()
+                form.add_field("file", piece.read_bytes(), filename=piece.name,
+                               content_type="audio/mpeg")
+                form.add_field("model", STT_MODEL)
+                form.add_field("language", "es")
+                form.add_field("response_format", "verbose_json")
+                async with http.post(
+                    "https://api.groq.com/openai/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {GROQ_KEY}"},
+                    data=form, timeout=600,
+                ) as resp:
+                    if resp.status != 200:
+                        log(f"groq HTTP {resp.status}: {(await resp.text())[:200]}")
+                        return None
+                    payload = await resp.json()
+                for s in payload.get("segments", []):
+                    text = (s.get("text") or "").strip()
+                    if text:
+                        segs.append({"s": round(float(s["start"]) + off, 2),
+                                     "e": round(float(s["end"]) + off, 2),
+                                     "text": text})
+        if not segs:
+            return None
+        text = " ".join(s["text"] for s in segs)
+        log(f"transcript (groq/{STT_MODEL}): {len(segs)} segmentos, "
+            f"{len(text)} chars en {time.time()-t0:.1f}s")
+        return {"segments": segs, "text": text, "language": "es",
+                "processing_s": round(time.time() - t0, 1), "engine": "groq"}
+    except Exception as e:  # noqa: BLE001
+        log(f"groq falló ({str(e)[:160]}) — caigo a whisper local")
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+async def transcribe_best(video: Path, duration: float) -> dict:
+    """Groq primero, faster-whisper local de red de seguridad.
+
+    El local se queda a propósito: es lo que hace que un corte de internet o una
+    llave vencida degraden la calidad de servicio (más lento) en vez de tumbar
+    el pipeline (sin transcript).
+    """
+    got = await transcribe_groq(video, duration)
+    if got:
+        return got
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, transcribe, video)
+
+
 def transcribe(video: Path) -> dict:
     t0 = time.time()
     model = get_model()
@@ -83,9 +201,9 @@ def transcribe(video: Path) -> dict:
     segs = [{"s": round(s.start, 2), "e": round(s.end, 2), "text": s.text.strip()}
             for s in segments if s.text.strip()]
     text = " ".join(s["text"] for s in segs)
-    log(f"transcript: {len(segs)} segmentos, {len(text)} chars en {time.time()-t0:.0f}s")
+    log(f"transcript (local): {len(segs)} segmentos, {len(text)} chars en {time.time()-t0:.0f}s")
     return {"segments": segs, "text": text, "language": info.language,
-            "processing_s": round(time.time() - t0, 1)}
+            "processing_s": round(time.time() - t0, 1), "engine": "local"}
 
 
 # ── LLM: título + resumen + capítulos ────────────────────────────────────────
@@ -156,6 +274,80 @@ def probe_duration(video: Path) -> float:
     return float(r.stdout.strip() or 0)
 
 
+def probe_video(video: Path) -> tuple[str, int, int]:
+    r = run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name,width,height",
+             "-of", "csv=p=0:s=x", str(video)])
+    parts = (r.stdout.strip().split("x") + ["", "0", "0"])[:3]
+    try:
+        return parts[0], int(parts[1]), int(parts[2])
+    except ValueError:
+        return parts[0], 0, 0
+
+
+def distribute_encode(video: Path) -> bool:
+    """Deja `video.mp4` en H.264 reproducible EN CUALQUIER LADO. Devuelve si tocó algo.
+
+    POR QUÉ ES CORRECCIÓN Y NO OPTIMIZACIÓN (10 ago 2026): `SCRecordingOutput`
+    solo escribe **HEVC** — está forzado en el Mac a propósito, porque esquiva el
+    tope de H.264 a 4096x2304 en Retina/5K. Perfecto para grabar; pésimo para
+    distribuir. HEVC no reproduce en Chrome/Windows sin la extensión de pago de
+    Microsoft, ni en Firefox en varias plataformas, ni en buena parte de Android.
+    Verificado el mismo día contra R2: el video del anuncio a ~570 miembros se
+    servía como `hevc/hvc1 4096x2304`, o sea reproductor en negro para una parte
+    de la comunidad. Y falla EN SILENCIO: nadie escribe para avisar que un video
+    no cargó.
+
+    Corre DESPUÉS de publicar el reproductor: nadie está esperando esto. El
+    reemplazo es atómico (`os.replace`), así que un espectador que ya tenga el
+    archivo abierto sigue con su descriptor; a lo mucho, si busca en la línea de
+    tiempo justo en ese instante, recarga.
+
+    Best-effort: si ffmpeg falla, se queda el original. Un video que no se puede
+    ver en Chrome sigue siendo mejor que ningún video.
+    """
+    codec, w, h = probe_video(video)
+    marker = video.parent / ".dist.json"
+    if codec == "h264" and h <= DIST_MAX_HEIGHT:
+        marker.write_text(json.dumps({"codec": codec, "w": w, "h": h, "skipped": True}))
+        return False
+
+    t0 = time.time()
+    before = video.stat().st_size
+    tmp = video.parent / "video-dist.mp4"
+    vf = []
+    if h > DIST_MAX_HEIGHT > 0 and w > 0:
+        nh = DIST_MAX_HEIGHT
+        nw = max(2, int(round(w * nh / h)) & ~1)   # PAR: yuv420p no admite impares
+        vf = ["-vf", f"scale={nw}:{nh}"]
+    r = run(["ffmpeg", "-y", "-nostdin", "-v", "error", "-i", str(video),
+             *vf,
+             "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p",
+             "-preset", "veryfast", "-crf", "23", "-tag:v", "avc1",
+             # El audio ya viene aac mezclado: recodificarlo solo perdería.
+             "-c:a", "copy",
+             "-movflags", "+faststart", str(tmp)], timeout=7200)
+    if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+        tmp.unlink(missing_ok=True)
+        log(f"⚠ distribución: ffmpeg falló en {video.parent.name} — se queda el HEVC "
+            f"({r.stderr[-200:].strip()})")
+        return False
+    # Compuerta de duración ANTES de pisar el original: un archivo más chico pero
+    # cortado es peor que uno pesado pero completo.
+    d0, d1 = probe_duration(video), probe_duration(tmp)
+    if d0 > 0 and abs(d0 - d1) > 1.0:
+        tmp.unlink(missing_ok=True)
+        log(f"⚠ distribución: duración cambió ({d0:.1f}s → {d1:.1f}s) — se queda el original")
+        return False
+    after = tmp.stat().st_size
+    os.replace(tmp, video)
+    marker.write_text(json.dumps({"codec": "h264", "w": w, "h": h,
+                                  "before": before, "after": after}))
+    log(f"✓ distribución {video.parent.name}: {codec} {w}x{h} → h264 "
+        f"{before/1e6:.0f} MB → {after/1e6:.0f} MB en {time.time()-t0:.0f}s")
+    return True
+
+
 def make_thumb(video: Path, out: Path, duration: float) -> None:
     ts = max(1.0, min(duration * 0.15, 30.0))
     run(["ffmpeg", "-y", "-ss", str(ts), "-i", str(video),
@@ -193,15 +385,32 @@ section h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:var
 .tr span.on{background:rgba(255,145,1,.18);color:#ffd9a1}
 .foot{margin-top:26px;color:var(--dim);font-size:12.5px;text-align:center}
 .foot a{color:var(--acc);text-decoration:none}
+.wait{color:var(--dim);font-size:13.5px;font-style:italic}
+.wait::before{content:'';display:inline-block;width:9px;height:9px;margin-right:8px;
+ border-radius:50%;background:var(--acc);opacity:.35;animation:p 1.4s ease-in-out infinite}
+@keyframes p{50%{opacity:1}}
 """
 
 
 def viewer_html(d: dict) -> str:
-    data_json = json.dumps({"id": d["id"], "segments": d["transcript"]["segments"],
+    """El reproductor. Se escribe DOS VECES por video, y esa es la idea.
+
+    La primera pasada sale en cuanto el `video.mp4` existe, con `ready:false` y
+    sin transcript: lo único que importa en ese momento es que el video SE PUEDA
+    VER. La segunda, cuando llegan transcript/título/capítulos, la reescribe
+    completa para que un visitante nuevo y las og: del link tengan el título real.
+
+    Entre una y otra, la página YA ABIERTA se completa sola: sondea `data.json`
+    y pinta lo que falta SIN recargar y sin tocar el `<video>` — para que
+    completarse no le corte la reproducción a nadie. Es exactamente lo que hace
+    Loom, y es la diferencia entre publicar en ~40s y publicar en 5m53s: medido
+    el 10 ago, el video estuvo reproducible en el servidor 2m35s antes de que la
+    página dejara de decir "Procesando".
+    """
+    data_json = json.dumps({"id": d["id"], "ready": d.get("ready", True),
+                            "titulo": d["titulo"], "resumen": d["resumen"],
+                            "segments": d["transcript"]["segments"],
                             "capitulos": d["capitulos"]}, ensure_ascii=False)
-    caps_html = "".join(
-        f'<a href="#" data-t="{c["t"]}"><span class="t">{int(c["t"])//60:02d}:{int(c["t"])%60:02d}</span>'
-        f'<span>{esc(c["titulo"])}</span></a>' for c in d["capitulos"])
     dur = int(d["duration"])
     fecha = d["created"][:10]
     return f"""<!doctype html><html lang="es"><head>
@@ -215,7 +424,7 @@ def viewer_html(d: dict) -> str:
 <meta name="twitter:card" content="summary_large_image">
 <style>{CSS}</style></head><body><div class="wrap">
 <div class="brand"><b>SFCast</b> · SaaS Factory</div>
-<h1>{esc(d["titulo"])}</h1>
+<h1 id="h1">{esc(d["titulo"])}</h1>
 <div class="meta">{fecha} · {dur//60}:{dur%60:02d} min · <span id="views">…</span> vistas</div>
 <video id="v" controls playsinline preload="metadata" poster="{BASE_URL}/media/{d["id"]}/thumb.jpg">
 <source src="{BASE_URL}/media/{d["id"]}/video.mp4" type="video/mp4"></video>
@@ -228,25 +437,64 @@ def viewer_html(d: dict) -> str:
   <button class="chip" id="copyLink">🔗 Copiar link</button>
   <button class="chip" id="copyEmbed">&lt;/&gt; Copiar embed</button>
 </div>
-{f'<section><h2>Resumen</h2><p>{esc(d["resumen"])}</p></section>' if d["resumen"] else ""}
-{f'<section><h2>Capítulos</h2><div class="caps">{caps_html}</div></section>' if d["capitulos"] else ""}
-<section><h2>Transcript</h2><p class="tr" id="tr"></p></section>
+<section id="sResumen" hidden><h2>Resumen</h2><p id="resumen"></p></section>
+<section id="sCaps" hidden><h2>Capítulos</h2><div class="caps" id="caps"></div></section>
+<section><h2>Transcript</h2><p class="tr" id="tr"></p><p id="trWait" class="wait">Transcribiendo… aparece aquí solo, sin recargar.</p></section>
 <div class="foot">Grabado con <b>SFCast</b> — infraestructura propia de <a href="https://www.saasfactory.so">SaaS Factory</a></div>
 </div>
 <script>
-const D={data_json};const v=document.getElementById('v');
+let D={data_json};const v=document.getElementById('v');
 v.addEventListener('loadedmetadata',()=>{{v.playbackRate=1.2}});
 document.querySelectorAll('.chip[data-r]').forEach(b=>b.onclick=()=>{{
   v.playbackRate=parseFloat(b.dataset.r);
   document.querySelectorAll('.chip[data-r]').forEach(x=>x.classList.remove('on'));b.classList.add('on');}});
-const tr=document.getElementById('tr');
-D.segments.forEach((s,i)=>{{const sp=document.createElement('span');sp.textContent=s.text+' ';
-  sp.dataset.s=s.s;sp.dataset.e=s.e;sp.id='seg'+i;
-  sp.onclick=()=>{{v.currentTime=s.s;v.play()}};tr.appendChild(sp);}});
-v.addEventListener('timeupdate',()=>{{const t=v.currentTime;
-  D.segments.forEach((s,i)=>{{document.getElementById('seg'+i).classList.toggle('on',t>=s.s&&t<s.e)}});}});
-document.querySelectorAll('.caps a').forEach(a=>a.onclick=e=>{{e.preventDefault();
-  v.currentTime=parseFloat(a.dataset.t);v.play()}});
+
+// `cur` evita recorrer los N segmentos en cada timeupdate (~4 veces por
+// segundo): solo se apaga el que estaba y se prende el que toca.
+let cur=-1;
+function pintar(d){{
+  if(d.titulo){{document.getElementById('h1').textContent=d.titulo;document.title=d.titulo+' — SFCast';}}
+  if(d.resumen){{document.getElementById('resumen').textContent=d.resumen;
+    document.getElementById('sResumen').hidden=false;}}
+  const caps=document.getElementById('caps');
+  if(d.capitulos&&d.capitulos.length){{
+    caps.innerHTML='';
+    d.capitulos.forEach(c=>{{const a=document.createElement('a');a.href='#';a.dataset.t=c.t;
+      const mm=String(Math.floor(c.t/60)).padStart(2,'0'),ss=String(Math.floor(c.t%60)).padStart(2,'0');
+      const t=document.createElement('span');t.className='t';t.textContent=mm+':'+ss;
+      const n=document.createElement('span');n.textContent=c.titulo;
+      a.append(t,n);a.onclick=e=>{{e.preventDefault();v.currentTime=parseFloat(a.dataset.t);v.play()}};
+      caps.appendChild(a);}});
+    document.getElementById('sCaps').hidden=false;}}
+  const tr=document.getElementById('tr');
+  if(d.segments&&d.segments.length){{
+    tr.innerHTML='';cur=-1;
+    d.segments.forEach((s,i)=>{{const sp=document.createElement('span');sp.textContent=s.text+' ';
+      sp.id='seg'+i;sp.onclick=()=>{{v.currentTime=s.s;v.play()}};tr.appendChild(sp);}});
+    document.getElementById('trWait').hidden=true;}}
+  D=d;
+}}
+pintar(D);
+v.addEventListener('timeupdate',()=>{{const t=v.currentTime,S=D.segments||[];
+  if(cur>=0&&t>=S[cur].s&&t<S[cur].e)return;
+  let n=-1;for(let i=0;i<S.length;i++){{if(t>=S[i].s&&t<S[i].e){{n=i;break;}}}}
+  if(n===cur)return;
+  if(cur>=0)document.getElementById('seg'+cur).classList.remove('on');
+  if(n>=0)document.getElementById('seg'+n).classList.add('on');
+  cur=n;}});
+
+// La página se COMPLETA sola. Sondea data.json hasta que el worker marque
+// ready, sin recargar: recargar reiniciaría el video que ya estás viendo.
+if(!D.ready){{(async()=>{{
+  for(let i=0;i<450;i++){{
+    await new Promise(r=>setTimeout(r,4000));
+    try{{const res=await fetch('{BASE_URL}/media/{d["id"]}/data.json?t='+Date.now(),{{cache:'no-store'}});
+        if(!res.ok)continue;const nd=await res.json();
+        if(nd.ready){{pintar({{id:nd.id,ready:true,titulo:nd.titulo,resumen:nd.resumen,
+          segments:(nd.transcript&&nd.transcript.segments)||[],capitulos:nd.capitulos||[]}});break;}}
+    }}catch(e){{}}
+  }}
+}})();}}
 document.getElementById('copyLink').onclick=()=>navigator.clipboard.writeText('{BASE_URL}/v/{d["id"]}/').then(()=>toast('Link copiado'));
 document.getElementById('copyEmbed').onclick=()=>navigator.clipboard.writeText(
  `<iframe src="{BASE_URL}/embed/{d["id"]}/" width="800" height="450" frameborder="0" allowfullscreen></iframe>`).then(()=>toast('Embed copiado'));
@@ -315,39 +563,94 @@ async def process_session(session_dir: Path):
     media_dir.mkdir(parents=True, exist_ok=True)
     video = media_dir / "video.mp4"
 
+    t0 = time.time()
     loop = asyncio.get_event_loop()
+
+    # ── FASE 1: que se pueda VER ────────────────────────────────────────────
+    # Lo único que importa aquí. El transcript no hace falta para mirar un
+    # video, y hacer esperar a la página por él era el 43% de la demora.
     await loop.run_in_executor(None, concat_segments, session_dir, video)
     duration = await loop.run_in_executor(None, probe_duration, video)
     await loop.run_in_executor(None, make_thumb, video, media_dir / "thumb.jpg", duration)
-    log(f"{vid}: video.mp4 {duration:.0f}s + thumb listos")
-
-    transcript = await loop.run_in_executor(None, transcribe, video)
-    llm = await enrich(transcript["text"], duration)
 
     data = {
         "id": vid,
-        "titulo": llm["titulo"],
-        "resumen": llm["resumen"],
-        "resumen_corto": llm["resumen_corto"],
-        "capitulos": llm["capitulos"],
+        "titulo": f"Grabación {datetime.now().strftime('%d %b %Y %H:%M')}",
+        "resumen": "", "resumen_corto": "", "capitulos": [],
         "duration": duration,
         "created": meta.get("startedAt") or datetime.now(timezone.utc).isoformat(),
         "mode": meta.get("mode", "screen"),
         "views": 0,
-        "transcript": transcript,
+        "ready": False,
+        "transcript": {"segments": [], "text": "", "language": "es"},
     }
-    (media_dir / "data.json").write_text(json.dumps(data, ensure_ascii=False, indent=1))
+    publish(vid, data)
+    log(f"▶ {vid} REPRODUCIBLE en {time.time()-t0:.0f}s ({duration:.0f}s de video) "
+        f"→ {BASE_URL}/v/{vid}/")
 
-    vdir = WWW / "v" / vid
-    edir = WWW / "embed" / vid
+    # ── FASE 2: transcript + título + capítulos ─────────────────────────────
+    # La página abierta se completa sola sondeando data.json; nadie recarga y a
+    # nadie se le corta el video.
+    t1 = time.time()
+    transcript = await transcribe_best(video, duration)
+    llm = await enrich(transcript["text"], duration)
+    data.update({
+        "titulo": llm["titulo"], "resumen": llm["resumen"],
+        "resumen_corto": llm["resumen_corto"], "capitulos": llm["capitulos"],
+        "transcript": transcript, "ready": True,
+    })
+    publish(vid, data)
+    shutil.rmtree(session_dir, ignore_errors=True)
+    log(f"✓ {vid} completo en {time.time()-t1:.0f}s («{data['titulo']}»)")
+
+    # ── FASE 3: distribución ────────────────────────────────────────────────
+    # H.264 ANTES del espejo: subir el HEVC a R2 sería pagar la subida dos veces
+    # y dejar un rato el archivo que no reproduce en Chrome como el público.
+    await loop.run_in_executor(None, distribute_encode, video)
+    await espejo_r2(vid)
+
+
+def publish(vid: str, data: dict) -> None:
+    """Escribe data.json + viewer + embed + biblioteca. Idempotente a propósito:
+    se llama una vez con `ready:false` y otra con el video ya completo."""
+    media_dir = WWW / "media" / vid
+    vdir, edir = WWW / "v" / vid, WWW / "embed" / vid
     vdir.mkdir(parents=True, exist_ok=True)
     edir.mkdir(parents=True, exist_ok=True)
+    (media_dir / "data.json").write_text(json.dumps(data, ensure_ascii=False, indent=1))
     (vdir / "index.html").write_text(viewer_html(data))
     (edir / "index.html").write_text(embed_html(data))
-
     rebuild_library()
-    shutil.rmtree(session_dir)
-    log(f"✓ {vid} publicado: {BASE_URL}/v/{vid}/ («{data['titulo']}»)")
+
+
+async def espejo_r2(vid: str):
+    """Sube el cast recien publicado a R2 (origen publico de la comunidad).
+
+    Por que aqui y no como paso manual: el frontend de SaaS Factory arma el
+    embed contra R2 para CUALQUIER id (`sfcastEmbedUrl`), asi que un cast que
+    solo vive en el VPS se ve como la pagina "Is this your bucket?" de
+    Cloudflare dentro del post. Paso el 10 ago 2026 en un anuncio a ~570
+    miembros. Desde entonces publicar = VPS **y** R2, en el mismo movimiento.
+
+    Best-effort a proposito: si R2 falla, el cast ya quedo publicado en el VPS
+    y el fallo se ve en el log; nunca tumba el pipeline.
+    """
+    script = BASE / "import" / "publish_cast_r2.py"
+    if not script.exists():
+        log(f"⚠ {vid}: falta {script} — el cast queda SOLO en el VPS")
+        return
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, str(script), vid,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=3600)
+        cola = (out or b"").decode(errors="replace").strip().splitlines()[-3:]
+        if proc.returncode == 0:
+            log(f"✓ {vid} espejado en R2 · " + " · ".join(cola))
+        else:
+            log(f"⚠ {vid} NO subio a R2 (queda en el VPS) · " + " · ".join(cola))
+    except Exception as e:  # noqa: BLE001
+        log(f"⚠ {vid} espejo R2 fallo: {str(e)[:200]}")
 
 
 def rebuild_library():
@@ -393,12 +696,36 @@ async def poller():
         await asyncio.sleep(POLL_S)
 
 
+def orphans(older_than_h: float = 2.0) -> list[str]:
+    """Sesiones en `incoming/` que nunca recibieron `UPLOAD_DONE`.
+
+    Sin este sensor son INVISIBLES: el poller solo mira lo que tiene el marcador,
+    así que una subida que murió a medias se queda ahí callada para siempre. Fue
+    exactamente lo que pasó: 2 sesiones del 15 jul, 95 MB, 26 días sin que nadie
+    se enterara. Un órgano sin sensor se ve idéntico a uno sano.
+    """
+    cutoff = time.time() - older_than_h * 3600
+    out = []
+    for d in INCOMING.glob("*/"):
+        if not d.is_dir() or (d / "UPLOAD_DONE").exists() or d.name in _processing:
+            continue
+        if d.stat().st_mtime < cutoff:
+            out.append(d.name)
+    return sorted(out)
+
+
 async def handle_health(_req):
+    huerfanas = orphans()
+    sin_h264 = [p.parent.name for p in WWW.glob("media/*/data.json")
+                if not (p.parent / ".dist.json").exists()]
     return web.json_response({
-        "ok": True, "service": "sfcast-pipeline",
+        "ok": not huerfanas, "service": "sfcast-pipeline",
         "queue": len(list(INCOMING.glob("*/UPLOAD_DONE"))),
         "processing": sorted(_processing),
         "videos": len(list(WWW.glob("media/*/data.json"))),
+        "stt": "groq" if GROQ_KEY else "faster-whisper (local, ~75x más lento)",
+        "huerfanas": huerfanas,
+        "sin_distribuir_h264": len(sin_h264),
     })
 
 
@@ -424,7 +751,11 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", PORT)
     await site.start()
-    log(f"http 127.0.0.1:{PORT} listo")
+    log(f"http 127.0.0.1:{PORT} listo · stt="
+        f"{'groq/' + STT_MODEL if GROQ_KEY else 'faster-whisper local'}")
+    if h := orphans():
+        log(f"⚠ {len(h)} sesión(es) huérfana(s) sin UPLOAD_DONE: {', '.join(h)} "
+            f"— subidas que murieron a medias; nadie las va a procesar")
     await poller()
 
 

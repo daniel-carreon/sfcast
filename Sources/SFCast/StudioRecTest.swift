@@ -42,7 +42,18 @@ enum StudioRecTest {
             Log.error("RECTEST_FAIL start: \(error.localizedDescription)")
             exit(1)
         }
-        try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
+        // QA (--failstream): a la mitad de la toma, ejerce el fallo de
+        // reenganche de pantalla. Es el caso que se dio SOLO en la prueba larga
+        // (minuto 23.8) y que hay que poder disparar a voluntad: lo que se
+        // verifica es que la grabación SOBREVIVE y que el aviso sale.
+        if CommandLine.arguments.contains("--failstream") {
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 500_000_000)
+            Log.info("RECTEST: disparando fallo de reenganche de pantalla a propósito")
+            engine.simulateRestartFailure()
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 500_000_000)
+        } else {
+            try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
+        }
 
         let sync = engine.syncReport()
         let cs = engine.compositorStats()
@@ -154,6 +165,19 @@ enum StudioRecTest {
         if engine.screenRestarts > 0 {
             Log.error("RECTEST ⚠️ la pantalla se cayó \(engine.screenRestarts) vez(ces) "
                       + "durante la sesión — hubo tramos con la imagen congelada")
+        }
+        // Con --failstream, la prueba es que la grabación SIGUIÓ VIVA pese al
+        // fallo: si el archivo quedó corto o sin cadencia, el aviso no sirvió
+        // de nada porque el video se perdió igual.
+        if CommandLine.arguments.contains("--failstream") {
+            if engine.screenRestarts == 0 {
+                fallos.append("FAILSTREAM-NO-SE-EJERCIO")
+            } else if videoFPS > 0, videoFPS >= Double(engine.fps) * 0.95 {
+                Log.info(String(format: "RECTEST ✓ la grabación SOBREVIVIÓ al fallo de pantalla: "
+                                + "%.2f fps de %d, cámara y voz intactas", videoFPS, engine.fps))
+            } else {
+                fallos.append(String(format: "GRABACION-DAÑADA-TRAS-FALLO(%.1f fps)", videoFPS))
+            }
         }
 
         // 3) NADA EN SILENCIO

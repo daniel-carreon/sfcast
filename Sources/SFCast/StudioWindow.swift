@@ -29,6 +29,10 @@ final class StudioMeters: ObservableObject {
     @Published var prevFPS = -1
     @Published var renderStarving = false
     @Published var elapsed: TimeInterval = 0
+    /// Marcas por TIPO. Separadas a propósito: un contador que suma los dos no
+    /// informa de nada (Daniel, 10 ago: "veo puras tijeras con ambos botones").
+    @Published var cortes = 0
+    @Published var estrellas = 0
 }
 
 @MainActor
@@ -203,7 +207,7 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     private var cortesMarcados = 0
     private var buenosMarcados = 0
 
-    /// ⌥C = "la regué, **C**orta esto" · ⌥B = "esto estuvo **B**ueno".
+    /// ⌥C = ✂︎ "la regué, **C**orta esto" · ⌥X = ★ "esto estuvo bueno".
     ///
     /// Dos iteraciones con Daniel el 10 ago, y las dos las tenía él:
     /// 1. ⌘⇧X pedía DOS MANOS — "no lo siento práctico". Con las dos manos
@@ -213,7 +217,9 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     ///    de un centímetro, porque esto se usa BAJO PRESIÓN, hablando a cámara:
     ///    si hay que pensar cuál era, no se usa.
     ///
-    /// C de Cortar y B de Bueno. Ambas con la izquierda, sin mirar.
+    /// C de Cortar. Y ⌥X para la estrella: en cuanto la segunda marca dejó de
+    /// llamarse "bueno" y pasó a ser un ICONO, la tecla ya no necesita
+    /// mnemónica de palabra — le basta con ser la vecina de C.
     ///
     /// GLOBALES: cuando se traba está presentando en SFPoint, no mirando SFCast.
     /// Un atajo que exija traer la app al frente no se usaría nunca.
@@ -229,10 +235,25 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                                     descripcion: "⌥C marcar CORTE") { [weak self] in
             self?.marcar("retoma")
         }
-        hotkeyBueno = GlobalHotKey(key: kVK_ANSI_B, mods: UInt32(optionKey),
-                                   descripcion: "⌥B marcar BUENO") { [weak self] in
+        hotkeyBueno = GlobalHotKey(key: kVK_ANSI_X, mods: UInt32(optionKey),
+                                   descripcion: "⌥X marcar ESTRELLA") { [weak self] in
             self?.marcar("bueno")
         }
+    }
+
+    /// Auto-retrato de la ventana del Estudio (QA). La ventana lleva
+    /// `sharingType = .none`, así que ninguna captura del sistema la ve: sin
+    /// esto no hay forma de revisar su barra con un screenshot.
+    @discardableResult
+    func snapshotVentana(to path: String) -> Bool {
+        guard let v = window?.contentView else { return false }
+        let r = v.bounds
+        guard let rep = v.bitmapImageRepForCachingDisplay(in: r) else { return false }
+        v.cacheDisplay(in: r, to: rep)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return false }
+        try? png.write(to: URL(fileURLWithPath: path))
+        Log.info("Estudio: retrato de la ventana en \(path)")
+        return true
     }
 
     /// Devuelve las teclas al sistema en cuanto termina la toma.
@@ -240,7 +261,7 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         guard hotkeyRetoma != nil || hotkeyBueno != nil else { return }
         hotkeyRetoma = nil
         hotkeyBueno = nil
-        Log.info("Atajos de marcador liberados (⌥C y ⌥B vuelven a escribir ç e ∫)")
+        Log.info("Atajos de marcador liberados (⌥C y ⌥X vuelven a escribir ç y ≈)")
     }
 
     /// Anota el marcador y da acuse VISIBLE — sin sonido y sin nada que salga en
@@ -252,6 +273,8 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         markerCount = n
         lastMarkerKind = kind
         if kind == "retoma" { cortesMarcados += 1 } else { buenosMarcados += 1 }
+        meters.cortes = cortesMarcados
+        meters.estrellas = buenosMarcados
         // ACUSE = ESTADO, no evento (Daniel, 10 ago: "el aro no me convence…
         // yo puedo ver ambas cosas"). El destello confirmaba la última
         // pulsación y se iba; lo que hace falta mientras hablas es saber
@@ -1428,6 +1451,8 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                 markerCount = 0
                 cortesMarcados = 0
                 buenosMarcados = 0
+                meters.cortes = 0
+                meters.estrellas = 0
                 // Las teclas se toman prestadas justo ahora y se devuelven al
                 // detener: fuera de la toma no hay nada que marcar, y ⌥C/⌥B
                 // escriben caracteres que Daniel debe conservar.
@@ -1817,11 +1842,18 @@ struct StudioRootView: View {
                 // Las marcas, a la vista: es el acuse persistente (el destello
                 // del espejo dura un segundo). Sin un número que suba, Daniel no
                 // sabría si el atajo llegó.
-                if c.markerCount > 0 {
-                    Text("✂︎ \(c.markerCount)")
+                // Los DOS por separado, como en el HUD de la pantalla. Un solo
+                // contador que suma ambos tipos no dice nada: Daniel lo cazó de
+                // inmediato ("veo puras tijeras con ambos botones").
+                if c.meters.cortes > 0 || c.meters.estrellas > 0 {
+                    Text("✂︎ \(c.meters.cortes)")
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
                         .foregroundStyle(StudioSkin.mostaza)
-                        .help("Marcas puestas con ⌘⇧X (corta) / ⌘⇧M (bueno). Van al manifest para la edición.")
+                        .help("Cortes marcados con ⌥C. Van al manifest para la edición.")
+                    Text("★ \(c.meters.estrellas)")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Color(red: 0.25, green: 0.85, blue: 0.45))
+                        .help("Momentos buenos marcados con ⌥X. Van al manifest para la edición.")
                 }
             }
         }

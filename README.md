@@ -314,12 +314,14 @@ Mientras grabas, con la mano izquierda y sin mirar:
 | Tecla | Significa |
 |---|---|
 | **⌥C** | *"la regué, **C**orta esto"* — tira la toma que ACABA aquí |
-| **⌥B** | *"esto estuvo **B**ueno"* — candidato a highlight / cold open |
+| **⌥X** | ★ *"esto estuvo bueno"* — candidato a highlight / cold open |
 
 La mnemónica no es un detalle: esto se usa **bajo presión, hablando a cámara**.
 Si hay que pensar cuál era la tecla, no se usa. (Primera versión: ⌘⇧X/⌘⇧M —
 Daniel: *"para ambos requiero dos manos, no lo siento práctico"*. Segunda: ⌥X
-para cortar — *"X no entiendo qué hace"*. Las dos veces tenía razón.)
+para cortar — *"X no entiendo qué hace"*. Las dos veces tenía razón. ⌥X acabó
+siendo la ESTRELLA: cuando la marca dejó de llamarse 'bueno' y pasó a ser un
+icono, la tecla ya no necesitaba mnemónica de palabra, le bastó ser vecina de C.)
 
 Van a `manifest.json` (`markers`) y el editor los lee con
 `edicion-de-video/scripts/sfcast_manifest.py`. **Acuse: el contador de la esquina superior derecha** de la pantalla que grabas
@@ -331,7 +333,7 @@ ratón: lo ves tú, no sale en el video y jamás te roba un clic. Para revisar s
 diseño: `--hudlook` (único modo donde es capturable).
 
 ⚠️ **Solo están vivos MIENTRAS SE GRABA.** Un hotkey global se come la tecla, y
-⌥C escribe `ç` y ⌥B escribe `∫`: dejarlos puestos siempre te quitaría esos
+⌥C escribe `ç` y ⌥X escribe `≈`: dejarlos puestos siempre te quitaría esos
 caracteres en todas tus apps a cambio de nada. Se registran al dar REC y se
 sueltan al detener.
 

@@ -38,8 +38,12 @@ enum StudioRecTest {
         }
         do {
             try recorder.start(engine: engine, config: config, activeScene: scene)
-            // Mismo camino que el botón: los atajos viven solo durante la toma.
+            // Mismo camino que el botón: los atajos viven solo durante la toma,
+            // y la UI tiene que ENTERARSE de que se está grabando (si no, el
+            // test mide una barra que no es la que ve Daniel).
+            StudioController.shared.isRecording = true
             StudioController.shared.registrarAtajosDeMarcador()
+            StudioController.shared.markerHUD.show()
         } catch {
             Log.error("RECTEST_FAIL start: \(error.localizedDescription)")
             exit(1)
@@ -77,7 +81,15 @@ enum StudioRecTest {
             try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
         }
 
+        // Retrato de la BARRA con los contadores puestos: es donde Daniel cazó
+        // que un solo contador sumaba los dos tipos, así que hay que MIRARLO,
+        // no confiar en que el código "debería".
+        if CommandLine.arguments.contains("--markers") {
+            StudioController.shared.snapshotVentana(to: "/tmp/sfcast-barra.png")
+        }
         StudioController.shared.soltarAtajosDeMarcador()
+        StudioController.shared.markerHUD.hide()
+        StudioController.shared.isRecording = false
         let sync = engine.syncReport()
         let cs = engine.compositorStats()
         let efectivo = engine.effectiveFPS

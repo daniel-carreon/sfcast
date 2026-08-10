@@ -117,6 +117,105 @@ enum StudioCompBench {
         runPipeline(scene: burbuja, frames: frames, canvases: canvases, seconds: 6)
     }
 
+    // MARK: - SOAK: resistencia con la escena REAL, sin permisos
+
+    /// `--soak <minutos>` — el pipeline completo con la escena compuesta
+    /// (pantalla 4K + burbuja de cámara), corriendo N minutos y reportando cada
+    /// minuto. Existe porque las dos pruebas largas que sí se pueden hacer con
+    /// la app tienen un hueco cada una: la de 25 min tuvo la escena real pero
+    /// el permiso de pantalla se cayó a mitad, y la de 50 min corre con cámara
+    /// sola porque ese permiso, tras un rebuild, necesita un gesto humano.
+    /// Headless y sintética, esta no depende de TCC y aguanta lo que se le pida.
+    static func soak(minutes: Int) {
+        let screenSrc = CGSize(width: 4096, height: 2304)
+        let camSrc = CGSize(width: 1920, height: 1080)
+        guard let screenPB = synthBuffer(screenSrc, seed: 7),
+              let camPB = synthBuffer(camSrc, seed: 8) else { print("SOAK_FAIL buffers"); return }
+        let frames = LatestFrameStore()
+        frames.set(screenPB, for: .screen)
+        frames.set(camPB, for: .camera)
+        let escena = StudioScene(name: "Burbuja derecha", items: [
+            SceneItem(kind: .screen),
+            {
+                var it = SceneItem(kind: .camera,
+                                   rect: CGRect(x: 0.8369, y: 0.0298, width: 0.1641, height: 0.2917),
+                                   fit: .fill, circleMask: true)
+                it.glow = .morado
+                return it
+            }(),
+        ])
+        let canvas = CGSize(width: 2560, height: 1440)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("sfcast-soak.mp4")
+        try? FileManager.default.removeItem(at: url)
+        let sink = ProgramSink(url: url, width: 2560, height: 1440, fps: 30, quality: .media)
+        guard sink.prepare() else { print("SOAK_FAIL writer"); return }
+
+        let comp = Compositor()
+        let cad = CadenceKeeper()
+        let clock = ProgramClock()
+        clock.begin()
+        let q = DispatchQueue(label: "sfcast.soak", qos: .userInteractive)
+        let timer = DispatchSource.makeTimerSource(queue: q)
+        timer.schedule(deadline: .now(), repeating: .init(1.0 / 30.0), leeway: .milliseconds(3))
+        let contador = Contador()
+        timer.setEventHandler {
+            var st: Set<StudioSourceKind> = []
+            var sl: Set<StudioSourceKind> = []
+            let hostNow = CMClockGetTime(CMClockGetHostTimeClock())
+            guard let listo = comp.composePipelined(scene: escena, canvas: canvas,
+                                                    t: CACurrentMediaTime(), hostNow: hostNow,
+                                                    frames: frames, starved: &st, stale: &sl)
+            else { return }
+            for ts in cad.timestamps(for: listo.hostTime, fps: 30) {
+                sink.appendVideo(listo.buffer, hostTime: clock.stamp(hostNow: ts, target: nil))
+                contador.tick()
+            }
+        }
+        print("SOAK — \(minutes) min · escena Burbuja derecha (pantalla 4K + cámara) · lienzo 2560×1440")
+        print("  min   fps    compose p50/p95   sin-buffer  repetidos   RAM")
+        let t0 = CACurrentMediaTime()
+        let base = footprint()
+        timer.resume()
+        for m in 1...minutes {
+            Thread.sleep(forTimeInterval: 60)
+            let el = CACurrentMediaTime() - t0
+            let s = comp.stats()
+            let sub = comp.subFases()
+            print(String(format: "  %3d  %5.2f   %6.2f / %6.2f ms   %8d   %8d   %5.0f MB",
+                         m, Double(contador.total) / el, s.composeMsP50, sub.render,
+                         s.bufferFailures, cad.repeatedFrames,
+                         Double(footprint() - base) / 1_000_000))
+            fflush(stdout)   // sin esto, redirigido a archivo no se ve nada hasta el final
+        }
+        timer.cancel()
+        let el = CACurrentMediaTime() - t0
+        let sem = DispatchSemaphore(value: 0)
+        var stats = ProgramSink.Stats()
+        Task.detached { stats = await sink.finish(); sem.signal() }
+        sem.wait()
+        comp.drainPipeline()
+        let fps = Double(stats.videoFrames) / el
+        let pct = stats.videoFrames > 0
+            ? Double(cad.repeatedFrames) / Double(stats.videoFrames) * 100 : 0
+        let peor = stats.worstWindow(20)
+        print(String(format: "\nSOAK RESULTADO: %.2f fps · %d frames · %.1f%% repetidos · %d drops · %d sin-buffer",
+                     fps, stats.videoFrames, pct, stats.droppedFrames, comp.stats().bufferFailures))
+        if let peor {
+            print(String(format: "  peor ventana de 20s: %.2f fps (minuto %d:%02d)",
+                         peor.fps, peor.startSec / 60, peor.startSec % 60))
+        }
+        let ok = fps >= 29.0 && pct < 15 && stats.droppedFrames == 0
+                 && (peor?.fps ?? 30) >= 27.0
+        print(ok ? "SOAK_OK" : "SOAK_FAIL")
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    private final class Contador: @unchecked Sendable {
+        private let lock = NSLock(); private var n = 0
+        func tick() { lock.lock(); n += 1; lock.unlock() }
+        var total: Int { lock.lock(); defer { lock.unlock() }; return n }
+    }
+
     // MARK: - FASE 2: pipeline completo (timer + compose + encoder + retención)
 
     private static func runPipeline(scene: StudioScene, frames: LatestFrameStore,

@@ -97,6 +97,14 @@ let syncTestSeconds: Int? = {
 /// grabar. Mide cuántos ms cuesta componer UN frame en esta Mac a cada tamaño
 /// de lienzo, con las escenas reales. Es el número que decide el default del
 /// lienzo: hasta hoy se elegía "nativa" sin saber que el presupuesto son 33 ms.
+/// SOAK (`--soak <minutos>`): resistencia headless con la escena compuesta real.
+/// No depende de TCC, así que puede correr donde el permiso de pantalla no está.
+if let i = cliArgs.firstIndex(of: "--soak") {
+    let mins = (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 30
+    StudioCompBench.soak(minutes: mins)
+    exit(0)
+}
+
 if cliArgs.contains("--compbench") {
     let i = cliArgs.firstIndex(of: "--compbench")!
     let n = (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 90

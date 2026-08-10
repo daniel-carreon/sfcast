@@ -198,12 +198,22 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
 
     private var hotkeyRetoma: GlobalHotKey?
     private var hotkeyBueno: GlobalHotKey?
+    /// Los dos contadores en la esquina de la pantalla que se graba.
+    let markerHUD = MarkerHUD()
+    private var cortesMarcados = 0
+    private var buenosMarcados = 0
 
-    /// ⌥X = "la regué, corta esto" · ⌥C = "esto estuvo bueno".
+    /// ⌥C = "la regué, **C**orta esto" · ⌥B = "esto estuvo **B**ueno".
     ///
-    /// Las eligió Daniel (10 ago) por ergonomía y tiene razón: ⌘⇧X pedía dos
-    /// manos, y con dos manos ocupadas nadie marca nada a mitad de una toma.
-    /// ⌥X y ⌥C se pulsan con la izquierda, dedos vecinos, sin mirar.
+    /// Dos iteraciones con Daniel el 10 ago, y las dos las tenía él:
+    /// 1. ⌘⇧X pedía DOS MANOS — "no lo siento práctico". Con las dos manos
+    ///    ocupadas nadie marca nada a mitad de una toma.
+    /// 2. ⌥X para cortar no significaba nada: *"es fácil atribuir la C a eso,
+    ///    y X no entiendo qué hace"*. La mnemónica importa más que la comodidad
+    ///    de un centímetro, porque esto se usa BAJO PRESIÓN, hablando a cámara:
+    ///    si hay que pensar cuál era, no se usa.
+    ///
+    /// C de Cortar y B de Bueno. Ambas con la izquierda, sin mirar.
     ///
     /// GLOBALES: cuando se traba está presentando en SFPoint, no mirando SFCast.
     /// Un atajo que exija traer la app al frente no se usaría nunca.
@@ -215,12 +225,12 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     /// sueltan al detener.
     func registrarAtajosDeMarcador() {
         guard hotkeyRetoma == nil else { return }
-        hotkeyRetoma = GlobalHotKey(key: kVK_ANSI_X, mods: UInt32(optionKey),
-                                    descripcion: "⌥X marcar retoma") { [weak self] in
+        hotkeyRetoma = GlobalHotKey(key: kVK_ANSI_C, mods: UInt32(optionKey),
+                                    descripcion: "⌥C marcar CORTE") { [weak self] in
             self?.marcar("retoma")
         }
-        hotkeyBueno = GlobalHotKey(key: kVK_ANSI_C, mods: UInt32(optionKey),
-                                   descripcion: "⌥C marcar bueno") { [weak self] in
+        hotkeyBueno = GlobalHotKey(key: kVK_ANSI_B, mods: UInt32(optionKey),
+                                   descripcion: "⌥B marcar BUENO") { [weak self] in
             self?.marcar("bueno")
         }
     }
@@ -230,7 +240,7 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         guard hotkeyRetoma != nil || hotkeyBueno != nil else { return }
         hotkeyRetoma = nil
         hotkeyBueno = nil
-        Log.info("Atajos de marcador liberados (⌥X y ⌥C vuelven a escribir ≈ y ç)")
+        Log.info("Atajos de marcador liberados (⌥C y ⌥B vuelven a escribir ç e ∫)")
     }
 
     /// Anota el marcador y da acuse VISIBLE — sin sonido y sin nada que salga en
@@ -241,10 +251,13 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         let n = recorder.mark(kind)
         markerCount = n
         lastMarkerKind = kind
-        // El destello vive en el ESPEJO, que lleva sharingType = .none: lo ve
-        // Daniel y NO sale en el video.
-        mirror.flash(kind == "retoma" ? .ambar : .verde)
-        markerFlashUntil = Date().addingTimeInterval(1.2)
+        if kind == "retoma" { cortesMarcados += 1 } else { buenosMarcados += 1 }
+        // ACUSE = ESTADO, no evento (Daniel, 10 ago: "el aro no me convence…
+        // yo puedo ver ambas cosas"). El destello confirmaba la última
+        // pulsación y se iba; lo que hace falta mientras hablas es saber
+        // CUÁNTAS llevas de cada una sin acordarte. El pulso del número sigue
+        // diciendo "esta llegó".
+        markerHUD.update(cortes: cortesMarcados, buenos: buenosMarcados, pulso: kind)
     }
 
     /// El modo Loom arranca → el Estudio se hace a un lado (misma regla que el
@@ -1396,6 +1409,7 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     func toggleRecord() {
         if recorder.isRecording {
             soltarAtajosDeMarcador()
+            markerHUD.hide()
             Task {
                 let dir = await recorder.stop(engine: engine, config: config)
                 isRecording = false
@@ -1412,10 +1426,14 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                 recordError = nil
                 isRecording = true
                 markerCount = 0
+                cortesMarcados = 0
+                buenosMarcados = 0
                 // Las teclas se toman prestadas justo ahora y se devuelven al
-                // detener: fuera de la toma no hay nada que marcar, y ⌥X/⌥C
+                // detener: fuera de la toma no hay nada que marcar, y ⌥C/⌥B
                 // escriben caracteres que Daniel debe conservar.
                 registrarAtajosDeMarcador()
+                markerHUD.show()
+                markerHUD.update(cortes: 0, buenos: 0, pulso: nil)
             } catch {
                 recordError = error.localizedDescription
             }

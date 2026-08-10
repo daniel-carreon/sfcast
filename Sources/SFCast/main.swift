@@ -78,6 +78,15 @@ if let i = cliArgs.firstIndex(of: "--compresstest"), i + 1 < cliArgs.count {
     exit(0)
 }
 
+/// QA VISUAL del contador de marcas (`--hudlook N`): lo muestra N segundos y
+/// CAPTURABLE (solo en este modo), subiendo los contadores, para poder revisar
+/// el diseño con un screenshot. Sin esto no hay forma de mirarlo: por diseño es
+/// invisible a cualquier captura.
+let hudLookSeconds: Int? = {
+    guard let i = cliArgs.firstIndex(of: "--hudlook") else { return nil }
+    return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 10
+}()
+
 /// QA DEL ARCHIVO (`--rectest N [--chokems M]`): graba de verdad y verifica el
 /// MP4 — pistas alineadas, cadencia, y nada perdido en silencio.
 let recTestSeconds: Int? = {
@@ -200,6 +209,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in await StudioController.shared.runMirrorLook(seconds: seconds) }
         } else if let seconds = mirrorTestSeconds {
             Task { @MainActor in await StudioController.shared.runMirrorTest(seconds: seconds) }
+        } else if let seconds = hudLookSeconds {
+            Task { @MainActor in
+                let hud = MarkerHUD()
+                hud.show()
+                var c = 0, b = 0
+                for i in 0..<seconds {
+                    try? await Task.sleep(nanoseconds: 700_000_000)
+                    if i % 3 == 2 { b += 1; hud.update(cortes: c, buenos: b, pulso: "bueno") }
+                    else { c += 1; hud.update(cortes: c, buenos: b, pulso: "retoma") }
+                }
+                hud.snapshot(to: "/tmp/sfcast-hud.png")
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                hud.hide()
+                exit(0)
+            }
         } else if let seconds = recTestSeconds {
             Task { @MainActor in await StudioController.shared.runRecTest(seconds: seconds) }
         } else if let seconds = syncTestSeconds {

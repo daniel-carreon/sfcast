@@ -4,6 +4,7 @@ import IOSurface
 import CoreImage
 import CoreVideo
 import Carbon.HIToolbox
+import WebKit
 
 /// MODO ESTUDIO — vista desktop. Anatomía OBS/Streamlabs (Escenas + Fuentes +
 /// Preview/Programa + Mixer + Salidas), piel Screen Studio: oscura, limpia,
@@ -48,6 +49,19 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     @Published var config = StudioConfig.load()
     @Published var selectedItemID: UUID? { didSet { previewView?.refreshOverlay() } }
     @Published var showSettings = false
+    /// EL SET a la vista (18 ago 2026): el panel web :8088 embebido como drawer
+    /// del Estudio — un solo panel (panel_server.py), cero re-implementación.
+    /// Abierto/cerrado y ancho se RECUERDAN (pedido 18 ago pm): el drawer vuelve
+    /// como lo dejaste, y el resizer guarda su última posición.
+    @Published var showSetPanel = UserDefaults.standard.bool(forKey: "studio.setPanelOpen") {
+        didSet { UserDefaults.standard.set(showSetPanel, forKey: "studio.setPanelOpen") }
+    }
+    @Published var setPanelWidth: CGFloat = {
+        let w = UserDefaults.standard.double(forKey: "studio.setPanelWidth")
+        return (300...560).contains(w) ? CGFloat(w) : 372
+    }() {
+        didSet { UserDefaults.standard.set(Double(setPanelWidth), forKey: "studio.setPanelWidth") }
+    }
     @Published var isRecording = false
 
     // Vúmetro SIN @Published — v2.8. Publicar los niveles a 15 Hz invalidaba
@@ -59,6 +73,10 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     // niveles ahora van DIRECTO al CALayer de la barra, igual que el preview.
     private weak var micMeter: MeterBarNSView?
     private weak var sysMeter: MeterBarNSView?
+    /// Ya se notificó que la cadencia tocó el suelo EN ESTA TOMA. De flanco, no de
+    /// nivel: el governor puede escalonar varias veces en un tramo malo y avisar
+    /// en cada uno entrenaría a ignorar el aviso.
+    fileprivate var cadenceFloorNotified = false
     private var micSmooth: Float = 0
     private var sysSmooth: Float = 0
     /// SENSOR (invariante 5b): fps medidos de cámara y preview, para VER que
@@ -117,6 +135,26 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
 
     // MARK: - ventana
 
+    /// Pantalla completa nativa (modo rodaje via sfcast://rodaje), SIEMPRE en
+    /// el monitor IZQUIERDO (Daniel, 18 ago: el rodaje va en el izquierdo; el
+    /// derecho queda libre para notas/terminal). El respiro deja que
+    /// makeKeyAndOrderFront asiente si la ventana acaba de nacer.
+    func enterFullScreen() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let w = self?.window,
+                  !w.styleMask.contains(.fullScreen) else { return }
+            if let left = NSScreen.screens.min(by: { $0.frame.minX < $1.frame.minX }),
+               w.screen !== left {
+                let f = left.visibleFrame
+                w.setFrame(NSRect(x: f.minX + 40, y: f.minY + 40,
+                                  width: min(w.frame.width, f.width - 80),
+                                  height: min(w.frame.height, f.height - 80)),
+                           display: true)
+            }
+            w.toggleFullScreen(nil)
+        }
+    }
+
     func open() {
         // El micropanel Loom suelta cámara/mic (su vúmetro tiene sesión propia
         // sobre el mic y competiría con la del Estudio — hallazgo v1.4).
@@ -162,6 +200,23 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
             }
             engine.onCadenceChange = { [weak self] efectivo, pedido in
                 guard let self else { return }
+                // El escalón VIAJA AL MANIFEST (v3.6). Sin esto, un archivo de 15
+                // fps rellenados a 30 es indistinguible de uno de 30 reales para
+                // quien lo edite después — `achievedFps` mide el relleno.
+                self.recorder.cadenceChanged(efectivo, target: pedido)
+                // Y si se cae al SUELO de la escalera, esto sale de la ventana:
+                // Daniel graba mirando a la cámara, no el banner del otro monitor.
+                // De FLANCO, no de nivel: avisar en cada escalón entrenaría a
+                // ignorarlo ("un sensor que exagera se deja de leer").
+                if self.recorder.isRecording, efectivo <= max(1, pedido / 2),
+                   !self.cadenceFloorNotified {
+                    self.cadenceFloorNotified = true
+                    notify("SFCast — LA GPU NO ALCANZA",
+                           "Compongo a \(efectivo) de \(pedido) fps: el archivo sale a \(pedido) "
+                           + "pero repitiendo frames. La toma se va a ver a medio movimiento.")
+                } else if efectivo >= pedido {
+                    self.cadenceFloorNotified = false
+                }
                 if efectivo < pedido {
                     // OJO con el mensaje: desde el guardián de cadencia, el
                     // ARCHIVO sigue saliendo a los fps pedidos. Lo que baja es
@@ -1019,9 +1074,22 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
 
     private func pullEngineStatus() {
         screenOK = engine.screenAvailable && !engine.screenFrozen
-        cameraOK = engine.cameraAvailable
+        // LA CÁMARA SE MIDE IGUAL QUE LA PANTALLA (17 ago 2026).
+        //
+        // Estas cuatro líneas tenían una asimetría que costó tomas: la pantalla
+        // restaba `screenFrozen` de su semáforo Y se insertaba en `starved`; la
+        // cámara no hacía ninguna de las dos. `cameraAvailable` se pone en true
+        // optimista al montar la sesión y NUNCA vuelve a false, así que el punto
+        // se quedaba VERDE con la cámara entregando 0 fps — Daniel lo cazó en un
+        // screenshot donde el chip decía `camara 0 · preview 30 fps` con los dos
+        // puntos en verde.
+        //
+        // Es la misma familia que `preflightVoz` sin `preflightImagen`: al
+        // micrófono y a la pantalla les cablearon el sensor, a la cámara no.
+        cameraOK = engine.cameraAvailable && !engine.cameraFrozen
         starved = engine.starvedSources
         if engine.screenFrozen { starved.insert(.screen) }
+        if engine.cameraFrozen { starved.insert(.camera) }
     }
 
     /// Peso proyectado con la config actual — el número que faltaba.
@@ -1465,6 +1533,7 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
             }
         } else {
             guard recorder.state == .idle else { return }   // anti doble-clic en .stopping
+            cadenceFloorNotified = false
             do {
                 try recorder.start(engine: engine, config: config, activeScene: activeScene)
                 recordError = nil
@@ -1655,6 +1724,56 @@ final class StudioPreviewNSView: NSView {
     }
 }
 
+/// Agarradera del drawer: arrastra para cambiar el ancho de EL SET (300-560).
+/// El ancho persiste en UserDefaults via StudioController.setPanelWidth.
+struct SetResizeHandle: View {
+    @EnvironmentObject var c: StudioController
+    @State private var startWidth: CGFloat? = nil
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.001))   // zona de agarre invisible
+            .frame(width: 9)
+            .overlay(
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(StudioSkin.panelBorder)
+                    .frame(width: 3, height: 46)
+            )
+            .contentShape(Rectangle())
+            .onHover { inside in
+                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { g in
+                        let base = startWidth ?? c.setPanelWidth
+                        if startWidth == nil { startWidth = base }
+                        c.setPanelWidth = min(max(base - g.translation.width, 300), 560)
+                    }
+                    .onEnded { _ in startWidth = nil }
+            )
+    }
+}
+
+/// EL SET embebido: WKWebView al panel :8088 (panel_server.py). El panel web
+/// sigue siendo la ÚNICA implementación — esto es un espejo, no una copia; si
+/// el servicio está caído, cerrar y reabrir el drawer reintenta la carga.
+struct SetPanelDrawer: NSViewRepresentable {
+    // ?embed=sfcast: el panel esconde su tarjeta "Cómo se ve" (el Estudio ya
+    // enseña la cámara en vivo al lado — pedido de Daniel, 18 ago pm).
+    private static let panelURL = URL(string: "http://127.0.0.1:8088/?embed=sfcast")!
+
+    func makeNSView(context: Context) -> WKWebView {
+        let v = WKWebView()
+        v.load(URLRequest(url: Self.panelURL))
+        return v
+    }
+
+    func updateNSView(_ v: WKWebView, context: Context) {
+        if v.url == nil { v.load(URLRequest(url: Self.panelURL)) }
+    }
+}
+
 struct StudioPreviewView: NSViewRepresentable {
     @EnvironmentObject var controller: StudioController
     func makeNSView(context: Context) -> StudioPreviewNSView {
@@ -1772,22 +1891,35 @@ struct StudioRootView: View {
     @EnvironmentObject var c: StudioController
 
     var body: some View {
-        VStack(spacing: 10) {
-            topBar
-            if let msg = c.alert { alertBanner(msg, critical: c.alertCritical) }
-            else if let disk = c.freeDiskNote { alertBanner(disk, critical: true) }
-            StudioPreviewView()
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(StudioSkin.panelBorder))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // SIMETRÍA estilo Streamlabs: 4 columnas de ancho IGUAL, sin huecos.
-            HStack(spacing: 10) {
-                ScenesPanel().frame(maxWidth: .infinity)
-                SourcesPanel().frame(maxWidth: .infinity)
-                MixerPanel().frame(maxWidth: .infinity)
-                OutputsPanel().frame(maxWidth: .infinity)
+        HStack(spacing: 10) {
+            VStack(spacing: 10) {
+                topBar
+                if let msg = c.alert { alertBanner(msg, critical: c.alertCritical) }
+                else if let disk = c.freeDiskNote { alertBanner(disk, critical: true) }
+                StudioPreviewView()
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(StudioSkin.panelBorder))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // SIMETRÍA estilo Streamlabs: 4 columnas de ancho IGUAL, sin huecos.
+                HStack(spacing: 10) {
+                    ScenesPanel().frame(maxWidth: .infinity)
+                    SourcesPanel().frame(maxWidth: .infinity)
+                    MixerPanel().frame(maxWidth: .infinity)
+                    OutputsPanel().frame(maxWidth: .infinity)
+                }
+                .frame(height: 235)
             }
-            .frame(height: 235)
+            // EL SET al lado (18 ago): el panel :8088 embebido — ver y mover
+            // luces/Pixoo sin salir del Estudio, incluso grabando. En su ancho
+            // el panel cae solo en su layout de teléfono (una columna), y el
+            // resizer recuerda la última posición.
+            if c.showSetPanel {
+                SetResizeHandle()
+                SetPanelDrawer()
+                    .frame(width: c.setPanelWidth)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(StudioSkin.panelBorder))
+            }
         }
         .padding(12)
         .background(StudioSkin.bg)
@@ -1846,6 +1978,17 @@ struct StudioRootView: View {
                     .lineLimit(1)
             }
             Spacer()
+            Button {
+                c.showSetPanel.toggle()
+            } label: {
+                Image(systemName: "lightbulb.max.fill")
+                    .foregroundStyle(c.showSetPanel ? StudioSkin.mostaza : StudioSkin.dim)
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(StudioSkin.panel)
+                    .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("EL SET: luces, Pixoo y cámara del panel :8088, embebido — funciona también grabando")
             Button {
                 c.showSettings = true
             } label: {
@@ -2260,6 +2403,24 @@ struct SourcesPanel: View {
                 Button("Cambiar cámara…") {
                     c.selectedItemID = item.id
                     cameraPickerItem = item.id
+                }
+                // VOLTEAR EN HORIZONTAL, aquí (pedido de Daniel, 17 ago).
+                //
+                // El volteo YA existía —`flipH` en el item, el transform en el
+                // compositor y en el espejo— pero solo se podía tocar desde el
+                // submenú del Espejo, y solo con el espejo ENCENDIDO. O sea que
+                // una propiedad de ESTA fuente vivía escondida detrás de otra
+                // función. Ahora se voltea desde donde se piensa: la fuente.
+                //
+                // Cae sobre el ITEM, así que el programa y el espejo lo ven con el
+                // mismo valor sin que nadie sincronice nada.
+                Button {
+                    c.selectedItemID = item.id
+                    c.updateItem(item.id) { $0.flipH.toggle() }
+                } label: {
+                    Label(item.flipH ? "✓ Voltear en horizontal"
+                                     : "Voltear en horizontal",
+                          systemImage: "arrow.left.arrow.right")
                 }
                 // EL ESPEJO VIVE AQUÍ, y solo aquí (Daniel, 9 ago: "ya vi que
                 // estaba en la cámara, clic derecho… déjala ahí, no es necesario

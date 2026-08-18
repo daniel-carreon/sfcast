@@ -41,12 +41,26 @@ final class StudioRecorder {
     private var envelope: [Float] = []
     private var envelopeTask: Task<Void, Never>?
     private var voiceTask: Task<Void, Never>?
+    /// Guard de cadencia: detiene la toma si la Mac no sostiene el piso de fps.
+    private var cadenceTask: Task<Void, Never>?
+    /// POR QUÉ se detuvo sola la última toma (nil = la detuvo Daniel).
+    ///
+    /// Existe para que el QA no confunda "el sujeto se protegió" con "el sujeto
+    /// falló". El caso del guard de voz ya estaba resuelto a mano con un
+    /// `--mutemic` especial; esto lo generaliza a cualquier guard, incluido el de
+    /// cadencia, que dispara sin ninguna bandera de CLI.
+    private(set) var lastAutoStopReason: String?
     /// Dispositivo de micrófono que quedó DE VERDAD en la sesión (va al
     /// manifest). El Shure cambia de formato entre arranques y sin registrar
     /// qué entrada se usó, el próximo diagnóstico vuelve a ser a ciegas.
     private var micDeviceName: String?
     private var deadZones: [StudioManifest.DeadZone] = []
     private var frozenSince: [String: Double] = [:]
+    /// CADA ESCALÓN DEL GOVERNOR durante la toma (v3.6). El evento ya existía
+    /// (`engine.onCadenceChange`) y solo pintaba un banner que se pierde en el
+    /// otro monitor. Guardarlo cuesta tres números por escalón y es lo único que
+    /// permite distinguir, después, "30 fps de verdad" de "15 fps rellenados a 30".
+    private var cadenceLog: [StudioManifest.CadencePoint] = []
 
     var isRecording: Bool { state == .recording }
     /// Última carpeta escrita (la usa el QA cuando el auto-stop cerró la sesión
@@ -131,6 +145,21 @@ final class StudioRecorder {
         try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
         activeOutputs = config.outputs
         timeline = []
+        // TODO lo que es POR SESIÓN se limpia aquí.
+        //
+        // `markers` y `deadZones` no se limpiaban nunca (bug encontrado el 17 ago
+        // con los propios archivos de Daniel): la marca que puso en el segundo
+        // 103.1 de la sesión de 48 min (u760h7xic9kv, 07:26) aparece IDÉNTICA, en
+        // el mismo t=103.1, en el manifest de la toma siguiente (dw0w7tu0rea1,
+        // 08:19). El puente a la edición lee "retoma" como "tira la toma que
+        // ACABA aquí", así que una marca heredada tira material bueno de otra
+        // grabación. Igual de grave al revés: una zona muerta vieja marca como
+        // inservible un tramo sano.
+        markers = []
+        deadZones = []
+        frozenSince.removeAll()
+        cadenceLog = []
+        lastAutoStopReason = nil
         if let s = activeScene {
             timeline.append(.init(t: 0, sceneID: s.id, sceneName: s.name))
         }
@@ -186,14 +215,27 @@ final class StudioRecorder {
             throw NSError(domain: "SFCast", code: 11, userInfo: [
                 NSLocalizedDescriptionKey: "Ninguna salida pudo activarse (¿permisos de pantalla/cámara?)."])
         }
+        // El trinquete del governor arranca LIMPIO con cada toma.
+        //
+        // Hasta el 17 ago `governor.reset` solo se llamaba en `startRenderLoop()`
+        // —o sea al ABRIR la ventana de Estudio, no al dar REC— así que el estado
+        // del trinquete (incluido un `upRequirement` ya escalado a 180 ventanas)
+        // se heredaba del preview en reposo y de la toma anterior. Medido: la
+        // sesión dw0w7tu0rea1 (15 ago 08:19) ya reportaba `cadencia:19/30` en su
+        // PRIMER heartbeat a los 15 s — no se degradó en 15 segundos, arrancó
+        // degradada, heredando el 15 fps de la sesión de 48 min que cerró a las
+        // 08:15. Una toma se juzga por lo que pasa DENTRO de ella.
+        engine.governor.reset(target: engine.fps, now: CACurrentMediaTime())
         state = .recording
         Log.info("Estudio: grabando \(videoID) → [\(activated.joined(separator: ", "))] "
                  + "calidad=\(config.programQuality.rawValue) libre=\(Self.gb(free))")
         preflightRitmo(engine: engine)
         preflightVoz(engine: engine, micEnabled: config.micEnabled)
+        preflightImagen(engine: engine)
         micDeviceName = engine.micDeviceName
         startEnvelope(engine: engine)
         startVoiceGuard(engine: engine, micEnabled: config.micEnabled)
+        startCadenceGuard(engine: engine)
         startHealthMonitor(engine: engine)
     }
 
@@ -222,6 +264,43 @@ final class StudioRecorder {
         }
     }
 
+    /// PREFLIGHT DE IMAGEN — el espejo de `preflightVoz`, que faltaba.
+    ///
+    /// Al micrófono se le preguntaba "¿estás vivo?" antes de grabar. A la cámara
+    /// NO: su vigilancia (`checkCameraHealth`) es de FLANCO — `if dead !=
+    /// cameraFrozen` — así que si la cámara ya estaba muerta al dar REC, la
+    /// transición nunca ocurría: cero alarma, cero notificación, y `noteFrozen`
+    /// jamás se llamaba, por lo que `deadZones` salía VACÍO en una sesión que era
+    /// 100% zona muerta.
+    ///
+    /// Costó una toma real: la sesión hpa3ky02t5ss (15 ago 06:13) grabó 3:52 de
+    /// UNA imagen fija con la ZV-E10 sin entregar un solo frame, y se archivó
+    /// reportando `achievedFps: 29.96`. El puente a la edición leyó ese número y
+    /// le dijo al editor que le metiera "capa rica, captions y zoom" a una foto.
+    ///
+    /// Esto AVISA y REGISTRA; jamás bloquea (la grabación es de Daniel).
+    private func preflightImagen(engine: StudioEngine) {
+        guard engine.cameraAvailable else { return }
+        let age = engine.frames.age(.camera)
+        let muerta = (age ?? .greatestFiniteMagnitude) > StudioEngine.deadAfter
+        guard muerta else {
+            Log.info(String(format: "Estudio: preflight de imagen OK — cámara entregando "
+                            + "(último frame hace %.2fs)", age ?? 0))
+            return
+        }
+        let cuanto = age.map { String(format: "%.1fs sin imagen nueva", $0) }
+            ?? "nunca entregó un frame"
+        Log.error("Estudio: PREFLIGHT DE IMAGEN — la cámara NO está dando imagen (\(cuanto))")
+        onAlert?("⚠️ La cámara no está dando imagen (\(cuanto)). Vas a grabar un frame "
+                 + "CONGELADO. Revísala ANTES de hablar (las Sony se apagan solas).", true)
+        notify("SFCast — REVISA LA CÁMARA",
+               "No está entrando imagen al empezar a grabar: sería un video de una foto.")
+        // El tramo se registra desde el segundo 0: `stop()` cierra los que sigan
+        // abiertos, así que la zona muerta queda en el manifest aunque la cámara
+        // no vuelva nunca — que es justo el caso que antes no dejaba rastro.
+        noteFrozen("camera", frozen: true, reason: "sin imagen desde el inicio de la toma")
+    }
+
     private func preflightRitmo(engine: StudioEngine) {
         let objetivo = Double(engine.fps)
         guard objetivo > 0 else { return }
@@ -232,6 +311,36 @@ final class StudioRecorder {
         if cs.composed >= 45, cs.composeMsP50 > presupuesto * 0.6 {
             motivos.append(String(format: "el compositor va a %.0f%% de su presupuesto",
                                   cs.composeMsP50 / presupuesto * 100))
+        }
+        // LA COLA, que era el punto ciego (v3.6, 17 ago).
+        //
+        // Este preflight solo miraba el p50 de `composeMs`, y `composeMs` arranca
+        // DESPUÉS de esperar a la GPU del frame anterior. O sea: miraba la mediana
+        // del único tramo que nunca se atasca. El 15 ago pasó en verde con p50 =
+        // 8.1 ms mientras la vuelta completa iba a p95 = 97 ms y máx = 232 ms
+        // contra 33.3 de presupuesto, y la toma salió con 12.8 fps de movimiento.
+        //
+        // La falla es de COLA: p50 sano + p95 catastrófico es la firma de una
+        // espera, no de un cálculo caro. Se mira el p95 del loop COMPLETO, que sí
+        // incluye la espera, y se mira ANTES de hablar.
+        let loop = engine.profile.snapshot()
+        if loop.n >= 60, loop.total.p95 > presupuesto {
+            motivos.append(String(format: "la vuelta del loop se va a %.0f ms en su p95 "
+                                  + "(presupuesto %.0f) — es espera de GPU",
+                                  loop.total.p95, presupuesto))
+        }
+        // Y el estado que NADIE miraba: cuánto lleva la app abierta.
+        //
+        // Medido en el propio log: el compositor de esta app pasa de 1.1-2.2 ms
+        // recién abierta a 5.1-8.1 ms tras ~3 días, con el mismo lienzo y la misma
+        // escena, porque su working set se va quedando fuera de RAM (22% de sus
+        // regiones escribibles estaban swapeadas el 17 ago, con 93 MB libres en la
+        // máquina). La prueba de v3.1 —44.8 min a 30.00 fps— era válida Y el bug
+        // era real: la variable que nadie controlaba era el UPTIME de la app.
+        let horas = Date().timeIntervalSince(Self.launchedAt) / 3600
+        if horas >= 12 {
+            motivos.append(String(format: "SFCast lleva %.0f h abierta (el compositor se degrada; "
+                                  + "ciérrala y reábrela antes de la toma buena)", horas))
         }
         if ram < Self.lowRAMBytes, ram != .max {
             motivos.append("quedan \(Self.gb(ram)) de RAM libre")
@@ -245,10 +354,98 @@ final class StudioRecorder {
             Log.error("Estudio: PREFLIGHT — " + msg)
             onAlert?(msg, true)
         } else {
-            Log.info(String(format: "Estudio: preflight OK — compositor %.1f ms de %.1f, RAM libre %@",
-                            cs.composeMsP50, presupuesto, Self.gb(ram)))
+            Log.info(String(format: "Estudio: preflight OK — compositor %.1f ms de %.1f "
+                            + "(loop p95 %.1f, n=%d), RAM libre %@, app abierta %.1f h",
+                            cs.composeMsP50, presupuesto, loop.total.p95, loop.n,
+                            Self.gb(ram), horas))
         }
     }
+
+    // MARK: - GUARD DE CADENCIA — "prohibido bajar los fps" (17 ago 2026)
+
+    /// Orden de Daniel, verbatim:
+    ///
+    ///   "Queda prohibido bajar los frames por segundo. Prefiero que antes de eso
+    ///    se pause y me diga algo, pero mantener estables los frames. 30 frames,
+    ///    mínimo 24, pero no menos. Prefiero que se pause si es así y yo arreglar
+    ///    otros detalles."
+    ///
+    /// El governor ahora tiene UN escalón de gracia y un piso duro (24, ver
+    /// `RenderGovernor.hardFloorFPS`). Este guard vigila el piso: si la Mac no lo
+    /// aguanta de forma sostenida, la toma se DETIENE en vez de seguir grabando
+    /// material a medio movimiento que se ve fluido en el contenedor y tirón en la
+    /// pantalla.
+    ///
+    /// ⚠️ No es una pausa que reanuda: el recorder solo tiene idle/recording/
+    /// stopping, así que esto DETIENE y conserva lo grabado hasta ese punto. Una
+    /// pausa reanudable de verdad es una feature aparte (segmentos), no un arreglo.
+    ///
+    /// Mismo patrón que el guard de voz, que ya detiene a los 20 s sin micrófono:
+    /// avisa temprano (4 s) y detiene si no se arregla (12 s). El governor ya
+    /// necesita ~4 s de mala evidencia para llegar al piso, así que detener a los
+    /// 12 s de piso fallando son ~16 s de cadencia sostenidamente bajo 24: eso no
+    /// es un tropiezo, es que esta Mac no puede con esta toma AHORA.
+    private static let cadenceWarnAfter: Double = 4
+    private static let cadenceStopAfter: Double = 12
+
+    private func startCadenceGuard(engine: StudioEngine) {
+        cadenceTask?.cancel()
+        // `--chokems` ahoga el loop A PROPÓSITO para ejercer el governor: es el
+        // único instrumento que tenemos para probar la recuperación. Si el guard
+        // detuviera esa corrida, mataríamos justamente la prueba que protege todo
+        // lo demás. El ahogo artificial no es un problema real de la Mac.
+        guard StudioRecTest.chokeMs == 0 else {
+            Log.info("Estudio: guard de cadencia OFF (--chokems activo: es QA del governor)")
+            return
+        }
+        cadenceTask = Task { @MainActor [weak self] in
+            var aviso = false
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, self.state == .recording else { return }
+                let fallando = engine.governor.floorFailingFor(now: CACurrentMediaTime())
+                let piso = engine.governor.effective
+                let logrado = engine.governor.floorAchieved
+                if fallando == 0 { aviso = false; continue }
+
+                if fallando >= Self.cadenceWarnAfter, !aviso {
+                    aviso = true
+                    Log.error(String(format: "Estudio: CADENCIA BAJO EL PISO — %.1f fps contra un piso "
+                                     + "de %d, lleva %.0fs. Si no se arregla, detengo la toma.",
+                                     logrado, piso, fallando))
+                    self.onAlert?(String(format: "⚠️ La Mac no sostiene %d fps (va a %.1f). Cierra lo que "
+                                         + "esté cargando el sistema AHORA: si sigue así detengo la toma "
+                                         + "en %.0fs, porque grabar bajo el piso es grabar tirones.",
+                                         piso, logrado, Self.cadenceStopAfter - fallando), true)
+                    notify("SFCast — LA CADENCIA SE ESTÁ CAYENDO",
+                           String(format: "%.1f fps contra un piso de %d. Libera la Mac o detengo la toma.",
+                                  logrado, piso))
+                }
+                if fallando >= Self.cadenceStopAfter {
+                    Log.error(String(format: "Estudio: DETENIENDO — %.0fs bajo el piso de %d fps (a %.1f). "
+                                     + "Prohibido seguir bajando: mejor detener que entregar tirones.",
+                                     fallando, piso, logrado))
+                    self.onAlert?(String(format: "Detuve la toma: la Mac no sostenía %d fps (iba a %.1f). "
+                                         + "Lo grabado hasta aquí está a salvo. Cierra apps o reinicia "
+                                         + "SFCast y vuelve a empezar.", piso, logrado), true)
+                    notify("SFCast — TOMA DETENIDA",
+                           String(format: "No se sostenían %d fps (iba a %.1f). Lo grabado está a salvo.",
+                                  piso, logrado))
+                    self.lastAutoStopReason = String(format: "el guard de CADENCIA la detuvo "
+                                                     + "(%.1f fps contra un piso de %d)", logrado, piso)
+                    self.onEmergencyStop?()
+                    return
+                }
+            }
+        }
+    }
+
+    /// Cuándo arrancó ESTE proceso. El preflight lo usa porque el costo del
+    /// compositor crece con las horas que la app lleva abierta (medido: 1.1-2.2 ms
+    /// recién abierta → 5.1-8.1 ms a los ~3 días) y ese era el factor que ninguna
+    /// medición registraba. Un benchmark de rendimiento sin el uptime del proceso
+    /// al lado no es reproducible.
+    private static let launchedAt = Date()
 
     /// Muestrea el nivel del mic a 10 Hz mientras se graba.
     private func startEnvelope(engine: StudioEngine) {
@@ -328,6 +525,7 @@ final class StudioRecorder {
                     self.onAlert?("Detuve la grabación: no entraba tu voz. Arregla el micrófono "
                                   + "y vuelve a empezar.", true)
                     notify("SFCast — GRABACIÓN DETENIDA", "No entraba tu voz. Revisa el micrófono.")
+                    self.lastAutoStopReason = "el guard de VOZ la detuvo (0 muestras de mic en 20s)"
                     self.onEmergencyStop?()
                     return
                 }
@@ -469,6 +667,18 @@ final class StudioRecorder {
         }
     }
 
+    /// EL ESCALÓN DEL GOVERNOR queda en el manifest (v3.6).
+    ///
+    /// El evento ya existía y solo pintaba un banner. Ahora el dato sobrevive a la
+    /// toma: es la única forma de que después se pueda distinguir un archivo de 30
+    /// fps REALES de uno de 15 fps rellenados a 30 — porque `achievedFps` mide el
+    /// relleno y por construcción no puede delatarse.
+    func cadenceChanged(_ effective: Int, target: Int) {
+        guard state == .recording else { return }
+        cadenceLog.append(.init(t: Date().timeIntervalSince(startedAt),
+                                effectiveFps: effective, targetFps: target))
+    }
+
     /// El switch de escena EN VIVO queda en el timeline (va al manifest).
     func sceneSwitched(_ scene: StudioScene) {
         guard state == .recording else { return }
@@ -484,6 +694,7 @@ final class StudioRecorder {
         health?.cancel(); health = nil
         envelopeTask?.cancel(); envelopeTask = nil
         voiceTask?.cancel(); voiceTask = nil
+        cadenceTask?.cancel(); cadenceTask = nil
         engine.onNeedNewScreenRawURL = nil
         let duration = Date().timeIntervalSince(startedAt)
         // Un tramo congelado que seguía abierto al detener se cierra AQUÍ: si no,
@@ -532,6 +743,20 @@ final class StudioRecorder {
         // tiene que quedar escrito junto a lo pedido (ver el aviso más abajo).
         let realFPS = (programStats.map { duration > 0.5 ? Double($0.videoFrames) / duration : 0 }) ?? 0
         achievedFPS = realFPS
+        // FPS DE CONTENIDO ÚNICO — el número que el ojo percibe.
+        //
+        // `realFPS` cuenta frames ESCRITOS. CadenceKeeper rellena los huecos
+        // repitiendo el último frame para que el archivo salga CFR (los NLE
+        // sufren con VFR, y eso se queda así a propósito). Pero entonces
+        // `realFPS` mide la salida del actuador, no el movimiento: el 15 ago
+        // dijo 29.61 sobre un archivo con 12.8 fps de contenido nuevo.
+        // `repeatedFrames` ya se contaba exacto y nadie lo restaba.
+        let repetidos = engine.cadence.repeatedFrames
+        let unicosFPS: Double? = programStats.flatMap { st -> Double? in
+            guard duration > 0.5 else { return nil }
+            return Double(max(0, st.videoFrames - repetidos)) / duration
+        }
+        let compStats = engine.compositorStats()
         let iso = ISO8601DateFormatter()
         let manifest = StudioManifest(
             id: id,
@@ -549,7 +774,11 @@ final class StudioRecorder {
             markers: markers,
             deadZones: deadZones,
             micDevice: micDeviceName,
-            micSamples: programStats?.micSamples ?? 0)
+            micSamples: programStats?.micSamples ?? 0,
+            repeatedFrames: repetidos,
+            uniqueContentFps: unicosFPS,
+            bufferFailures: compStats.bufferFailures,
+            cadenceTimeline: cadenceLog)
         manifest.write(to: dir)
         writeEnvelope(to: dir)
 
@@ -591,6 +820,32 @@ final class StudioRecorder {
                 let pct = real / objetivo
                 Log.info(String(format: "Estudio: fps REALES del archivo %.2f de %.0f pedidos (%.0f%%)",
                                 real, objetivo, pct * 100))
+                // …Y EL MOVIMIENTO, que es otra cosa (v3.6, 17 ago).
+                //
+                // La línea de arriba mide la CADENCIA del archivo. Esta mide el
+                // MOVIMIENTO. El 15 ago la primera dijo "29.61 (99%)" sobre una
+                // toma con 12.8 fps de contenido nuevo: 53.6% de los frames eran
+                // repetición. Streamlabs, la misma toma minutos después: 27.3.
+                // El aviso va sobre ESTE número, porque es el que se ve.
+                if let unicos = unicosFPS {
+                    let pctU = unicos / objetivo
+                    let repPct = real > 0 ? Double(repetidos) / (real * duration) * 100 : 0
+                    Log.info(String(format: "Estudio: MOVIMIENTO REAL %.2f fps de contenido único "
+                                    + "(%.0f%% de lo pedido · %.0f%% de los frames eran repetición)",
+                                    unicos, pctU * 100, repPct))
+                    if pctU < 0.9 {
+                        Log.error(String(format: "Estudio: EL MATERIAL SE MUEVE A %.0f%% — el archivo dice "
+                                         + "%.1f fps pero solo %.1f son contenido nuevo", pctU * 100,
+                                         real, unicos))
+                        onAlert?(String(format: "⚠️ El archivo dice %.0f fps pero se MUEVE a %.1f: %.0f%% de "
+                                        + "los frames son repetidos. Cierra y reabre SFCast antes de la "
+                                        + "toma buena (el compositor se degrada con las horas abierto) y "
+                                        + "libera RAM.", real, unicos, repPct), true)
+                        notify("SFCast — LA TOMA SE MUEVE A LA MITAD",
+                               String(format: "%.1f fps de movimiento real (el archivo dice %.0f). "
+                                      + "Reinicia SFCast antes de volver a grabar.", unicos, real))
+                    }
+                }
                 // EL AVISO SE DECIDE POR TRAMO, NO POR PROMEDIO (fix 9 ago).
                 // Ese día el promedio salió 92% —por encima del umbral del 90%,
                 // así que NO avisó— mientras seis minutos del archivo estaban a
@@ -620,8 +875,30 @@ final class StudioRecorder {
                     Log.error("Estudio: \(cs.bufferFailures) frames sin buffer (el pool no dio memoria) — "
                               + "señal de presión de RAM, no de CPU")
                 }
-                Log.info(String(format: "Estudio: compositor p50 %.1f ms (máx %.1f) de un presupuesto de %.1f ms",
-                                cs.composeMsP50, cs.composeMsMax, 1000.0 / objetivo))
+                // LOS DOS NÚMEROS DEL COMPOSITOR, etiquetados (v3.6, 17 ago).
+                //
+                // Parecían contradecirse: el cierre decía "máx 37.4 ms" mientras
+                // las muestras por minuto de la MISMA sesión decían "máx 232 ms".
+                // No se contradicen: son dos mediciones distintas con la misma
+                // etiqueta. `Compositor.composeMs` arranca su cronómetro DESPUÉS
+                // del `task.waitUntilCompleted()` del frame anterior, así que
+                // excluye la espera de GPU; el cronómetro del render loop la
+                // incluye. Esa diferencia ES el diagnóstico: cuando el total se va
+                // a 232 ms con compose en 12, la Mac no está calculando de más,
+                // está ESPERANDO a la GPU. Ahora se dicen las dos, con su nombre.
+                let bud = 1000.0 / objetivo
+                let loop = engine.profile.snapshot()
+                Log.info(String(format: "Estudio: compositor (solo render, sin esperar GPU) "
+                                + "p50 %.1f ms · máx %.1f — de un presupuesto de %.1f ms",
+                                cs.composeMsP50, cs.composeMsMax, bud))
+                Log.info(String(format: "Estudio: vuelta COMPLETA del loop (incluye la espera de GPU) "
+                                + "p50 %.1f ms · p95 %.1f · máx %.1f (n=%d)",
+                                loop.total.p50, loop.total.p95, loop.total.max, loop.n))
+                if loop.total.p95 > bud {
+                    Log.error(String(format: "Estudio: la COLA es el problema — p95 %.1f ms contra %.1f de "
+                                     + "presupuesto (p50 va bien en %.1f). Es espera de GPU, no cálculo.",
+                                     loop.total.p95, bud, loop.total.p50))
+                }
             }
         }
         state = .idle

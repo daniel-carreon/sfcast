@@ -4,6 +4,24 @@ El worker de SFCast publica **grabaciones nuevas** (incoming → transcribe → 
 Estos scripts hacen lo mismo para **video que ya existe en otra plataforma**, y fueron
 escritos para migrar el classroom de SaaS Factory desde Loom (51 videos, 6.95 GB).
 
+> ⚠️ **Los casts NATIVOS ya no se quedan fuera de R2** (10 ago 2026).
+> Esta migración fue de una sola vez y `publish_r2.py` decía explícito que *"los casts
+> nativos que ya vivían en el VPS NO se tocan"*. Pero el frontend de la comunidad arma el
+> embed contra R2 para **cualquier** id, así que un cast recién grabado se veía como la
+> página *"Is this your bucket?"* de Cloudflare dentro del post — le pasó a un anuncio de
+> ~570 miembros. Desde entonces existe [`../publish_cast_r2.py`](../publish_cast_r2.py),
+> que hace lo mismo para casts nativos y **lo llama el worker solo** al terminar de
+> publicar. Reutiliza el `embed_html()` de `publish_preview_embeds.py`: ese archivo sigue
+> siendo la fuente única del embed, y tocarlo cambia los dos caminos.
+>
+> Dos cosas medidas ese día, para que nadie las repita:
+> - **El sensor no puede preguntarle a `r2.dev`.** Cloudflare lo limita por tasa y devuelve
+>   rojo sobre objetos que sí existen (dio "61 faltantes" con 52 publicados, y "0/9" con los
+>   9 puestos). El censo se hace con `rclone lsf`, que es el autoritativo.
+> - **`card.gif` / `card.jpg`** son el video para el CORREO: ningún cliente de email ejecuta
+>   iframes, así que viaja como imagen con el botón de play horneado
+>   (`../assets/play-titanium.png`).
+
 ## El pipeline
 
 ```

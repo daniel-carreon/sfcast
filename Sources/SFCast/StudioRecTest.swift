@@ -112,6 +112,18 @@ enum StudioRecTest {
                 }
                 exit(0)
             }
+            // GENERALIZADO (17 ago): cualquier guard que detenga la toma A PROPÓSITO
+            // es un ÉXITO, no un fallo — el caso de arriba estaba resuelto a mano
+            // solo para `--mutemic`, y el guard de cadencia dispara sin banderas.
+            if let razon = recorder.lastAutoStopReason {
+                Log.info("RECTEST ✓ UN GUARD DETUVO LA GRABACIÓN SOLO — \(razon)")
+                if let d = recorder.lastDir {
+                    Log.info("RECTEST_OK \(d.lastPathComponent) (detenida por un guard)")
+                } else {
+                    Log.info("RECTEST_OK (detenida por un guard)")
+                }
+                exit(0)
+            }
             Log.error("RECTEST_FAIL la grabación no dejó carpeta")
             exit(1)
         }
@@ -161,7 +173,10 @@ enum StudioRecTest {
         // 2) LA CADENCIA. Con ahogo se espera que el governor haya BAJADO el
         //    objetivo: eso es éxito, no fallo. Sin ahogo se espera sostener.
         if choke > 0 {
-            if efectivo < engine.fps {
+            // "¿ACTUÓ en algún momento?", no "¿está bajo AHORA?". `efectivo` es
+            // instantáneo: si el governor bajó y se recuperó a 30 antes del stop,
+            // preguntar por el valor actual acusa al código de un bug inexistente.
+            if engine.governor.everSteppedDown {
                 Log.info("RECTEST ✓ governor actuó: \(engine.fps) → \(efectivo) fps de composición")
             } else {
                 fallos.append("GOVERNOR-NO-ACTUO(seguía en \(efectivo) con ahogo de \(choke)ms)")
@@ -183,7 +198,10 @@ enum StudioRecTest {
             // governor bajó la cadencia, el código hizo su trabajo y la culpa es
             // de la máquina (cierra apps / baja el lienzo); si NO bajó teniendo
             // que hacerlo, entonces sí es el governor el que está roto.
-            if efectivo < engine.fps {
+            // "¿ACTUÓ en algún momento?", no "¿está bajo AHORA?". `efectivo` es
+            // instantáneo: si el governor bajó y se recuperó a 30 antes del stop,
+            // preguntar por el valor actual acusa al código de un bug inexistente.
+            if engine.governor.everSteppedDown {
                 fallos.append(String(format:
                     "MAQUINA-SATURADA(%.1f de %d; el governor SÍ actuó: bajó a %d — "
                     + "no es el código, es que esta Mac no daba el ritmo ahora)",

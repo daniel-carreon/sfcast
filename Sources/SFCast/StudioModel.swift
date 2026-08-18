@@ -462,7 +462,29 @@ struct StudioManifest: Codable {
         var reason: String
     }
 
-    var schemaVersion = 1
+    /// ESCALÓN DE CADENCIA (v3.6, 17 ago) — cuándo el compositor dejó de ir al
+    /// ritmo pedido, y a cuánto se cayó.
+    ///
+    /// Es el dato que faltaba para que el archivo dejara de mentir. `CadenceKeeper`
+    /// EXISTE para forzar 30 fps constantes rellenando con el último frame, y
+    /// `achievedFps` MIDE esos 30 fps: por construcción, ese sensor no podía
+    /// reportar la falla — estaba cableado a la salida de su propio actuador.
+    ///
+    /// Medido el 15 ago en la sesión dw0w7tu0rea1: el compositor sostuvo 15/30
+    /// durante el 94% de la toma, el archivo salió con 12.8 fps de contenido
+    /// ÚNICO (53.6% de los frames eran duplicados) y el resumen dijo "29.61 de 30
+    /// pedidos (99%)". La misma toma con Streamlabs minutos después: 27.3 fps
+    /// únicos, 100% de los frames a 33.33 ms exactos.
+    ///
+    /// El archivo sigue saliendo CFR a propósito (los NLE sufren con VFR). Lo que
+    /// cambia es que el daño viaja al lado, aquí, para que la edición lo sepa.
+    struct CadencePoint: Codable {
+        var t: Double           // segundos desde el inicio de la grabación
+        var effectiveFps: Int   // a cuánto está componiendo DE VERDAD
+        var targetFps: Int      // a cuánto se le pidió
+    }
+
+    var schemaVersion = 2
     var id: String
     var kind = "studio"
     var startedAt: String
@@ -490,6 +512,26 @@ struct StudioManifest: Codable {
     /// Muestras de micrófono escritas. **Si es 0, la grabación NO TIENE VOZ** —
     /// y el editor tiene que saberlo antes de invertir una hora en cortarla.
     var micSamples: Int = 0
+
+    // MARK: - la verdad del MOVIMIENTO (v3.6, 17 ago)
+    //
+    // `achievedFps` cuenta frames ESCRITOS, incluidos los que CadenceKeeper
+    // rellenó con contenido repetido. Es un número honesto sobre la cadencia del
+    // archivo y una mentira sobre el movimiento. Los tres campos de abajo dicen
+    // la otra mitad, y son los que el puente a la edición debe leer.
+
+    /// Frames escritos que eran REPETICIÓN del anterior (relleno de CadenceKeeper).
+    var repeatedFrames: Int = 0
+    /// **EL NÚMERO QUE IMPORTA:** frames de contenido nuevo por segundo. Es lo que
+    /// el ojo percibe como fluidez. Si `achievedFps` dice 29.61 y esto dice 12.8,
+    /// el material se mueve a la mitad aunque el contenedor diga 30.
+    var uniqueContentFps: Double?
+    /// Frames que nunca llegaron a existir porque el pool no dio memoria. Señal de
+    /// presión de RAM, no de CPU.
+    var bufferFailures: Int = 0
+    /// Cada escalón del governor durante la toma. Un tramo con
+    /// `effectiveFps < targetFps * 0.7` sostenido es material a medio movimiento.
+    var cadenceTimeline: [CadencePoint] = []
 
     func write(to dir: URL) {
         let enc = JSONEncoder()

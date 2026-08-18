@@ -14,12 +14,28 @@
 	<string>SFCast</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>so.saasfactory.sfcast</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>sfcast</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleShortVersionString</key>
 	<string>1.5.0</string>
 	<key>CFBundleVersion</key>
 	<string>6</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>

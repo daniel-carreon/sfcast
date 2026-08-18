@@ -29,6 +29,12 @@ final class StudioEngine: NSObject {
     // MARK: - estado observable (la UI lee esto)
 
     private(set) var isRunning = false
+    /// Cuándo arrancó el motor. Sirve para medir la edad de una fuente que NUNCA
+    /// entregó un frame: sin esto, el watchdog no podía distinguir "acaba de
+    /// arrancar" de "lleva media hora muerta desde el segundo cero".
+    private var startedRunningAt: Double = CACurrentMediaTime()
+    /// Los observadores de la sesión de cámara se cuelgan UNA vez.
+    private var cameraObserversWired = false
     private(set) var screenAvailable = false     // permiso + stream vivo
     private(set) var cameraAvailable = false
     /// Fuentes activas en la escena que NO están entregando frames (comparador).
@@ -203,6 +209,7 @@ final class StudioEngine: NSObject {
         if let o = canvasOverride { canvasSize = o }
         systemAudioWanted = config.systemAudioEnabled
         isRunning = true
+        startedRunningAt = CACurrentMediaTime()
         sceneBox.set(config.scenes.first(where: { $0.id == config.activeSceneID }) ?? config.scenes.first)
 
         // Cámara y mic por el BROKER (serializado — invariante TCC).
@@ -316,7 +323,7 @@ final class StudioEngine: NSObject {
     /// Cambio de cámara/micrófono EN CALIENTE (doble clic en Fuentes/Mixer, o
     /// Ajustes → Aplicar): reconcilia los inputs de la sesión con lo elegido en
     /// AppSettings, sin parar la sesión y jamás en main.
-    func applyDeviceSelection(micEnabled: Bool) {
+    func applyDeviceSelection(micEnabled: Bool, forceCamera: Bool = false) {
         guard cameraAvailable else { return }   // sin permiso de cámara no hay sesión viva
         let s = AppSettings.load()
         let camID = s.cameraDeviceID
@@ -324,15 +331,64 @@ final class StudioEngine: NSObject {
         let micOK = micEnabled && Permissions.micGranted
         let session = cameraSession
         sessionQueue.async {
+            let antes = session.inputs.compactMap { ($0 as? AVCaptureDeviceInput)?.device.uniqueID }
             session.beginConfiguration()
-            Self.reconcileInputs(session, camID: camID, micID: micID, micEnabled: micOK)
+            Self.reconcileInputs(session, camID: camID, micID: micID, micEnabled: micOK,
+                                 forceCamera: forceCamera)
             session.commitConfiguration()
             if !session.isRunning { session.startRunning() }
             let devs = session.inputs.compactMap { ($0 as? AVCaptureDeviceInput)?.device }
+            // Se dice si de verdad CAMBIÓ algo. La versión anterior imprimía esta
+            // línea igual cuando no había tocado nada, así que un no-op se leía
+            // como un reenganche exitoso — 32 horas seguidas, en un caso.
+            let despues = devs.map { $0.uniqueID }
+            let cambio = forceCamera || antes != despues
             Log.info("Estudio: dispositivos en caliente → "
                      + devs.map { "\($0.localizedName) [\($0.hasMediaType(.audio) ? "audio" : "video")]" }
-                           .joined(separator: " + "))
+                           .joined(separator: " + ")
+                     + (cambio ? (forceCamera ? " (RE-PEGADA a la fuerza)" : "") : " (sin cambios)"))
         }
+    }
+
+    /// RE-PEGAR LA CÁMARA A LA FUERZA — lo que Daniel hacía a mano.
+    ///
+    /// Quita el `AVCaptureDeviceInput` de video y lo vuelve a crear, aunque sea el
+    /// MISMO dispositivo. Es la única cosa que revive una ZV-E10 que sigue
+    /// enumerada pero dejó de entregar frames; `applyDeviceSelection` normal no
+    /// puede porque se salta el trabajo cuando el ID coincide.
+    ///
+    /// ⚠️ NO se hace mientras se graba, a propósito: reconfigurar los inputs de una
+    /// sesión viva es justo lo que produjo el "estruendo" de v2.3, y si la cámara se
+    /// congeló a mitad de toma esa toma ya está perdida — vale más avisarle a Daniel
+    /// (alarma + notificación + el punto de estado en ROJO) y que él decida, que
+    /// meterle mano al audio de una grabación en curso.
+    func rebindCamera(reason: String) {
+        guard cameraAvailable else { return }
+        guard !StudioController.shared.recorder.isRecording else {
+            Log.error("Estudio: NO re-pego la cámara con una toma en curso (\(reason)) — "
+                      + "se avisa y Daniel decide")
+            return
+        }
+        // LA GUARDA QUE HACE SEGURO EL FORZADO.
+        //
+        // `Devices.camera(id:)` cae a `AVCaptureDevice.default(for: .video)` cuando
+        // la elegida no está. Con `forceCamera: true` eso sería peor que no hacer
+        // nada: arrancaríamos el input bueno para pegar la "OBS Virtual Camera",
+        // que entrega un cuadro fijo — y entonces el watchdog la declararía VIVA y
+        // se apagaría solo. Un sensor que se auto-satisface con una imagen falsa es
+        // peor que no tener sensor (el gotcha que v2.9 ya había documentado).
+        //
+        // Por eso la presencia se verifica AQUÍ, en el único sitio que fuerza, y no
+        // en cada llamador: el watchdog, el runtime error, la interrupción y el
+        // despertar del Mac quedan todos cubiertos por esta misma línea.
+        let elegida = AppSettings.load().cameraDeviceID
+        guard let id = elegida, AVCaptureDevice(uniqueID: id) != nil else {
+            Log.error("Estudio: NO re-pego (\(reason)) — la cámara elegida no está enumerada. "
+                      + "Forzar aquí pegaría la cámara equivocada (¿OBS Virtual?).")
+            return
+        }
+        Log.info("Estudio: RE-PEGANDO la cámara — \(reason)")
+        applyDeviceSelection(micEnabled: AppSettings.load().micEnabled, forceCamera: true)
     }
 
     // MARK: - pantalla (SCStream con frames + SCRecordingOutput opcional)
@@ -535,6 +591,59 @@ final class StudioEngine: NSObject {
         // Optimista: si al final no entrega frames, el comparador starved lo
         // delata en la UI (jamás en silencio).
         cameraAvailable = true
+        observeCameraSession()
+    }
+
+    /// LOS AVISOS QUE macOS YA MANDABA Y NADIE ESCUCHABA.
+    ///
+    /// AVFoundation publica `AVCaptureSessionRuntimeError` cuando la sesión se
+    /// rompe (USB reseteado, dispositivo perdido) y `WasInterrupted` /
+    /// `InterruptionEnded` cuando otra app se lleva la cámara o el hardware se
+    /// suspende. Son EXACTAMENTE las señales de este bug, publicadas por el
+    /// sistema, gratis — y esta app no observaba ninguna. Tampoco observaba el
+    /// despertar del Mac, que es el disparador real: el log muestra la cámara
+    /// muriendo de noche (20:13, 20:52, 21:09, 21:17, 21:18) y siguiendo muerta
+    /// 9-10 h hasta la mañana siguiente.
+    ///
+    /// Con esto el reenganche deja de depender de un sondeo de 30 s y pasa a ser
+    /// una reacción al evento. El sondeo se queda como red por si el evento no
+    /// llega (una cámara que se apaga sola no siempre genera notificación).
+    private func observeCameraSession() {
+        guard !cameraObserversWired else { return }
+        cameraObserversWired = true
+        let nc = NotificationCenter.default
+        let session = cameraSession
+
+        nc.addObserver(forName: .AVCaptureSessionRuntimeError, object: session,
+                       queue: .main) { [weak self] note in
+            let err = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
+            Log.error("Estudio: AVCaptureSession RUNTIME ERROR — \(err?.localizedDescription ?? "?")")
+            self?.rebindCamera(reason: "runtime error de la sesión")
+        }
+        // OJO: `AVCaptureSessionInterruptionReasonKey` es solo de iOS (no compila en
+        // macOS), así que aquí la razón no viaja. Basta con saber QUE pasó.
+        nc.addObserver(forName: .AVCaptureSessionWasInterrupted, object: session,
+                       queue: .main) { _ in
+            Log.error("Estudio: la sesión de cámara fue INTERRUMPIDA — ¿otra app tomó la cámara, "
+                      + "o el hardware se suspendió?")
+        }
+        nc.addObserver(forName: .AVCaptureSessionInterruptionEnded, object: session,
+                       queue: .main) { [weak self] _ in
+            Log.info("Estudio: terminó la interrupción de la cámara — re-pegando")
+            self?.rebindCamera(reason: "terminó la interrupción")
+        }
+        // El Mac despertando: el disparador del "vuelvo al día siguiente y está
+        // congelada". Se re-pega con un respiro para que el USB termine de subir.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Log.info("Estudio: el Mac despertó — re-pegando la cámara en 3s")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                self?.rebindCamera(reason: "el Mac despertó")
+            }
+        }
+        Log.info("Estudio: observadores de la sesión de cámara enganchados "
+                 + "(runtime error · interrupción · despertar del Mac)")
     }
 
     /// Reconcilia los INPUTS de la sesión con lo pedido: deja EXACTAMENTE la
@@ -543,12 +652,33 @@ final class StudioEngine: NSObject {
     /// aplicaba de verdad hasta relanzar la app. Corre SIEMPRE en sessionQueue.
     nonisolated private static func reconcileInputs(_ session: AVCaptureSession,
                                                     camID: String?, micID: String?,
-                                                    micEnabled: Bool) {
+                                                    micEnabled: Bool,
+                                                    forceCamera: Bool = false) {
         func inputs() -> [AVCaptureDeviceInput] {
             session.inputs.compactMap { $0 as? AVCaptureDeviceInput }
         }
         let wantCam = Devices.camera(id: camID)
-        for i in inputs() where i.device.hasMediaType(.video) && i.device.uniqueID != wantCam?.uniqueID {
+        // `forceCamera` existe por un no-op que costó semanas de cámara congelada.
+        //
+        // Sin él, la condición de abajo solo quita el input cuando el ID pedido es
+        // DISTINTO del pegado. Y el reintento del watchdog pide SIEMPRE la misma
+        // cámara — así que cuando la ZV-E10 sigue enumerada pero dejó de entregar
+        // frames (se apagó sola, o el USB se suspendió de noche), el reconcile no
+        // quitaba nada, el `addInput` se saltaba porque ya había un input de video,
+        // `session.isRunning` seguía diciendo true, y `applyDeviceSelection`
+        // terminaba imprimiendo "dispositivos en caliente → ZV-E10 [video]" sin
+        // haber tocado NADA. El remedio era un no-op exactamente en el caso para el
+        // que se escribió.
+        //
+        // Medido en el log: se congela de noche (20:13, 20:52, 21:09, 21:17, 21:18)
+        // y sigue muerta 9-10 h hasta la mañana; una vez reportó 115,087.9 s (32 h)
+        // sin imagen nueva. El reintento corría cada 30 s todo ese tiempo, en vano.
+        //
+        // Por eso Daniel lo arreglaba a mano cambiando de cámara y volviendo: ESO
+        // sí rompe la comparación de identidad y fuerza un `AVCaptureDeviceInput`
+        // nuevo. `forceCamera` hace justo eso, sin que él tenga que tocar nada.
+        for i in inputs() where i.device.hasMediaType(.video)
+            && (forceCamera || i.device.uniqueID != wantCam?.uniqueID) {
             session.removeInput(i)
         }
         if let cam = wantCam,
@@ -754,7 +884,16 @@ final class StudioEngine: NSObject {
     /// impecable de una foto fija.
     private func checkCameraHealth() {
         guard isRunning, cameraAvailable else { return }
-        guard let age = frames.age(.camera) else { return }
+        // UNA CÁMARA QUE NUNCA ENTREGÓ UN FRAME TAMBIÉN ESTÁ MUERTA.
+        //
+        // Antes esto era `guard let age = ... else { return }`: si `stamps[.camera]`
+        // nunca se llenó —porque la cámara no dio ni un frame desde que arrancó la
+        // sesión— el watchdog se iba por la puerta de atrás y no volvía a mirar
+        // NUNCA. Cero alarma, cero reintento, cero registro. Es el caso exacto de la
+        // sesión hpa3ky02t5ss: 3:52 de una foto con `cam:0fps` desde el segundo 0.
+        //
+        // Un sensor que solo sabe evaluar lo que ya funcionó una vez no es un sensor.
+        let age = frames.age(.camera) ?? (CACurrentMediaTime() - startedRunningAt)
         let dead = age > Self.deadAfter
         if dead != cameraFrozen {
             cameraFrozen = dead
@@ -793,8 +932,12 @@ final class StudioEngine: NSObject {
                 let elegida = AppSettings.load().cameraDeviceID
                 let presente = elegida.flatMap { AVCaptureDevice(uniqueID: $0) } != nil
                 if presente {
-                    Log.info("Estudio: la cámara elegida volvió a aparecer — reenganchando")
-                    applyDeviceSelection(micEnabled: true)
+                    // FUERZA. Antes se llamaba `applyDeviceSelection` normal, que
+                    // se salta todo cuando el ID coincide — o sea que este reintento
+                    // era un no-op cada 30 s, para siempre. Ahora re-pega de verdad.
+                    Log.info("Estudio: la cámara elegida sigue enumerada pero no entrega "
+                             + "imagen — RE-PEGÁNDOLA")
+                    rebindCamera(reason: "watchdog: \(Int(age))s sin imagen")
                 }
             }
         }
@@ -1673,17 +1816,57 @@ final class RenderGovernor: @unchecked Sendable {
         current = target; windowStart = now; framesInWindow = 0
         badWindows = 0; goodWindows = 0; steppedDownAt = nil
         upRequirement = 5; lastUpAt = nil
+        floorFailingSince = nil; floorAchieved = 0; everSteppedDown = false
         lock.unlock()
+    }
+
+    /// Cuánto lleva fallando el piso, en segundos. 0 = no está fallando.
+    func floorFailingFor(now: Double) -> Double {
+        lock.lock(); defer { lock.unlock() }
+        guard let desde = floorFailingSince else { return 0 }
+        return now - desde
     }
 
     var effective: Int { lock.lock(); defer { lock.unlock() }; return current }
 
-    /// Escalones por debajo del objetivo. Se paran en 12: por debajo el
-    /// resultado ya no es "video con menos frames", es otra cosa.
+    /// PISO DURO DE CADENCIA — orden de Daniel, 17 ago 2026:
+    ///
+    ///   "Queda prohibido bajar los frames por segundo. Prefiero que antes de eso
+    ///    se pause y me diga algo, pero mantener estables los frames. 30 frames,
+    ///    mínimo 24, pero no menos. Prefiero que se pause si es así y yo arreglar
+    ///    otros detalles."
+    ///
+    /// Cambia la filosofía del governor: antes degradaba con gracia hasta 12 fps
+    /// (30→24→19→15) y el archivo salía a 30 rellenando con frames repetidos, lo
+    /// cual se ve como tirones. La toma del 15 ago se quedó en 15/30 siete minutos
+    /// y salió con 12.8 fps de movimiento real. Eso ya no se permite.
+    ///
+    /// Ahora hay UN escalón de gracia y punto. Si no aguanta el piso, no se
+    /// degrada más: se DETIENE la toma y se le dice (ver `cadenceGuard` en
+    /// StudioRecorder — mismo patrón que el guard de voz, que detiene a los 20 s
+    /// sin micrófono en vez de grabar media hora en silencio).
+    static let hardFloorFPS = 24
     private func ladder(_ target: Int) -> [Int] {
-        [target, Int(Double(target) * 0.8), Int(Double(target) * 0.66),
-         Int(Double(target) * 0.5)].map { max(12, $0) }
+        // Nunca por debajo de 24 absolutos ni del 80% del objetivo, y nunca por
+        // encima del objetivo (si pide 20, el piso ES 20: no hay escalón).
+        let piso = max(min(target, Self.hardFloorFPS), Int(Double(target) * 0.8))
+        return piso >= target ? [target] : [target, piso]
     }
+
+    /// Desde cuándo el governor está EN EL PISO y aun así no alcanza. `nil` = va
+    /// bien o todavía tiene escalón de gracia. Es la señal que el guard de
+    /// cadencia convierte en "detén la toma y dile".
+    private(set) var floorFailingSince: Double?
+    /// A cuántos fps se está quedando corto cuando falla el piso (para el mensaje).
+    private(set) var floorAchieved: Double = 0
+    /// ¿El governor bajó UN escalón en algún momento de esta toma?
+    ///
+    /// No es lo mismo que `effective < target`, que es un valor INSTANTÁNEO. El QA
+    /// preguntaba lo segundo y por eso reprobaba con "el governor NUNCA bajó — eso
+    /// sí es un bug" en tomas donde sí había bajado y ya se había recuperado a 30
+    /// antes del stop. Un gate que confunde "se recuperó" con "nunca actuó" acusa
+    /// al código de un bug que no existe.
+    private(set) var everSteppedDown = false
 
     /// Un frame compuesto. Devuelve el nuevo fps si hay que re-agendar.
     func frameComposed(now: Double, target: Int) -> Int? {
@@ -1696,6 +1879,23 @@ final class RenderGovernor: @unchecked Sendable {
         windowStart = now
         let steps = ladder(target)
         let idx = steps.firstIndex(of: current) ?? 0
+
+        // EN EL PISO la vara es más estricta, y se evalúa aparte.
+        //
+        // El 0.85 de abajo existe para decidir si vale la pena BAJAR un escalón, y
+        // con el piso en 24 eso daría por bueno cualquier cosa arriba de 20.4 fps.
+        // La orden es "mínimo 24, pero no menos", así que en el piso la vara es
+        // 0.93 (≈22.3 fps): margen para el ruido de medir en ventanas de 2 s, no
+        // para degradarse de a poquito por debajo de lo pactado.
+        let enElPiso = idx + 1 >= steps.count
+        if enElPiso {
+            if achieved < Double(current) * 0.93 {
+                if floorFailingSince == nil { floorFailingSince = now }
+                floorAchieved = achieved
+            } else {
+                floorFailingSince = nil
+            }
+        }
 
         // ¿La Mac está entregando lo que le pedimos?
         if achieved < Double(current) * 0.85 {
@@ -1710,6 +1910,7 @@ final class RenderGovernor: @unchecked Sendable {
                 current = steps[idx + 1]
                 badWindows = 0
                 steppedDownAt = now
+                everSteppedDown = true
                 return current
             }
         } else if achieved >= Double(current) * 0.97 {

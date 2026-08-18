@@ -200,6 +200,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.paneltest = paneltest
     }
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // URL scheme sfcast:// — la puerta programática (Modo Rodaje / F4 del
+        // Logi). Se registra en WILL: si LaunchServices arranca la app por la
+        // URL, el evento llega antes de DidFinish.
+        NSAppleEventManager.shared().setEventHandler(
+            self, andSelector: #selector(handleURLEvent(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL))
+    }
+
+    @objc private func handleURLEvent(_ event: NSAppleEventDescriptor,
+                                      withReplyEvent reply: NSAppleEventDescriptor) {
+        guard let s = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
+              let url = URL(string: s), url.scheme == "sfcast" else { return }
+        switch url.host {
+        case "rodaje", "studio":
+            // El Estudio al frente y a pantalla completa, con EL SET a la
+            // vista: el modo rodaje completo en una sola pantalla.
+            Task { @MainActor in
+                StudioController.shared.open()
+                StudioController.shared.showSetPanel = true
+                StudioController.shared.enterFullScreen()
+            }
+        default:
+            Log.info("URL sfcast:// sin verbo conocido: \(s)")
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusBar.setup()
         Log.info("SFCast arriba (demo=\(demo.map(String.init) ?? "no") selftest=\(selftest.map(String.init) ?? "no"))")

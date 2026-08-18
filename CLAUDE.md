@@ -39,6 +39,27 @@ rm -rf /Applications/SFCast.app && cp -R dist/SFCast.app /Applications/   # inst
 ./infra/deploy.sh               # sube el worker al VPS y reinicia el servicio
 ```
 
+## URL scheme `sfcast://` (18 ago 2026)
+
+`sfcast://rodaje` (alias `//studio`) abre el Estudio a **pantalla completa en el
+monitor IZQUIERDO** (el de menor `minX` en el arreglo — pedido de Daniel: el
+rodaje va en el izquierdo) **con el drawer "El Set" abierto**. Handler en
+`main.swift` (`applicationWillFinishLaunching` + kAEGetURL, registrado en WILL
+para que llegue aunque LaunchServices arranque la app por la URL); fullscreen en
+`StudioController.enterFullScreen()`. Consumidor: el MODO RODAJE (F4 del Logi) —
+`business-os/entorno-fisico/modo-rodaje.sh`.
+
+**El drawer "El Set"** (`SetPanelDrawer`, 18 ago): el panel del estudio físico
+(`entorno-fisico/panel_server.py`, :8088) embebido como WKWebView a la derecha
+del Estudio — luces/Pixoo/cámara sin salir de pantalla completa, también
+grabando. Toggle: botón 💡 en la barra. El panel web sigue siendo la ÚNICA
+implementación (esto es espejo, no copia); requiere `NSAllowsLocalNetworking`
+en Info.plist y que el servicio :8088 esté arriba (modo-rodaje.sh lo garantiza).
+Trae **resizer** (`SetResizeHandle`, 300-560px) y MEMORIA: ancho y
+abierto/cerrado persisten en UserDefaults (`studio.setPanelWidth` /
+`studio.setPanelOpen`); el acordeón interno del panel persiste en su propio
+localStorage. `sfcast://rodaje` fuerza el drawer abierto.
+
 ## Modo Estudio (v2.5, 25 jul 2026)
 
 Estudio multi-escena estilo OBS/piel Screen Studio, ADITIVO sobre el Loom:

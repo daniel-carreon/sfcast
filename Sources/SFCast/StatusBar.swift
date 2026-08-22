@@ -201,12 +201,34 @@ final class StatusBar: NSObject, NSMenuDelegate {
     func armarPuertaDeAgentes() {
         let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".sfcast")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let señal = dir.appendingPathComponent("abrir-estudio")
-        try? FileManager.default.removeItem(at: señal)
+
+        /// Cada señal es un archivo que aparece y se consume. Se limpian al
+        /// arrancar: una señal vieja en disco dispararia sola al abrir la app.
+        let señales: [String: () -> Void] = [
+            "abrir-estudio": { StudioController.shared.open() },
+            // El panel de la camara, hablando. Es la puerta AI-first del
+            // control de la ZV-E10 desde dentro del Estudio.
+            "abrir-camara": {
+                StudioController.shared.open()
+                StudioController.shared.showCameraPanel = true
+            },
+            "cerrar-camara": { StudioController.shared.showCameraPanel = false },
+            // EL SET (luces, Pixoo) por la misma puerta.
+            "abrir-set": {
+                StudioController.shared.open()
+                StudioController.shared.showSetPanel = true
+            },
+        ]
+        for nombre in señales.keys {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(nombre))
+        }
         Self.vigilante = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            guard FileManager.default.fileExists(atPath: señal.path) else { return }
-            try? FileManager.default.removeItem(at: señal)
-            DispatchQueue.main.async { StudioController.shared.open() }
+            for (nombre, accion) in señales {
+                let señal = dir.appendingPathComponent(nombre)
+                guard FileManager.default.fileExists(atPath: señal.path) else { continue }
+                try? FileManager.default.removeItem(at: señal)
+                DispatchQueue.main.async(execute: accion)
+            }
         }
     }
     @objc private func openLauncher() {

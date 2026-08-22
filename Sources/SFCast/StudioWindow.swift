@@ -62,6 +62,18 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     }() {
         didSet { UserDefaults.standard.set(Double(setPanelWidth), forKey: "studio.setPanelWidth") }
     }
+    /// EL CAJÓN DE LA CÁMARA (22 ago 2026): sfcam deja de ser una app aparte y
+    /// pasa a ser una feature del set. Vive AL LADO de la imagen a propósito —
+    /// cambiar la exposición sin ver el resultado es adivinar.
+    @Published var showCameraPanel = UserDefaults.standard.bool(forKey: "studio.cameraPanelOpen") {
+        didSet { UserDefaults.standard.set(showCameraPanel, forKey: "studio.cameraPanelOpen") }
+    }
+    @Published var cameraPanelWidth: CGFloat = {
+        let w = UserDefaults.standard.double(forKey: "studio.cameraPanelWidth")
+        return (280...520).contains(w) ? CGFloat(w) : 320
+    }() {
+        didSet { UserDefaults.standard.set(Double(cameraPanelWidth), forKey: "studio.cameraPanelWidth") }
+    }
     @Published var isRecording = false
 
     // Vúmetro SIN @Published — v2.8. Publicar los niveles a 15 Hz invalidaba
@@ -181,6 +193,11 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                     self.mirror.showFrame(self.engine.frames.get(.camera))
                 }
             }
+            // EL OJO: mide la imagen real 1 vez por segundo y la publica en
+            // ~/.sfcam/ojo.json. Es lo que cierra el lazo del ISO (`sfcam auto`)
+            // sin depender de que SFCam.app esté abierta. Lee el último frame ya
+            // entregado — NO se mete en el delegate de captura.
+            OjoDelEstudio.arrancar { [weak self] in self?.engine.frames.get(.camera) }
             engine.onAlert = { [weak self] msg, critical in
                 self?.raiseAlert(msg, critical: critical)
             }
@@ -368,6 +385,7 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         // que el Loom está a punto de quedarse (una sola dueña a la vez).
         mirror.hide()
         window?.orderOut(nil)
+        OjoDelEstudio.detener()
         Task { await engine.stop() }
         stopMeters()
     }
@@ -1054,7 +1072,6 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
             backing: .buffered, defer: false)
         w.title = "SFCast Estudio"
         w.titlebarAppearsTransparent = true
-        w.minSize = NSSize(width: 940, height: 620)
         w.center()
         w.isReleasedWhenClosed = false
         w.backgroundColor = NSColor(calibratedRed: 0.043, green: 0.043, blue: 0.055, alpha: 1)
@@ -1064,9 +1081,24 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         w.delegate = self
         let root = StudioRootView().environmentObject(self)
         let hosting = NSHostingView(rootView: root)
-        w.contentView = hosting
+        // El zoom se mete ENTRE la ventana y SwiftUI: así ⌘+/⌘− reescalan el
+        // Estudio entero (paneles incluidos) con el texto nítido, en vez de
+        // estirar una imagen. Ver Zoom.swift.
+        let zoomHost = ZoomHost.envolver(hosting)
+        // El mínimo de la ventana va en PUNTOS FÍSICOS: con el zoom al 1.8 los
+        // 940 lógicos son 1692 reales, y dejar el mínimo quieto permitiría
+        // encoger la ventana hasta aplastar la maqueta.
+        zoomHost.alCambiar = { [weak self, weak w] z in
+            w?.minSize = NSSize(width: 940 * z, height: 620 * z)
+            self?.previewView?.afinarNitidez()
+        }
+        w.minSize = NSSize(width: 940 * ZoomHost.valor, height: 620 * ZoomHost.valor)
+        w.contentView = zoomHost
         window = w
+        autorretrato = Autorretrato(w)
     }
+
+    private var autorretrato: Autorretrato?
 
     func registerPreview(_ v: StudioPreviewNSView) { previewView = v }
 
@@ -1595,6 +1627,24 @@ final class StudioPreviewNSView: NSView {
 
     func display(surface: IOSurface) {
         layer?.contents = surface
+        afinarNitidez()
+    }
+
+    /// El zoom quita puntos lógicos sin quitar píxeles físicos. Una capa que se
+    /// rasteriza sola (esta, y las del contorno del item) tiene que enterarse o
+    /// dibuja para el tamaño equivocado y sale suave — justo en la superficie
+    /// donde se juzga el encuadre.
+    func afinarNitidez() {
+        let e = (window?.backingScaleFactor ?? 2) * ZoomHost.valor
+        guard layer?.contentsScale != e else { return }
+        layer?.contentsScale = e
+        borderLayer.contentsScale = e
+        handlesLayer.contentsScale = e
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        afinarNitidez()
     }
 
     // El rect (en coords de la vista) donde vive la imagen aspect-fit del canvas.
@@ -2040,9 +2090,13 @@ struct StudioRootView: View {
                     ScenesPanel().frame(maxWidth: .infinity)
                     SourcesPanel().frame(maxWidth: .infinity)
                     MixerPanel().frame(maxWidth: .infinity)
-                    // Control de la camara SIN salir del Estudio: durante una toma,
-                    // cambiar de ventana para corregir el ISO no es una opcion.
-                    CameraPanel().frame(maxWidth: .infinity)
+                    // La columna de cámara SOLO cuando el cajón está cerrado.
+                    // Con el cajón abierto era lo mismo dos veces en pantalla
+                    // (Daniel lo cazó al verlo). Cerrando el cajón no se pierde:
+                    // la columna vuelve con lo esencial.
+                    if !c.showCameraPanel {
+                        CameraPanel().frame(maxWidth: .infinity)
+                    }
                     OutputsPanel().frame(maxWidth: .infinity)
                 }
                 .frame(height: 235)
@@ -2051,6 +2105,13 @@ struct StudioRootView: View {
             // luces/Pixoo sin salir del Estudio, incluso grabando. En su ancho
             // el panel cae solo en su layout de teléfono (una columna), y el
             // resizer recuerda la última posición.
+            if c.showCameraPanel {
+                CameraResizeHandle()
+                CameraDrawer()
+                    .frame(width: c.cameraPanelWidth)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(StudioSkin.panelBorder))
+            }
             if c.showSetPanel {
                 SetResizeHandle()
                 SetPanelDrawer()
@@ -2142,6 +2203,17 @@ struct StudioRootView: View {
                     .lineLimit(1)
             }
             Spacer()
+            Button {
+                c.showCameraPanel.toggle()
+            } label: {
+                Image(systemName: "camera.aperture")
+                    .foregroundStyle(c.showCameraPanel ? StudioSkin.mostaza : StudioSkin.dim)
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(StudioSkin.panel)
+                    .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Controles de la cámara: ISO, obturación, apertura, balance, enfoque y formato — sin salir del Estudio")
             Button {
                 c.showSetPanel.toggle()
             } label: {

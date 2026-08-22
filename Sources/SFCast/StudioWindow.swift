@@ -2035,11 +2035,14 @@ struct StudioRootView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(StudioSkin.panelBorder))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                // SIMETRÍA estilo Streamlabs: 4 columnas de ancho IGUAL, sin huecos.
+                // SIMETRÍA estilo Streamlabs: 5 columnas de ancho IGUAL, sin huecos.
                 HStack(spacing: 10) {
                     ScenesPanel().frame(maxWidth: .infinity)
                     SourcesPanel().frame(maxWidth: .infinity)
                     MixerPanel().frame(maxWidth: .infinity)
+                    // Control de la camara SIN salir del Estudio: durante una toma,
+                    // cambiar de ventana para corregir el ISO no es una opcion.
+                    CameraPanel().frame(maxWidth: .infinity)
                     OutputsPanel().frame(maxWidth: .infinity)
                 }
                 .frame(height: 235)

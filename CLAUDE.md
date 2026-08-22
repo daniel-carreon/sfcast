@@ -8,6 +8,44 @@
 **Repo independiente.** No es submódulo de `business-os` y no debe volver a serlo.
 Hermano de `sflow-next`, `sfpoint`, `sfterm` en `~/Developer/software/`.
 
+## Panel Cámara (22 ago 2026)
+
+Quinto panel del Estudio, junto a Escenas / Fuentes / Mixer / Salidas: **ISO,
+obturación, apertura y balance de blancos de la ZV-E10 sin salir de aquí**.
+Durante una toma, cambiar de ventana para corregir el ISO no es una opción.
+
+Habla con la cámara **llamando al CLI `sfcam`** (repo `sfcam`, control por PTP
+sobre libgphoto2). El motor NO se duplica aquí: tiene su propia batería de 25
+pruebas contra la cámara real, y dos copias del mismo protocolo se separan en
+cuanto una se toca.
+
+⚠️ **CADA LECTURA LE APAGA LA IMAGEN A LA CÁMARA 1-4 SEGUNDOS.** Está medido: la
+ZV-E10 corta su live view mientras atiende el USB. Por eso el panel **no
+consulta solo** — lee al abrirse, al escribir, y cuando se pulsa ↻. Si aparece
+la tentación de poner un temporizador ahí, ya se probó: es exactamente lo que
+hacía parpadear la grabación.
+
+## Puerta para agentes
+
+```bash
+touch ~/.sfcast/abrir-estudio      # abre el Modo Estudio
+```
+
+El Estudio solo se abría desde el menú de la barra, que no se puede pulsar por
+software sin permisos de Accesibilidad. Con esto Levy lo abre cuando Daniel se
+lo pide hablando, y las pruebas automáticas pueden llegar al Estudio.
+
+## Compilar sin Xcode
+
+`swift build` se cae en máquinas sin Xcode (`unable to lookup item
+'PlatformPath'`). Hay salida: `scripts/build-sin-xcode.sh` compila
+KeyboardShortcuts aparte como librería estática, le escribe a mano el puente de
+`Bundle.module` que normalmente genera SPM, y enlaza todo con `swiftc`.
+
+⚠️ Se firma con **"SFlow Dev"**, la misma identidad de la app instalada.
+Cambiar de identidad tira los permisos de Pantalla, Cámara y Micrófono.
+
+
 ## Dónde está cada cosa
 
 | Necesitas | Lee |

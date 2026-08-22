@@ -159,7 +159,7 @@ struct CameraPanel: View {
                     ForEach(m.props, id: \.clave) { p in fila(p) }
 
                     if m.props.isEmpty && !m.ocupado {
-                        Text(m.mensaje ?? "Pulsa ↻ para leer la cámara")
+                        Text(m.mensaje ?? "Pulsa ↻ para leer la cámara.\nLeerla le apaga la imagen un segundo, así que no se hace sola.")
                             .font(.system(size: 11)).foregroundStyle(StudioSkin.dim)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -192,7 +192,9 @@ struct CameraPanel: View {
                 }
             }
         }
-        .onAppear { if m.props.isEmpty { m.leer() } }
+        // NO se lee al abrir. Cada lectura le apaga la imagen a la camara 1-4
+        // segundos, y este panel vive en la ventana donde se GRABA: abrir el
+        // Estudio no puede costar un parpadeo. Se lee cuando se pulsa ↻.
     }
 
     private var antiguedad: String {

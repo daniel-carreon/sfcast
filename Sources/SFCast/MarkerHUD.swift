@@ -22,7 +22,7 @@ final class MarkerHUD {
 
     /// Ámbar de marca para el corte, verde para lo bueno. Dos colores porque el
     /// ojo los separa de un vistazo, sin leer el número.
-    private static let colorCorte = NSColor(calibratedRed: 1.0, green: 0.567, blue: 0.004, alpha: 1)
+    private static let colorCorte = NSColor(srgbRed: 1.0, green: 0.567, blue: 0.004, alpha: 1)
     private static let colorBueno = NSColor(calibratedRed: 0.25, green: 0.85, blue: 0.45, alpha: 1)
 
     /// Se pinta en la pantalla CAPTURADA, no en `NSScreen.main`: con dos

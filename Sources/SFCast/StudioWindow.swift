@@ -1563,7 +1563,7 @@ final class StudioPreviewNSView: NSView {
     weak var controller: StudioController?
     private let borderLayer = CAShapeLayer()   // contorno del item (SIN relleno)
     private let handlesLayer = CAShapeLayer()  // los 8 handles (rellenos)
-    static let morado = NSColor(calibratedRed: 0.549, green: 0.153, blue: 0.945, alpha: 1) // #8C27F1
+    static let morado = NSColor(srgbRed: 0.549, green: 0.153, blue: 0.945, alpha: 1) // #8C27F1
 
     private enum Drag {
         case none
@@ -1755,22 +1755,144 @@ struct SetResizeHandle: View {
     }
 }
 
-/// EL SET embebido: WKWebView al panel :8088 (panel_server.py). El panel web
-/// sigue siendo la ÚNICA implementación — esto es un espejo, no una copia; si
-/// el servicio está caído, cerrar y reabrir el drawer reintenta la carga.
+/// EL SET, garantizado por la app (19 ago 2026)
+///
+/// ANTES: el drawer era un WKWebView desnudo apuntando a :8088. Si el servicio no
+/// estaba arriba no había error, ni reintento, ni aviso — quedaba un rectángulo
+/// BLANCO. El 18 ago un `estudio off` dejó el job booteado out (bootout ELIMINA el
+/// job: el KeepAlive del plist no resucita lo que ya no existe) y el Estudio pasó
+/// 22 h enseñando ese blanco. Con el Modo Rodaje, que abre el drawer a la fuerza,
+/// ese blanco se HORNEA en el video y encima es una bomba de luz en cámara.
+///
+/// AHORA: la clase de fallo no existe. El Set no es un servicio con vida propia que
+/// el humano arranca desde una terminal — es parte de la app. Si SFCast está abierto,
+/// El Set está arriba, y nadie tiene que enterarse de que por debajo hay un puerto.
+///
+/// Lo que NO hace: matarlo al salir. panel_server.py escucha en 0.0.0.0 a propósito
+/// para que el iPhone entre por la LAN (su propio comentario lo dice). Si SFCast lo
+/// matara al cerrarse le arrancaría el panel del teléfono a Daniel. Adoptar ≠ poseer:
+/// la app garantiza que esté ARRIBA; `estudio off` sigue siendo cómo se baja aposta.
+enum SetService {
+    static let port = 8088
+    static let url = URL(string: "http://127.0.0.1:8088/?embed=sfcast")!
+
+    private static let label = "com.arbrain.panel"
+    private static var plist: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/\(label).plist")
+    }
+    /// Fallback cuando el plist no está instalado: el repo en su ruta convencional.
+    private static var repoDir: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Developer/business-os/entorno-fisico")
+    }
+
+    /// ¿Responde? Timeout corto a propósito: esto corre antes de pintar.
+    static func isUp(timeout: TimeInterval = 1.0) async -> Bool {
+        var r = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/")!)
+        r.timeoutInterval = timeout
+        r.cachePolicy = .reloadIgnoringLocalCacheData
+        guard let (_, resp) = try? await URLSession.shared.data(for: r),
+              let http = resp as? HTTPURLResponse else { return false }
+        return http.statusCode == 200
+    }
+
+    /// Garantiza que El Set responda. Idempotente y barato cuando ya está arriba
+    /// (un probe de ~2 ms). Devuelve false solo si de plano no levantó, que a estas
+    /// alturas es un fallo de instalación, no el caso de todos los días.
+    @discardableResult
+    static func ensureUp() async -> Bool {
+        if await isUp() { return true }
+
+        if FileManager.default.fileExists(atPath: plist.path) {
+            // launchd primero: reusa el plist real (KeepAlive + logs en panel.log).
+            // bootout deja el job INEXISTENTE, así que bootstrap es lo que lo revive.
+            run("/bin/launchctl", ["bootstrap", "gui/\(getuid())", plist.path], wait: true)
+        } else {
+            // Sin plist: lo levantamos nosotros. En macOS el hijo de una app GUI no
+            // muere con el padre (se re-parenta a launchd), así que el iPhone lo
+            // sigue viendo aunque SFCast se cierre. (No hay `setsid` en macOS.)
+            let py = repoDir.appendingPathComponent("venv/bin/python3").path
+            let server = repoDir.appendingPathComponent("panel_server.py").path
+            if FileManager.default.fileExists(atPath: py),
+               FileManager.default.fileExists(atPath: server) {
+                run(py, ["-u", server], wait: false)
+            }
+        }
+
+        // Poll: arrancar python tarda ~300 ms, no un frame. Techo ~5 s.
+        for _ in 0..<20 {
+            if await isUp(timeout: 0.5) { return true }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return false
+    }
+
+    private static func run(_ tool: String, _ args: [String], wait: Bool) {
+        guard FileManager.default.isExecutableFile(atPath: tool) else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: tool)
+        p.arguments = args
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return }
+        if wait { p.waitUntilExit() }   // al server desprendido no lo esperamos nunca
+    }
+}
+
+/// EL SET embebido. El panel web sigue siendo la ÚNICA implementación — esto es un
+/// espejo, no una copia. Lo que cambió es quién responde por que esté vivo: la app.
 struct SetPanelDrawer: NSViewRepresentable {
-    // ?embed=sfcast: el panel esconde su tarjeta "Cómo se ve" (el Estudio ya
-    // enseña la cámara en vivo al lado — pedido de Daniel, 18 ago pm).
-    private static let panelURL = URL(string: "http://127.0.0.1:8088/?embed=sfcast")!
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> WKWebView {
         let v = WKWebView()
-        v.load(URLRequest(url: Self.panelURL))
+        v.navigationDelegate = context.coordinator
+        // Fondo del Estudio, JAMÁS el blanco por defecto de WKWebView: mientras
+        // carga (o si algún día no carga) esto sale en cámara y se hornea en el
+        // video. Un fallo puede ser feo, pero no puede ser una lámpara.
+        v.setValue(false, forKey: "drawsBackground")
+        v.underPageBackgroundColor = NSColor(red: 0.082, green: 0.082, blue: 0.098, alpha: 1)
+        context.coordinator.attach(v)
         return v
     }
 
-    func updateNSView(_ v: WKWebView, context: Context) {
-        if v.url == nil { v.load(URLRequest(url: Self.panelURL)) }
+    func updateNSView(_ v: WKWebView, context: Context) {}
+
+    /// Dueño del ciclo de vida de la carga: garantiza el servicio antes de pedir la
+    /// página y reintenta solo si algo falla. El reintento NO puede colgar de
+    /// updateNSView — SwiftUI solo lo llama cuando cambia el estado de la vista, y
+    /// con el drawer quieto eso no pasa nunca (por eso el blanco duraba para siempre).
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        private weak var web: WKWebView?
+        private var intentos = 0
+
+        func attach(_ v: WKWebView) {
+            web = v
+            cargar()
+        }
+
+        private func cargar() {
+            Task { @MainActor in
+                await SetService.ensureUp()
+                web?.load(URLRequest(url: SetService.url))
+            }
+        }
+
+        private func reintentar() {
+            guard intentos < 5 else { return }   // techo: no martillar para siempre
+            intentos += 1
+            let espera = UInt64(intentos) * 1_000_000_000   // 1s, 2s, 3s… lineal
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: espera)
+                await SetService.ensureUp()
+                self.web?.load(URLRequest(url: SetService.url))
+            }
+        }
+
+        func webView(_ w: WKWebView, didFinish n: WKNavigation!) { intentos = 0 }
+        func webView(_ w: WKWebView, didFail n: WKNavigation!, withError e: Error) { reintentar() }
+        func webView(_ w: WKWebView, didFailProvisionalNavigation n: WKNavigation!, withError e: Error) { reintentar() }
     }
 }
 
@@ -1800,7 +1922,7 @@ final class MeterBarNSView: NSView {
     private let fill = CAGradientLayer()
     private var level: Float = 0
     private var hot = false
-    private static let mostaza = NSColor(calibratedRed: 1.0, green: 0.567, blue: 0.004, alpha: 1)
+    private static let mostaza = NSColor(srgbRed: 1.0, green: 0.567, blue: 0.004, alpha: 1)
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -1887,6 +2009,19 @@ struct PanelBox<Content: View>: View {
 
 // MARK: - root
 
+/// Relanza el bundle actual. El hijo sobrevive a nuestra muerte (se re-parenta a
+/// launchd) y espera con `kill -0` hasta que el PID desaparece; recién entonces
+/// abre. Así el binario que arranca es SIEMPRE el de disco, no el de memoria.
+func relanzar() {
+    let bundle = Bundle.main.bundleURL.path
+    let pid = ProcessInfo.processInfo.processIdentifier
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/sh")
+    p.arguments = ["-c", "while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; open \"\(bundle)\""]
+    guard (try? p.run()) != nil else { return }
+    NSApp.terminate(nil)   // dispara el guardado normal de scenes.json
+}
+
 struct StudioRootView: View {
     @EnvironmentObject var c: StudioController
 
@@ -1924,6 +2059,11 @@ struct StudioRootView: View {
         .padding(12)
         .background(StudioSkin.bg)
         .preferredColorScheme(.dark)
+        // EL SET arriba porque el Estudio está abierto (19 ago). No espera a que
+        // alguien abra el drawer ni a que alguien se acuerde de `estudio on` en una
+        // terminal: cuando Daniel toca 💡 el panel YA está listo, y el iPhone lo ve
+        // aunque el drawer nunca se abra. Idempotente y ~2 ms si ya estaba vivo.
+        .task { await SetService.ensureUp() }
         .sheet(isPresented: $c.showSettings) {
             StudioSettingsView().environmentObject(c)
         }
@@ -1931,6 +2071,27 @@ struct StudioRootView: View {
         .background(
             Button("") { c.duplicateScene() }
                 .keyboardShortcut("d", modifiers: .command)
+                .hidden()
+        )
+        // ⌘R RELANZA el Estudio (19 ago). Tras `build-app.sh` + copiar a
+        // /Applications, la app en memoria sigue siendo la vieja: cerrar y abrir
+        // a mano era el paso manual de cada iteración. El shell espera a que este
+        // proceso MUERA antes de abrir el nuevo — sin esa espera, LaunchServices
+        // ve la app aún viva y trae al frente la instancia vieja en vez de lanzar
+        // el binario nuevo, que es justo el fallo que haría inútil el atajo.
+        .background(
+            Button("") { relanzar() }
+                .keyboardShortcut("r", modifiers: .command)
+                .hidden()
+        )
+        // ⌘⇧F ajusta la fuente seleccionada a PANTALLA COMPLETA, exacta.
+        // El preview es interactivo (drag mueve, handles redimensionan) y un
+        // pulso de más deja cosas como y=0.00032233 — invisible al ojo, suficiente
+        // para que el encuadre no cuadre y para que nadie sepa "en qué momento
+        // quedó así". Esto devuelve el rect a [[0,0],[1,1]] sin pelearse con el ratón.
+        .background(
+            Button("") { c.updateSelectedItem { $0.rect = CGRect(x: 0, y: 0, width: 1, height: 1) } }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
                 .hidden()
         )
     }

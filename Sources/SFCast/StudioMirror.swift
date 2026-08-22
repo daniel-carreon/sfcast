@@ -155,6 +155,7 @@ final class StudioMirror: NSObject {
         unavailable = nil
 
         let layout = MirrorLayout(itemID: cam.id, rect: rect, circle: cam.circleMask,
+                                  fullBleed: SceneGlow.isFullBleed(cam.rect),
                                   glow: cam.glow, opacity: cam.opacity, flipH: cam.flipH,
                                   screenNumber: screen.displayNumber,
                                   screenMinSide: min(screen.frame.width, screen.frame.height))
@@ -481,6 +482,9 @@ struct MirrorLayout: Equatable {
     /// Rect del item en PUNTOS de pantalla, coords globales de AppKit.
     let rect: CGRect
     let circle: Bool
+    /// ¿el item cubre el lienzo? entra en el layout porque cambia el RADIO y el
+    /// layout es lo que dispara el reapply (Equatable)
+    let fullBleed: Bool
     let glow: SceneGlow
     let opacity: Double
     let flipH: Bool
@@ -705,8 +709,8 @@ final class MirrorContentView: NSView {
         // el programa.
         let box = path.boundingBoxOfPath
         clipLayer.frame = box
-        clipLayer.cornerRadius = l.circle ? min(box.width, box.height) / 2
-                                          : l.minSide * SceneGlow.cornerFraction
+        clipLayer.cornerRadius = SceneGlow.cornerRadius(minSide: l.minSide,
+                                                        fullBleed: l.fullBleed, circle: l.circle)
         clipLayer.masksToBounds = true
         clipLayer.mask = nil
         clipLayer.opacity = Float(l.opacity)

@@ -1516,7 +1516,9 @@ final class Compositor: @unchecked Sendable {
             shape = CGRect(x: shape.midX - minSide / 2, y: shape.midY - minSide / 2,
                            width: minSide, height: minSide)
         }
-        let radius = item.circleMask ? minSide / 2 : minSide * SceneGlow.cornerFraction
+        let radius = SceneGlow.cornerRadius(minSide: minSide,
+                                            fullBleed: SceneGlow.isFullBleed(item.rect),
+                                            circle: item.circleMask)
         guard let bodyImg = drawShape(size: box.size, rect: shape, radius: radius, rgb: rgb,
                                       alpha: SceneGlow.haloAlpha * item.opacity, stroke: nil)
         else { return nil }

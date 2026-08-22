@@ -47,7 +47,7 @@ enum SceneGlow: String, Codable, CaseIterable {
     var rgb: (r: Double, g: Double, b: Double)? {
         switch self {
         case .nada: return nil
-        case .morado: return (0.549, 0.153, 0.945)   // #8C27F1
+        case .morado: return (0.549, 0.153, 0.945)   // #8C27F1 — el morado de marca
         case .ambar: return (1.0, 0.567, 0.004)      // #ff9101
         }
     }
@@ -84,6 +84,24 @@ enum SceneGlow: String, Codable, CaseIterable {
     /// tienen que redondear igual: que no lo hicieran fue el bug del 9 ago (el
     /// panel redondeado y el video a escuadra).
     static let cornerFraction: Double = 0.035
+
+    /// Radio de esquina para UN item, en px. Vive aquí por la misma razón que
+    /// `cornerFraction`: el compositor y el espejo tienen que redondear igual.
+    ///
+    /// ⛔ A PANTALLA COMPLETA el radio es CERO. El redondeo existe para una cámara
+    /// que flota SOBRE otra fuente; cuando el item cubre el lienzo entero no hay
+    /// nada detrás y las esquinas solo enseñan negro (Daniel lo cazó el 18 ago
+    /// mirando la escena Completa).
+    static func cornerRadius(minSide: Double, fullBleed: Bool, circle: Bool) -> Double {
+        if circle { return minSide / 2 }
+        if fullBleed { return 0 }
+        return minSide * cornerFraction
+    }
+
+    /// ¿El item cubre el lienzo entero? Se mide sobre el rect NORMALIZADO.
+    static func isFullBleed(_ rectNorm: CGRect) -> Bool {
+        rectNorm.width >= 0.995 && rectNorm.height >= 0.995
+    }
 }
 
 /// Un item DENTRO de una escena: qué fuente, dónde y cómo.

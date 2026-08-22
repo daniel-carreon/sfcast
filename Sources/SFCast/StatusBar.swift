@@ -31,7 +31,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
         return img
     }
 
-    static let mostaza = NSColor(calibratedRed: 1.0, green: 0.567, blue: 0.004, alpha: 1)
+    static let mostaza = NSColor(srgbRed: 1.0, green: 0.567, blue: 0.004, alpha: 1)
 
     /// Botón del status item (ancla del micropanel).
     var button: NSStatusBarButton? { item.button }

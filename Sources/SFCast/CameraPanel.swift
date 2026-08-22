@@ -38,7 +38,10 @@ enum SFCam {
     }
 
     /// Las que se tocan en un rodaje. En ese orden.
-    static let interesan = ["iso", "shutter", "aperture", "wb"]
+    ///
+    /// `formato` esta aqui porque es el que decide si la camara manda sus
+    /// sobreimpresos: en XAVC S 4K los apaga sola, en XAVC S HD aparecen.
+    static let interesan = ["iso", "shutter", "aperture", "wb", "formato"]
 
     static func leer() -> (props: [Prop], temperatura: String?, error: String?) {
         guard let exe = ruta else { return ([], nil, "sfcam no está instalado") }

@@ -37,6 +37,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
     var button: NSStatusBarButton? { item.button }
 
     func setup() {
+        armarPuertaDeAgentes()
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.behavior = .terminationOnRemoval
         if let button = item.button {
@@ -188,6 +189,26 @@ final class StatusBar: NSObject, NSMenuDelegate {
 
     @objc private func openHub() { HubWindowController.shared.show() }
     @objc private func openStudio() { StudioController.shared.open() }
+
+    /// Puerta para agentes: `touch ~/.sfcast/abrir-estudio` abre el Estudio.
+    ///
+    /// El Estudio solo se abria desde este menu de la barra, que no se puede
+    /// pulsar por software sin permisos de Accesibilidad. Con esto Levy puede
+    /// abrirlo cuando Daniel se lo pida hablando, y ademas se puede verificar
+    /// el Estudio en pruebas automaticas.
+    private static var vigilante: Timer?
+
+    func armarPuertaDeAgentes() {
+        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".sfcast")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let señal = dir.appendingPathComponent("abrir-estudio")
+        try? FileManager.default.removeItem(at: señal)
+        Self.vigilante = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            guard FileManager.default.fileExists(atPath: señal.path) else { return }
+            try? FileManager.default.removeItem(at: señal)
+            DispatchQueue.main.async { StudioController.shared.open() }
+        }
+    }
     @objc private func openLauncher() {
         LauncherPanelController.shared.show(relativeTo: item.button)
     }

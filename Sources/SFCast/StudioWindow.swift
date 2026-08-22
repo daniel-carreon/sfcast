@@ -1029,6 +1029,9 @@ struct StudioRootView: View {
                 ScenesPanel().frame(maxWidth: .infinity)
                 SourcesPanel().frame(maxWidth: .infinity)
                 MixerPanel().frame(maxWidth: .infinity)
+                // Control de la camara SIN salir del Estudio: durante una toma,
+                // cambiar de ventana para corregir el ISO no es una opcion.
+                CameraPanel().frame(maxWidth: .infinity)
                 OutputsPanel().frame(maxWidth: .infinity)
             }
             .frame(height: 235)

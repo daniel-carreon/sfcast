@@ -114,8 +114,12 @@ final class ZoomHost: NSView {
         // El marco PRIMERO: asignarlo reinicia el tamaño de los bounds. Y viene
         // de los bounds del PADRE, que nadie modifica: sin realimentación.
         escala.frame = bounds
+        // SIEMPRE, tambien en z == 1. Cambiar el FRAME de una vista ya escalada
+        // NO deshace su escala: AppKit conserva la razon frame/bounds. Con el
+        // `if z != 1` de antes, volver a 1.0 con ⌘0 dejaba la maqueta a 1.25
+        // para siempre — el numero decia 1 y la pantalla decia otra cosa.
         let logico = NSSize(width: bounds.width / z, height: bounds.height / z)
-        if z != 1 { escala.setBoundsSize(logico) }
+        if escala.bounds.size != logico { escala.setBoundsSize(logico) }
         if let c = escala.subviews.first, c.frame.size != escala.bounds.size {
             c.frame = CGRect(origin: .zero, size: escala.bounds.size)
         }

@@ -190,7 +190,17 @@ final class LauncherPanelController {
         p.sharingType = .none            // el micropanel JAMÁS sale en el video
 
         let host = NSHostingView(rootView: LauncherView(meter: meter))
-        p.contentView = host
+        // Este panel se dimensiona SOLO (la vista pide 320 de ancho), así que
+        // aquí el zoom no puede repartir puntos: tiene que CRECER la ventana.
+        // Sin esto, subir el zoom metía el mismo contenido en menos puntos
+        // lógicos y el micropanel se desbordaba.
+        let zoomHost = ZoomHost.envolver(host)
+        zoomHost.alCambiar = { [weak p] z in
+            guard let p else { return }
+            p.setContentSize(NSSize(width: 320 * z, height: p.frame.height))
+        }
+        p.setContentSize(NSSize(width: 320 * ZoomHost.valor, height: 420 * ZoomHost.valor))
+        p.contentView = zoomHost
         hosting = host
         panel = p
     }

@@ -41,7 +41,7 @@ func render(_ px: Int) -> Data {
     inner.lineWidth = max(1, s * 0.006)
     inner.stroke()
 
-    let mostaza = NSColor(calibratedRed: 1.0, green: 0.567, blue: 0.004, alpha: 1)
+    let mostaza = NSColor(srgbRed: 1.0, green: 0.567, blue: 0.004, alpha: 1)   // #ff9101 sRGB: calibratedRGB lo desviaba
 
     // halo suave detrás del anillo (glow de marca)
     if px >= 64 {

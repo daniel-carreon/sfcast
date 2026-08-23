@@ -6,6 +6,7 @@ import CoreImage
 import CoreMedia
 import CoreVideo
 import IOSurface
+import Metal
 
 /// MODO ESTUDIO — motor de frames y compositor del programa.
 ///
@@ -28,6 +29,12 @@ final class StudioEngine: NSObject {
     // MARK: - estado observable (la UI lee esto)
 
     private(set) var isRunning = false
+    /// Cuándo arrancó el motor. Sirve para medir la edad de una fuente que NUNCA
+    /// entregó un frame: sin esto, el watchdog no podía distinguir "acaba de
+    /// arrancar" de "lleva media hora muerta desde el segundo cero".
+    private var startedRunningAt: Double = CACurrentMediaTime()
+    /// Los observadores de la sesión de cámara se cuelgan UNA vez.
+    private var cameraObserversWired = false
     private(set) var screenAvailable = false     // permiso + stream vivo
     private(set) var cameraAvailable = false
     /// Fuentes activas en la escena que NO están entregando frames (comparador).
@@ -36,12 +43,25 @@ final class StudioEngine: NSObject {
     /// compositor estaría RECICLANDO el último frame (la "congelada" del 25 jul).
     private(set) var screenFrozen = false
     private(set) var screenRestarts = 0
+    /// La CÁMARA lleva rato sin entregar imagen nueva. Descubierto el 9 ago en
+    /// una prueba de 50 min: la ZV-E10 se apagó sola al minuto 31.6 (las Sony
+    /// tienen auto power off) y la grabación siguió 18 minutos componiendo su
+    /// ÚLTIMO frame congelado, a 30 fps perfectos, sin UNA SOLA línea de aviso.
+    /// Es exactamente la pantalla congelada del 25 jul por el otro lado — y el
+    /// caso más probable de Daniel, porque su cámara se apaga sola.
+    private(set) var cameraFrozen = false
+    private var cameraRetryAt: Double = 0
     var onStatusChange: (() -> Void)?
     /// Aviso de alto nivel para la UI (congelada / disco / recuperada).
     var onAlert: ((String, Bool) -> Void)?       // (mensaje, esCrítico)
 
     /// Solo para marcar "esta fuente lleva rato sin imagen nueva" en la UI.
     /// NO dispara nada: una pantalla quieta es legítima.
+    /// QA: congela la entrada de cámara a propósito (`--freezecam`).
+    nonisolated(unsafe) static var qaFreezeCamera = false
+    /// QA: corta la entrada de micrófono a propósito (`--mutemic`).
+    nonisolated(unsafe) static var qaMuteMic = CommandLine.arguments.contains("--mutemic")
+
     nonisolated static let staleAfter: Double = 3.0
     /// Silencio TOTAL del stream (video + audio) que ya no es reposo sino
     /// muerte. 5s es holgado a propósito: prefiero tardar 5s en reaccionar que
@@ -59,7 +79,16 @@ final class StudioEngine: NSObject {
     /// Sink de grabación (nil = no se está grabando). Lo pone StudioRecorder.
     let sink = SinkBox()
 
-    private let renderQueue = DispatchQueue(label: "so.saasfactory.sfcast.studio.render", qos: .userInitiated)
+    /// ⚠️ `.userInteractive`, NO `.userInitiated` (9 ago 2026). Con el render ya
+    /// canalizado, compose cuesta ~4 ms de 33 y aun así el governor bajaba: el
+    /// trabajo no era el problema, el SCHEDULER sí. Bajo carga, macOS posterga
+    /// una cola `.userInitiated` y el timer pierde disparos — que es
+    /// exactamente el hueco que el `CadenceKeeper` tiene que rellenar con
+    /// frames repetidos. Subir la prioridad no hace el trabajo más rápido:
+    /// hace que nos toque el turno a tiempo, y así los frames son NUEVOS en vez
+    /// de repetidos. Es el mismo motivo por el que los motores de audio corren
+    /// con prioridad de tiempo real.
+    private let renderQueue = DispatchQueue(label: "so.saasfactory.sfcast.studio.render", qos: .userInteractive)
     private let videoQueue = DispatchQueue(label: "so.saasfactory.sfcast.studio.video", qos: .userInitiated)
     private let audioQueue = DispatchQueue(label: "so.saasfactory.sfcast.studio.audio", qos: .userInitiated)
     /// TODA la cirugía del AVCaptureSession (begin/commitConfiguration, start/
@@ -71,6 +100,25 @@ final class StudioEngine: NSObject {
     private var renderTimer: DispatchSourceTimer?
     private var watchdog: Timer?
     private let compositor = Compositor()
+    /// El reloj que compensa la latencia de captura al estampar el programa.
+    /// Vive en el motor (no en el sink) porque la latencia es propiedad de las
+    /// FUENTES, y el sink va y viene con cada grabación.
+    let programClock = ProgramClock()
+    /// Baja (y sube) la cadencia cuando la Mac no da el ritmo pedido.
+    let governor = RenderGovernor()
+    /// Dónde se van los milisegundos del loop, por fase.
+    let profile = RenderProfile()
+    /// Rellena los ticks que el timer pierda: cadencia SIN huecos en el archivo.
+    let cadence = CadenceKeeper()
+    /// La cadencia cambió: (efectiva, pedida). La UI lo enseña — una grabación
+    /// que se degrada en silencio fue el patrón de TODOS los bugs del Estudio.
+    var onCadenceChange: ((Int, Int) -> Void)?
+    /// Una fuente se congeló (o volvió): (source, frozen, motivo). Lo consume el
+    /// grabador para dejarlo escrito en el manifest — el editor tiene que saber
+    /// qué segundos son una foto fija.
+    var onSourceFrozen: ((String, Bool, String) -> Void)?
+    /// FPS que está corriendo ahora mismo el render loop (≤ el configurado).
+    var effectiveFPS: Int { governor.effective == 0 ? fps : governor.effective }
 
     // pantalla
     private var screenStream: SCStream?
@@ -91,6 +139,14 @@ final class StudioEngine: NSObject {
     /// Resolución nativa del display capturado (la mide startScreenTap). Se
     /// guarda para que applyLive pueda volver a "Nativa" sin tirar el stream.
     private var nativeCanvas: CGSize?
+    /// Píxeles que el stream entrega DE VERDAD. Desde el 9 ago no siempre son
+    /// los nativos: si el lienzo es menor, se le pide a SCK que escale en la
+    /// captura. Ahí el downscale lo hace el compositor de ventanas (gratis, ya
+    /// va a tocar esos píxeles) en vez de CoreImage, y sobre todo cada buffer
+    /// pesa lo que pesa la SALIDA: a 4K son 37 MB × queueDepth 8 = 302 MB de
+    /// pool, contra 66 MB a 1080p. En una Mac de 16 GB con dos monitores 4K,
+    /// esos 236 MB son la diferencia entre tener margen y no tenerlo.
+    private var streamPixels: CGSize?
     /// La config viva del SCStream: applyLive la muta y la re-aplica con
     /// updateConfiguration (fps / audio del sistema en caliente, estilo OBS).
     private var screenCfg: SCStreamConfiguration?
@@ -103,6 +159,47 @@ final class StudioEngine: NSObject {
     /// hay que reenganchar a mitad de grabación (screen-002.mp4, -003…).
     var onNeedNewScreenRawURL: (() -> URL?)?
 
+    // MARK: - lo que el ESPEJO necesita del motor (v2.9)
+
+    /// La sesión de cámara del Estudio. El espejo cuelga de AQUÍ un
+    /// `AVCaptureVideoPreviewLayer`: ni una sesión nueva (invariante: una sola
+    /// dueña de cámara/mic), ni un frame extra viajando a main.
+    var cameraCaptureSession: AVCaptureSession? { cameraAvailable ? cameraSession : nil }
+
+    /// Resolución NATIVA del display capturado, en px. El espejo la usa para
+    /// mapear canvas ⇄ pantalla con el mismo número que usa el stream, no con
+    /// una re-derivación desde NSScreen que podría diferir.
+    /// Lo que el stream entrega DE VERDAD (no lo nativo del display): el espejo
+    /// mapea canvas ⇄ pantalla con este número, así que tiene que ser el real o
+    /// el panel se despega del programa.
+    var capturedPixelSize: CGSize? { streamPixels ?? nativeCanvas }
+
+    /// El dispositivo de cámara que quedó DE VERDAD en la sesión — no el que
+    /// pide settings.json. Si el elegido no está conectado (una cámara apagada,
+    /// por ejemplo), `Devices.camera(id:)` cae a otro y el video sale de un
+    /// sitio que nadie eligió: pasó en el QA del 9 ago, donde la ZV-E10 estaba
+    /// apagada y el Estudio grabó de "OBS Virtual Camera" (un cuadro fijo, y
+    /// con OBS cerrado ni eso). El nombre resuelto es el sensor de eso.
+    /// La entrada de MICRÓFONO que quedó de verdad en la sesión. Hermana de
+    /// `cameraDeviceName`, y por el mismo motivo: lo que pide settings.json no
+    /// siempre es lo que macOS entrega.
+    var micDeviceName: String? {
+        cameraSession.inputs.compactMap { ($0 as? AVCaptureDeviceInput)?.device }
+            .first(where: { $0.hasMediaType(.audio) })?.localizedName
+    }
+
+    var cameraDeviceName: String? {
+        cameraSession.inputs.compactMap { ($0 as? AVCaptureDeviceInput)?.device }
+            .first(where: { $0.hasMediaType(.video) })?.localizedName
+    }
+
+    /// ¿El programa sale espejeado? Se LEE de la conexión real del data-output
+    /// (que es de donde el compositor toma los frames), jamás se asume: si el
+    /// espejo volteara por su cuenta, mentiría sobre el encuadre.
+    var cameraMirroredInProgram: Bool {
+        cameraVideoOut?.connection(with: .video)?.isVideoMirrored ?? false
+    }
+
     // MARK: - arranque / parada del motor (preview vivo, sin grabar)
 
     func start(config: StudioConfig) async {
@@ -112,6 +209,7 @@ final class StudioEngine: NSObject {
         if let o = canvasOverride { canvasSize = o }
         systemAudioWanted = config.systemAudioEnabled
         isRunning = true
+        startedRunningAt = CACurrentMediaTime()
         sceneBox.set(config.scenes.first(where: { $0.id == config.activeSceneID }) ?? config.scenes.first)
 
         // Cámara y mic por el BROKER (serializado — invariante TCC).
@@ -160,6 +258,7 @@ final class StudioEngine: NSObject {
         screenRecOutput = nil
         screenAvailable = false
         stopCameraTap()
+        compositor.drainPipeline()
         frames.clear()
         _ = previewGate.take()   // suelta el último IOSurface retenido
         onStatusChange?()
@@ -190,9 +289,18 @@ final class StudioEngine: NSObject {
         systemAudioWanted = config.systemAudioEnabled
 
         if fpsChanged || canvasChanged { restartRenderLoop() }
-        if fpsChanged || audioChanged, let stream = screenStream, let cfg = screenCfg {
+        if fpsChanged || audioChanged || canvasChanged, let stream = screenStream, let cfg = screenCfg {
             cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
             cfg.capturesAudio = systemAudioWanted
+            // El lienzo cambió ⇒ la captura se re-dimensiona con él. Sin esto,
+            // bajar a 1080p seguiría trayendo buffers de 4K y el ahorro de
+            // memoria (el que de verdad da margen) no llegaría nunca.
+            if canvasChanged, let native = nativeCanvas {
+                let cap = Self.captureSize(native: native, canvas: canvasSize)
+                cfg.width = Int(cap.width)
+                cfg.height = Int(cap.height)
+                streamPixels = cap
+            }
             do {
                 try await Deadline.run(seconds: 6, name: "studio updateConfiguration") {
                     try await stream.updateConfiguration(cfg)
@@ -215,7 +323,7 @@ final class StudioEngine: NSObject {
     /// Cambio de cámara/micrófono EN CALIENTE (doble clic en Fuentes/Mixer, o
     /// Ajustes → Aplicar): reconcilia los inputs de la sesión con lo elegido en
     /// AppSettings, sin parar la sesión y jamás en main.
-    func applyDeviceSelection(micEnabled: Bool) {
+    func applyDeviceSelection(micEnabled: Bool, forceCamera: Bool = false) {
         guard cameraAvailable else { return }   // sin permiso de cámara no hay sesión viva
         let s = AppSettings.load()
         let camID = s.cameraDeviceID
@@ -223,15 +331,64 @@ final class StudioEngine: NSObject {
         let micOK = micEnabled && Permissions.micGranted
         let session = cameraSession
         sessionQueue.async {
+            let antes = session.inputs.compactMap { ($0 as? AVCaptureDeviceInput)?.device.uniqueID }
             session.beginConfiguration()
-            Self.reconcileInputs(session, camID: camID, micID: micID, micEnabled: micOK)
+            Self.reconcileInputs(session, camID: camID, micID: micID, micEnabled: micOK,
+                                 forceCamera: forceCamera)
             session.commitConfiguration()
             if !session.isRunning { session.startRunning() }
             let devs = session.inputs.compactMap { ($0 as? AVCaptureDeviceInput)?.device }
+            // Se dice si de verdad CAMBIÓ algo. La versión anterior imprimía esta
+            // línea igual cuando no había tocado nada, así que un no-op se leía
+            // como un reenganche exitoso — 32 horas seguidas, en un caso.
+            let despues = devs.map { $0.uniqueID }
+            let cambio = forceCamera || antes != despues
             Log.info("Estudio: dispositivos en caliente → "
                      + devs.map { "\($0.localizedName) [\($0.hasMediaType(.audio) ? "audio" : "video")]" }
-                           .joined(separator: " + "))
+                           .joined(separator: " + ")
+                     + (cambio ? (forceCamera ? " (RE-PEGADA a la fuerza)" : "") : " (sin cambios)"))
         }
+    }
+
+    /// RE-PEGAR LA CÁMARA A LA FUERZA — lo que Daniel hacía a mano.
+    ///
+    /// Quita el `AVCaptureDeviceInput` de video y lo vuelve a crear, aunque sea el
+    /// MISMO dispositivo. Es la única cosa que revive una ZV-E10 que sigue
+    /// enumerada pero dejó de entregar frames; `applyDeviceSelection` normal no
+    /// puede porque se salta el trabajo cuando el ID coincide.
+    ///
+    /// ⚠️ NO se hace mientras se graba, a propósito: reconfigurar los inputs de una
+    /// sesión viva es justo lo que produjo el "estruendo" de v2.3, y si la cámara se
+    /// congeló a mitad de toma esa toma ya está perdida — vale más avisarle a Daniel
+    /// (alarma + notificación + el punto de estado en ROJO) y que él decida, que
+    /// meterle mano al audio de una grabación en curso.
+    func rebindCamera(reason: String) {
+        guard cameraAvailable else { return }
+        guard !StudioController.shared.recorder.isRecording else {
+            Log.error("Estudio: NO re-pego la cámara con una toma en curso (\(reason)) — "
+                      + "se avisa y Daniel decide")
+            return
+        }
+        // LA GUARDA QUE HACE SEGURO EL FORZADO.
+        //
+        // `Devices.camera(id:)` cae a `AVCaptureDevice.default(for: .video)` cuando
+        // la elegida no está. Con `forceCamera: true` eso sería peor que no hacer
+        // nada: arrancaríamos el input bueno para pegar la "OBS Virtual Camera",
+        // que entrega un cuadro fijo — y entonces el watchdog la declararía VIVA y
+        // se apagaría solo. Un sensor que se auto-satisface con una imagen falsa es
+        // peor que no tener sensor (el gotcha que v2.9 ya había documentado).
+        //
+        // Por eso la presencia se verifica AQUÍ, en el único sitio que fuerza, y no
+        // en cada llamador: el watchdog, el runtime error, la interrupción y el
+        // despertar del Mac quedan todos cubiertos por esta misma línea.
+        let elegida = AppSettings.load().cameraDeviceID
+        guard let id = elegida, AVCaptureDevice(uniqueID: id) != nil else {
+            Log.error("Estudio: NO re-pego (\(reason)) — la cámara elegida no está enumerada. "
+                      + "Forzar aquí pegaría la cámara equivocada (¿OBS Virtual?).")
+            return
+        }
+        Log.info("Estudio: RE-PEGANDO la cámara — \(reason)")
+        applyDeviceSelection(micEnabled: AppSettings.load().micEnabled, forceCamera: true)
     }
 
     // MARK: - pantalla (SCStream con frames + SCRecordingOutput opcional)
@@ -254,9 +411,11 @@ final class StudioEngine: NSObject {
         nativeCanvas = CGSize(width: w, height: h)
         canvasSize = canvasOverride ?? CGSize(width: w, height: h)
 
+        let cap = Self.captureSize(native: CGSize(width: w, height: h), canvas: canvasSize)
+        streamPixels = cap
         let cfg = SCStreamConfiguration()
-        cfg.width = w
-        cfg.height = h
+        cfg.width = Int(cap.width)
+        cfg.height = Int(cap.height)
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         cfg.showsCursor = true
         cfg.pixelFormat = kCVPixelFormatType_32BGRA
@@ -284,6 +443,22 @@ final class StudioEngine: NSObject {
         screenAvailable = true
         screenFrozen = false
         screenHealth.reset(audioExpected: systemAudio)
+    }
+
+    /// A qué resolución pedirle la captura a SCK. Nunca MÁS que lo nativo (no
+    /// se inventa detalle) y nunca más que el lienzo (no se paga por píxeles
+    /// que el compositor va a tirar). Preserva el aspecto del display: si se
+    /// deformara, el espejo y el programa dejarían de coincidir.
+    nonisolated static func captureSize(native: CGSize, canvas: CGSize) -> CGSize {
+        guard native.width > 1, native.height > 1, canvas.width > 1, canvas.height > 1 else { return native }
+        let s = min(canvas.width / native.width, canvas.height / native.height, 1.0)
+        guard s < 0.999 else { return native }
+        // Pares: los codificadores y los escaladores de vídeo lo agradecen, y
+        // un impar aquí produce medio píxel de corrimiento en el mapeo.
+        let w = max(2, (native.width * s).rounded())
+        let h = max(2, (native.height * s).rounded())
+        return CGSize(width: w - w.truncatingRemainder(dividingBy: 2),
+                      height: h - h.truncatingRemainder(dividingBy: 2))
     }
 
     /// QA (`--studiobench N --killstream`): mata el stream a mitad de grabación
@@ -397,11 +572,78 @@ final class StudioEngine: NSObject {
             Log.info("Estudio: sesión de cámara → "
                      + devs.map { "\($0.localizedName) [\($0.hasMediaType(.audio) ? "audio" : "video")]" }
                            .joined(separator: " + "))
+            // ⚠️ ¿Quedó la cámara que Daniel ELIGIÓ? `Devices.camera(id:)` cae a
+            // `AVCaptureDevice.default` cuando la suya no está conectada, y eso
+            // es silencioso y caro: con la ZV-E10 apagada engancha la "OBS
+            // Virtual Camera", que entrega un CUADRO FIJO. Se graba una hora
+            // creyendo que hay cámara. Aquí se dice, y en voz alta.
+            let resuelta = devs.first(where: { $0.hasMediaType(.video) })
+            if let camID, let resuelta, resuelta.uniqueID != camID {
+                Log.error("Estudio: LA CÁMARA NO ES LA ELEGIDA — quedó «\(resuelta.localizedName)». "
+                          + "La configurada no está conectada.")
+                Task { @MainActor in
+                    self.onAlert?("Ojo: estás con «\(resuelta.localizedName)», no con tu cámara de "
+                                  + "siempre. ¿Está encendida y conectada?", true)
+                }
+            }
             if !session.isRunning { session.startRunning() }
         }
         // Optimista: si al final no entrega frames, el comparador starved lo
         // delata en la UI (jamás en silencio).
         cameraAvailable = true
+        observeCameraSession()
+    }
+
+    /// LOS AVISOS QUE macOS YA MANDABA Y NADIE ESCUCHABA.
+    ///
+    /// AVFoundation publica `AVCaptureSessionRuntimeError` cuando la sesión se
+    /// rompe (USB reseteado, dispositivo perdido) y `WasInterrupted` /
+    /// `InterruptionEnded` cuando otra app se lleva la cámara o el hardware se
+    /// suspende. Son EXACTAMENTE las señales de este bug, publicadas por el
+    /// sistema, gratis — y esta app no observaba ninguna. Tampoco observaba el
+    /// despertar del Mac, que es el disparador real: el log muestra la cámara
+    /// muriendo de noche (20:13, 20:52, 21:09, 21:17, 21:18) y siguiendo muerta
+    /// 9-10 h hasta la mañana siguiente.
+    ///
+    /// Con esto el reenganche deja de depender de un sondeo de 30 s y pasa a ser
+    /// una reacción al evento. El sondeo se queda como red por si el evento no
+    /// llega (una cámara que se apaga sola no siempre genera notificación).
+    private func observeCameraSession() {
+        guard !cameraObserversWired else { return }
+        cameraObserversWired = true
+        let nc = NotificationCenter.default
+        let session = cameraSession
+
+        nc.addObserver(forName: .AVCaptureSessionRuntimeError, object: session,
+                       queue: .main) { [weak self] note in
+            let err = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
+            Log.error("Estudio: AVCaptureSession RUNTIME ERROR — \(err?.localizedDescription ?? "?")")
+            self?.rebindCamera(reason: "runtime error de la sesión")
+        }
+        // OJO: `AVCaptureSessionInterruptionReasonKey` es solo de iOS (no compila en
+        // macOS), así que aquí la razón no viaja. Basta con saber QUE pasó.
+        nc.addObserver(forName: .AVCaptureSessionWasInterrupted, object: session,
+                       queue: .main) { _ in
+            Log.error("Estudio: la sesión de cámara fue INTERRUMPIDA — ¿otra app tomó la cámara, "
+                      + "o el hardware se suspendió?")
+        }
+        nc.addObserver(forName: .AVCaptureSessionInterruptionEnded, object: session,
+                       queue: .main) { [weak self] _ in
+            Log.info("Estudio: terminó la interrupción de la cámara — re-pegando")
+            self?.rebindCamera(reason: "terminó la interrupción")
+        }
+        // El Mac despertando: el disparador del "vuelvo al día siguiente y está
+        // congelada". Se re-pega con un respiro para que el USB termine de subir.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Log.info("Estudio: el Mac despertó — re-pegando la cámara en 3s")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                self?.rebindCamera(reason: "el Mac despertó")
+            }
+        }
+        Log.info("Estudio: observadores de la sesión de cámara enganchados "
+                 + "(runtime error · interrupción · despertar del Mac)")
     }
 
     /// Reconcilia los INPUTS de la sesión con lo pedido: deja EXACTAMENTE la
@@ -410,12 +652,33 @@ final class StudioEngine: NSObject {
     /// aplicaba de verdad hasta relanzar la app. Corre SIEMPRE en sessionQueue.
     nonisolated private static func reconcileInputs(_ session: AVCaptureSession,
                                                     camID: String?, micID: String?,
-                                                    micEnabled: Bool) {
+                                                    micEnabled: Bool,
+                                                    forceCamera: Bool = false) {
         func inputs() -> [AVCaptureDeviceInput] {
             session.inputs.compactMap { $0 as? AVCaptureDeviceInput }
         }
         let wantCam = Devices.camera(id: camID)
-        for i in inputs() where i.device.hasMediaType(.video) && i.device.uniqueID != wantCam?.uniqueID {
+        // `forceCamera` existe por un no-op que costó semanas de cámara congelada.
+        //
+        // Sin él, la condición de abajo solo quita el input cuando el ID pedido es
+        // DISTINTO del pegado. Y el reintento del watchdog pide SIEMPRE la misma
+        // cámara — así que cuando la ZV-E10 sigue enumerada pero dejó de entregar
+        // frames (se apagó sola, o el USB se suspendió de noche), el reconcile no
+        // quitaba nada, el `addInput` se saltaba porque ya había un input de video,
+        // `session.isRunning` seguía diciendo true, y `applyDeviceSelection`
+        // terminaba imprimiendo "dispositivos en caliente → ZV-E10 [video]" sin
+        // haber tocado NADA. El remedio era un no-op exactamente en el caso para el
+        // que se escribió.
+        //
+        // Medido en el log: se congela de noche (20:13, 20:52, 21:09, 21:17, 21:18)
+        // y sigue muerta 9-10 h hasta la mañana; una vez reportó 115,087.9 s (32 h)
+        // sin imagen nueva. El reintento corría cada 30 s todo ese tiempo, en vano.
+        //
+        // Por eso Daniel lo arreglaba a mano cambiando de cámara y volviendo: ESO
+        // sí rompe la comparación de identidad y fuerza un `AVCaptureDeviceInput`
+        // nuevo. `forceCamera` hace justo eso, sin que él tenga que tocar nada.
+        for i in inputs() where i.device.hasMediaType(.video)
+            && (forceCamera || i.device.uniqueID != wantCam?.uniqueID) {
             session.removeInput(i)
         }
         if let cam = wantCam,
@@ -490,11 +753,17 @@ final class StudioEngine: NSObject {
     private func restartRenderLoop() {
         renderTimer?.cancel()
         renderTimer = nil
+        // El frame en vuelo pertenece al lienzo VIEJO: soltarlo antes de
+        // re-armar, o quedaría un buffer del pool anterior retenido para
+        // siempre (y con el tamaño equivocado).
+        compositor.drainPipeline()
         startRenderLoop()
     }
 
     private func startRenderLoop() {
         let timer = DispatchSource.makeTimerSource(queue: renderQueue)
+        governor.reset(target: fps, now: CACurrentMediaTime())
+        cadence.reset()
         timer.schedule(deadline: .now(), repeating: .init(1.0 / Double(fps)), leeway: .milliseconds(3))
         let comp = compositor
         let frames = frames
@@ -502,14 +771,33 @@ final class StudioEngine: NSObject {
         let sink = sink
         let canvas = canvasSize
         let preview = previewGate
+        let clock = programClock
+        let gov = governor
+        let prof = profile
+        let cad = cadence
+        let targetFPS = fps
+        // QA: ahoga el loop a propósito para ejercer el governor (--chokems).
+        let chokeNs = UInt32(max(0, StudioRecTest.chokeMs)) * 1000
         timer.setEventHandler { [weak self] in
             guard let scene = scenes.get() else { return }
+            // EL INSTANTE SE TOMA AQUÍ, ANTES de componer. Si se tomara después,
+            // el tiempo que tarde el compositor se sumaría al desfase de audio:
+            // el error crecería justo cuando la Mac va peor. Ver ProgramClock.
+            let hostNow = CMClockGetTime(CMClockGetHostTimeClock())
             let t = CACurrentMediaTime()
+            let tStart = t
+            if chokeNs > 0 { usleep(chokeNs) }
             var starved: Set<StudioSourceKind> = []
             var stale: Set<StudioSourceKind> = []
-            guard let pb = comp.compose(scene: scene, canvas: canvas, t: t,
-                                        frames: frames, starved: &starved,
-                                        stale: &stale) else { return }
+            // CANALIZADO: lanza el render de este tick y recoge el del anterior
+            // (que la GPU pintó mientras tanto). Lo que sale es del tick previo
+            // y trae SU hostTime — por eso el timestamp viaja pegado al buffer.
+            guard let listo = comp.composePipelined(scene: scene, canvas: canvas, t: t,
+                                                    hostNow: hostNow, frames: frames,
+                                                    starved: &starved,
+                                                    stale: &stale) else { return }
+            let pb = listo.buffer
+            let tCompose = CACurrentMediaTime()
             // preview → main por la COMPUERTA: un solo hop en vuelo, siempre el
             // frame más nuevo. Si main va atrás, aquí se TIRAN frames de preview
             // (gratis) en vez de apilarlos — el apilado era el "1 fps al minuto
@@ -526,8 +814,42 @@ final class StudioEngine: NSObject {
                     }
                 }
             }
-            // grabación del programa (salida B) — best-effort, jamás bloquea
-            sink.get()?.appendVideo(pb, hostTime: CMClockGetTime(CMClockGetHostTimeClock()))
+            let tPreview = CACurrentMediaTime()
+            // grabación del programa (salida B) — best-effort, jamás bloquea.
+            // La fuente crítica del lip-sync es la CÁMARA (es la cara que se
+            // mira); si no hay, la pantalla. Se usa la de la cámara aunque la
+            // escena de este instante no la muestre: así un cambio de escena no
+            // mueve el reloj y no se oye ningún ajuste al cortar.
+            if let s = sink.get() {
+                let lat = frames.latency(.camera) ?? frames.latency(.screen)
+                // `listo.hostTime` = el instante del tick en que se LANZÓ este
+                // frame, no el de ahora. Usar `hostNow` aquí metería el frame de
+                // latencia del pipeline como desfase de audio — justo lo que
+                // acabamos de matar.
+                //
+                // Y si el timer perdió disparos, el guardián devuelve TAMBIÉN
+                // los timestamps que faltan: el mismo contenido, sin huecos en
+                // la cadencia. Un mp4 de 30 fps constantes es lo que el editor
+                // quiere; los saltos de 750 ms del 9 ago eran justo esto.
+                for ts in cad.timestamps(for: listo.hostTime, fps: targetFPS) {
+                    s.appendVideo(pb, hostTime: clock.stamp(hostNow: ts, target: lat))
+                }
+            }
+            let tEncode = CACurrentMediaTime()
+            prof.add(compose: (tCompose - tStart) * 1000,
+                     preview: (tPreview - tCompose) * 1000,
+                     encode: (tEncode - tPreview) * 1000,
+                     total: (tEncode - tStart) * 1000)
+            // GOVERNOR: si la Mac no sostiene la cadencia pedida, se le pide
+            // menos — pero REGULAR. Re-agendar el mismo timer es barato y no
+            // toca la captura ni el writer.
+            if let nuevo = gov.frameComposed(now: t, target: targetFPS) {
+                timer.schedule(deadline: .now(), repeating: .init(1.0 / Double(nuevo)),
+                               leeway: .milliseconds(3))
+                Log.info("Estudio: compongo a \(nuevo) fps (pedidos \(targetFPS)) para darle aire a la "
+                         + "GPU — el ARCHIVO sigue saliendo a \(targetFPS) constantes (frames rellenados)")
+                DispatchQueue.main.async { [weak self] in self?.onCadenceChange?(nuevo, targetFPS) }
+            }
         }
         timer.resume()
         renderTimer = timer
@@ -549,7 +871,75 @@ final class StudioEngine: NSObject {
     private func startWatchdog() {
         watchdog?.invalidate()
         watchdog = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.checkStreamHealth() }
+            Task { @MainActor in
+                self?.checkStreamHealth()
+                self?.checkCameraHealth()
+            }
+        }
+    }
+
+    /// El comparador de la CÁMARA. `frames.age` ya existía como sensor; lo que
+    /// faltaba era que alguien lo MIRARA y avisara: un frame viejo se compone
+    /// igual de bien que uno nuevo, así que una cámara muerta produce un video
+    /// impecable de una foto fija.
+    private func checkCameraHealth() {
+        guard isRunning, cameraAvailable else { return }
+        // UNA CÁMARA QUE NUNCA ENTREGÓ UN FRAME TAMBIÉN ESTÁ MUERTA.
+        //
+        // Antes esto era `guard let age = ... else { return }`: si `stamps[.camera]`
+        // nunca se llenó —porque la cámara no dio ni un frame desde que arrancó la
+        // sesión— el watchdog se iba por la puerta de atrás y no volvía a mirar
+        // NUNCA. Cero alarma, cero reintento, cero registro. Es el caso exacto de la
+        // sesión hpa3ky02t5ss: 3:52 de una foto con `cam:0fps` desde el segundo 0.
+        //
+        // Un sensor que solo sabe evaluar lo que ya funcionó una vez no es un sensor.
+        let age = frames.age(.camera) ?? (CACurrentMediaTime() - startedRunningAt)
+        let dead = age > Self.deadAfter
+        if dead != cameraFrozen {
+            cameraFrozen = dead
+            onStatusChange?()
+            onSourceFrozen?("camera", dead, "sin imagen nueva (¿se apagó sola? ¿cable USB?)")
+            if dead {
+                Log.error(String(format: "Estudio: CÁMARA CONGELADA — %.1fs sin imagen nueva "
+                                 + "(¿se apagó sola? ¿cable USB?)", age))
+                onAlert?("La cámara dejó de dar imagen: se está grabando su último frame congelado.", true)
+                if StudioController.shared.recorder.isRecording
+                    || RecordingController.shared.state != .idle {
+                    notify("SFCast — LA CÁMARA SE APAGÓ",
+                           "Llevas grabando con la imagen CONGELADA. Revisa la cámara "
+                           + "(las Sony se apagan solas).")
+                    Log.error("Estudio: NOTIFICACIÓN enviada (cámara congelada grabando)")
+                }
+            } else {
+                Log.info("Estudio: cámara viva de nuevo")
+                onAlert?("La cámara volvió.", false)
+            }
+        }
+        // Mientras siga muerta, reintentar — pero SOLO si la cámara ELEGIDA
+        // volvió a aparecer en el sistema.
+        //
+        // ⚠️ Reconciliar a ciegas es peor que no hacer nada: `Devices.camera(id:)`
+        // cae a `AVCaptureDevice.default` cuando la elegida no está, así que con
+        // la ZV-E10 apagada enganchaba la "OBS Virtual Camera" — que entrega un
+        // cuadro fijo. El watchdog entonces la declaraba VIVA y se apagaba solo:
+        // un sensor que se auto-satisface con una imagen falsa es peor que no
+        // tener sensor. (Es el gotcha que v2.9 ya había documentado, y este
+        // reintento lo estaba disparando cada 10 s.)
+        if dead {
+            let now = CACurrentMediaTime()
+            if now > cameraRetryAt {
+                cameraRetryAt = now + 30
+                let elegida = AppSettings.load().cameraDeviceID
+                let presente = elegida.flatMap { AVCaptureDevice(uniqueID: $0) } != nil
+                if presente {
+                    // FUERZA. Antes se llamaba `applyDeviceSelection` normal, que
+                    // se salta todo cuando el ID coincide — o sea que este reintento
+                    // era un no-op cada 30 s, para siempre. Ahora re-pega de verdad.
+                    Log.info("Estudio: la cámara elegida sigue enumerada pero no entrega "
+                             + "imagen — RE-PEGÁNDOLA")
+                    rebindCamera(reason: "watchdog: \(Int(age))s sin imagen")
+                }
+            }
         }
     }
 
@@ -560,6 +950,7 @@ final class StudioEngine: NSObject {
         let dead = bad != nil || silence > Self.deadAfter
         if dead != screenFrozen {
             screenFrozen = dead
+            onSourceFrozen?("screen", dead, bad ?? "stream mudo")
             onStatusChange?()
             if dead {
                 let b = screenHealth.beats()
@@ -602,9 +993,7 @@ final class StudioEngine: NSObject {
                 try await startScreenTap(systemAudio: systemAudioWanted)
                 Log.info("Estudio: captura de pantalla reenganchada")
             } catch {
-                Log.error("Estudio: reenganche falló: \(error.localizedDescription)")
-                onAlert?("No pude reenganchar la pantalla: \(error.localizedDescription)", true)
-                onStatusChange?()
+                reportRestartFailure(error.localizedDescription)
                 // Si el reenganche murió por permiso (fila de TCC muerta),
                 // el doctor guía la reparación; su alerta pide el clic, jamás
                 // relanza solo — si hay grabación viva, Daniel decide.
@@ -624,6 +1013,36 @@ final class StudioEngine: NSObject {
         }
     }
 
+    /// El reenganche de pantalla falló. Extraído del `catch` a proposito: el QA
+    /// (`--failstream`) llama AQUÍ, así ejerce el camino REAL y no una copia
+    /// que podría divergir — probar un mock del error no prueba nada.
+    ///
+    /// ⚠️ Si esto pasa GRABANDO, el programa sigue escribiendo con la última
+    /// imagen de pantalla CONGELADA y la cámara y la voz perfectas — o sea, se
+    /// ve sano. Medido el 9 ago en la prueba de 25 min: 60 segundos así, con la
+    /// alerta viviendo en la ventana del Estudio, que está en el OTRO monitor
+    /// mientras Daniel presenta. Mismo patrón que costó 45 minutos esa mañana.
+    func reportRestartFailure(_ motivo: String) {
+        Log.error("Estudio: reenganche falló: \(motivo)")
+        onAlert?("No pude reenganchar la pantalla: \(motivo)", true)
+        if RecordingController.shared.state != .idle
+            || StudioController.shared.recorder.isRecording {
+            notify("SFCast — LA PANTALLA SE CAYÓ",
+                   "Sigo grabando tu cámara y tu voz, pero la PANTALLA quedó "
+                   + "congelada y no pude reengancharla. Revisa el permiso.")
+            Log.error("Estudio: NOTIFICACIÓN enviada al sistema (la pantalla cayó grabando)")
+        }
+        onStatusChange?()
+    }
+
+    /// QA (`--failstream`): ejerce el fallo de reenganche SIN necesitar permiso
+    /// de pantalla. Lo que importa verificar es que la grabación SOBREVIVE (la
+    /// cámara y la voz siguen) y que el aviso ALCANZA a Daniel.
+    func simulateRestartFailure() {
+        screenRestarts += 1
+        reportRestartFailure("simulado por QA (--failstream)")
+    }
+
     /// Foto acumulada del FLUJO de frames: cámara entrando, preview saliendo.
     /// Los consumidores (chip de fps, heartbeat, bench) miden fps por DELTA
     /// entre dos fotos — el fps se mide contando frames, no se supone.
@@ -632,6 +1051,18 @@ final class StudioEngine: NSObject {
         return StudioFlowCounts(camera: frames.count(.camera),
                                 previewDelivered: p.delivered,
                                 previewDropped: p.dropped)
+    }
+
+    /// Salud del COMPOSITOR: cuánto tarda en componer y cuántos frames no
+    /// llegaron a existir por falta de buffer. Es el hilo que alimenta al
+    /// archivo, así que esto predice los fps del MP4 antes de abrirlo.
+    func compositorStats() -> Compositor.Stats { compositor.stats() }
+    func compositorSubFases() -> (grafo: Double, buffer: Double, render: Double) { compositor.subFases() }
+    func resetCompositorWindow() { compositor.resetWindow() }
+
+    /// Latencia de captura medida por fuente (segundos) + corrección aplicada.
+    func syncReport() -> (camera: Double?, screen: Double?, appliedMs: Double) {
+        (frames.latency(.camera), frames.latency(.screen), programClock.appliedMs)
     }
 
     /// QA (--studiotest): compone UN frame del programa con el estado actual,
@@ -685,7 +1116,7 @@ extension StudioEngine: SCStreamOutput {
                 return
             }
             guard status == .complete, let pb = CMSampleBufferGetImageBuffer(sb) else { return }
-            frames.set(pb, for: .screen)
+            frames.set(pb, for: .screen, pts: CMSampleBufferGetPresentationTimeStamp(sb))
         case .audio:
             // El tap de audio del MISMO stream late aunque la pantalla no
             // cambie: es el sensor de vida más fiable que tenemos. En el
@@ -703,11 +1134,22 @@ extension StudioEngine: SCStreamOutput {
 extension StudioEngine: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
     nonisolated func captureOutput(_ output: AVCaptureOutput, didOutput sb: CMSampleBuffer, from connection: AVCaptureConnection) {
         if output is AVCaptureVideoDataOutput {
+            // QA (--freezecam): simula que la cámara se apagó sola (auto power
+            // off de las Sony) tirando sus frames en silencio, que es EXACTO lo
+            // que se vio el 9 ago: el store conserva el último y el compositor
+            // sigue produciendo 30 fps impecables de una foto fija.
+            if StudioEngine.qaFreezeCamera { return }
             guard let pb = CMSampleBufferGetImageBuffer(sb) else { return }
-            frames.set(pb, for: .camera)
+            // El PTS viaja con el frame: es la única forma de saber CUÁNDO se
+            // capturó de verdad esta imagen y no cuándo nos llegó.
+            frames.set(pb, for: .camera, pts: CMSampleBufferGetPresentationTimeStamp(sb))
         } else if output is AVCaptureAudioDataOutput {
+            // QA (--mutemic): simula EXACTAMENTE el fallo del 10 ago — el mic
+            // deja de entregar y la app sigue grabando imagen impecable.
+            if StudioEngine.qaMuteMic { return }
             AudioMath.describeOnce(sb, label: "mic")
             AudioMath.traceOnce(sb, label: "mic", every: 180)
+            AudioMath.noteLatency(sb)
             levels.setMic(AudioMath.rms(from: sb))
             sink.get()?.appendMicAudio(sb)
         }
@@ -719,15 +1161,188 @@ extension StudioEngine: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureA
 /// N fuentes + layout de escena → UN frame de programa (CVPixelBuffer BGRA,
 /// IOSurface-backed). CoreImage = GPU sin shaders propios ni deps externas.
 final class Compositor: @unchecked Sendable {
-    private let context = CIContext(options: [.cacheIntermediates: false])
+
+    /// Cómo se construye el CIContext y cómo se rinde. NO es una preferencia de
+    /// gusto: se eligió MIDIENDO (`--compbench`), porque CoreImage por default
+    /// convierte cada entrada a un espacio de trabajo lineal y vuelve a
+    /// convertir a la salida — un peaje que aquí no compra nada, porque el
+    /// compositor solo PEGA imágenes (no aplica filtros de color).
+    enum Modo: String, CaseIterable {
+        /// Lo que había hasta el 9 ago: working space por default + salida sRGB.
+        case clasico
+        /// Sin espacio de trabajo: los valores de píxel pasan tal cual.
+        case sinColorManagement
+        /// Sin color management + Metal explícito + prioridad baja de caché.
+        case sinColorMasMetal
+    }
+
+    private let modo: Modo
+    private let context: CIContext
     private var pool: CVPixelBufferPool?
     private var poolSize = CGSize.zero
     private let lock = NSLock()   // render loop vs snapshot de QA
+
+    init(modo: Modo = .sinColorMasMetal) {
+        self.modo = modo
+        switch modo {
+        case .clasico:
+            context = CIContext(options: [.cacheIntermediates: false])
+        case .sinColorManagement:
+            context = CIContext(options: [
+                .cacheIntermediates: false,
+                .workingColorSpace: NSNull(),
+                .outputColorSpace: NSNull(),
+            ])
+        case .sinColorMasMetal:
+            // El device explícito evita que CoreImage elija por su cuenta (y en
+            // una Mac con GPU integrada + WindowServer peleando, elegir mal
+            // cuesta milisegundos por frame).
+            if let dev = MTLCreateSystemDefaultDevice() {
+                context = CIContext(mtlDevice: dev, options: [
+                    .cacheIntermediates: false,
+                    .workingColorSpace: NSNull(),
+                    .outputColorSpace: NSNull(),
+                    .highQualityDownsample: false,
+                ])
+            } else {
+                context = CIContext(options: [
+                    .cacheIntermediates: false,
+                    .workingColorSpace: NSNull(),
+                    .outputColorSpace: NSNull(),
+                ])
+            }
+        }
+    }
+
+    /// El espacio de salida del render. Con color management apagado se pasa
+    /// `nil`: pedir sRGB ahí reintroduciría justo la conversión que quitamos.
+    private var renderColorSpace: CGColorSpace? {
+        modo == .clasico ? CGColorSpace(name: CGColorSpace.sRGB) : nil
+    }
+
+    // MARK: - PIPELINING (la cura de raíz, 9 ago 2026)
+    //
+    // Medición que lo motiva, en vivo con la escena real de Daniel:
+    //
+    //     grafo (CPU)   0.58 ms
+    //     buffer (pool) 0.02 ms
+    //     RENDER (GPU) 22.32 ms   ← el 97%
+    //
+    // `CIContext.render(_:to:…)` es SÍNCRONO: se queda esperando a que la GPU
+    // termine. Y la GPU no es nuestra — WindowServer compone dos monitores 4K,
+    // el encoder HEVC codifica, el preview y el espejo pintan. Componer no es
+    // caro; ESPERAR en el hilo que marca la cadencia, sí.
+    //
+    // Esta es la diferencia real con OBS, y no es "mejor código": es que ellos
+    // no bloquean. Aquí se hace igual — el trabajo de la GPU se SOLAPA con el
+    // siguiente tick: en el frame N se LANZA el render sin esperar, y en el
+    // N+1 se recoge el resultado (que la GPU pintó mientras tanto) y se manda
+    // al encoder. El handler pasa de esperar 22 ms a gastar ~0.6.
+    //
+    // Cuesta UN frame de latencia (33 ms), y por eso el hostTime viaja PEGADO
+    // a su buffer: el frame que se entrega es el del tick anterior y tiene que
+    // llevar el timestamp de ESE tick, o reintroduciríamos el desfase de audio
+    // que acabamos de matar.
+    private var pendingTask: CIRenderTask?
+    private var pendingBuffer: CVPixelBuffer?
+    private var pendingHostTime: CMTime?
+    private var pipelineFallos = 0
+
+    /// Frame LISTO (el del tick anterior) + su timestamp, o nil si aún no hay.
+    struct Listo {
+        let buffer: CVPixelBuffer
+        let hostTime: CMTime
+    }
+
+    // MARK: - SENSOR del compositor (invariante 5b)
+
+    /// Frames que NUNCA existieron porque el pool no dio buffer, y cuánto cuesta
+    /// componer. Hasta el 9 ago `makeBuffer` devolvía nil y el render loop hacía
+    /// `return` sin contar NADA: el frame se evaporaba, `droppedFrames` seguía
+    /// en 0 y el log decía `drops:0` mientras el archivo caía a 8 fps. El agujero
+    /// estaba exactamente en el único sitio donde nadie miraba.
+    struct Stats {
+        var composed = 0
+        var bufferFailures = 0
+        var composeMsP50 = 0.0
+        var composeMsMax = 0.0
+    }
+    private var composeMs: [Double] = []
+    private var grafoMs: [Double] = []
+    private var bufferMs: [Double] = []
+    private var renderMs: [Double] = []
+    private var composed = 0
+    private var bufferFailures = 0
+
+    func stats() -> Stats {
+        lock.lock(); defer { lock.unlock() }
+        let s = composeMs.sorted()
+        return Stats(composed: composed,
+                     bufferFailures: bufferFailures,
+                     composeMsP50: s.isEmpty ? 0 : s[s.count / 2],
+                     composeMsMax: s.last ?? 0)
+    }
+
+    /// Vacía la ventana de tiempos (el heartbeat mide por tramo, no acumulado —
+    /// un promedio de 45 min esconde un colapso de 4).
+    func resetWindow() {
+        lock.lock()
+        composeMs.removeAll(keepingCapacity: true)
+        grafoMs.removeAll(keepingCapacity: true)
+        bufferMs.removeAll(keepingCapacity: true)
+        renderMs.removeAll(keepingCapacity: true)
+        lock.unlock()
+    }
 
     func compose(scene: StudioScene, canvas: CGSize, t: Double,
                  frames: LatestFrameStore, starved: inout Set<StudioSourceKind>,
                  stale: inout Set<StudioSourceKind>) -> CVPixelBuffer? {
         lock.lock(); defer { lock.unlock() }
+        let t0 = CACurrentMediaTime()
+        let image = buildImage(scene: scene, canvas: canvas, t: t,
+                               frames: frames, starved: &starved, stale: &stale)
+        let tGrafo = CACurrentMediaTime()
+        guard let pb = makeBuffer(canvas) else {
+            // NO es un no-op: es un frame que no va a existir en el archivo.
+            // Se cuenta aquí porque más arriba (el render loop) ya no hay a
+            // quién contárselo — ver Stats.
+            bufferFailures += 1
+            return nil
+        }
+        let tBuffer = CACurrentMediaTime()
+        context.render(image, to: pb, bounds: CGRect(origin: .zero, size: canvas),
+                       colorSpace: renderColorSpace)
+        let tRender = CACurrentMediaTime()
+        composed += 1
+        composeMs.append((tRender - t0) * 1000)
+        // Las TRES sub-fases por separado: armar el grafo (CPU), sacar buffer
+        // del pool (memoria) y renderizar (GPU, y `render` es SÍNCRONO: si
+        // WindowServer tiene la GPU ocupada con dos monitores 4K, aquí se
+        // ESPERA). Sin este desglose, "compose cuesta 20 ms" no dice si la cura
+        // es menos trabajo, más memoria o no bloquear.
+        grafoMs.append((tGrafo - t0) * 1000)
+        bufferMs.append((tBuffer - tGrafo) * 1000)
+        renderMs.append((tRender - tBuffer) * 1000)
+        if composeMs.count > 600 {
+            // El exceso se calcula UNA vez y ANTES de tocar nada: usar
+            // `composeMs.count` después del primer removeFirst borraba los
+            // otros tres arrays enteros (medían 0.00 ms, que era imposible).
+            let exceso = composeMs.count - 600
+            composeMs.removeFirst(exceso)
+            if grafoMs.count >= exceso { grafoMs.removeFirst(exceso) }
+            if bufferMs.count >= exceso { bufferMs.removeFirst(exceso) }
+            if renderMs.count >= exceso { renderMs.removeFirst(exceso) }
+        }
+        return pb
+    }
+
+    /// Arma el grafo CoreImage de la escena (CPU pura, ~0.6 ms medidos). No
+    /// toca la GPU: eso pasa al renderizar. Lo comparten la vía síncrona (QA)
+    /// y la canalizada (producción) para que no puedan divergir.
+    private func buildImage(scene: StudioScene, canvas: CGSize, t: Double,
+                            frames: LatestFrameStore,
+                            starved: inout Set<StudioSourceKind>,
+                            stale: inout Set<StudioSourceKind>) -> CIImage {
         var image = CIImage(color: CIColor(red: 0.04, green: 0.04, blue: 0.05))
             .cropped(to: CGRect(origin: .zero, size: canvas))
         for item in scene.items where item.enabled {
@@ -742,18 +1357,106 @@ final class Compositor: @unchecked Sendable {
                 starved.insert(item.kind)   // COMPARADOR: fuente activa sin frames
                 continue
             }
-            // ARO NEÓN: halo DEBAJO del video, anillo ENCIMA — igual que la
-            // burbuja del Loom (allá el shadow vive en glowView y el borde en
-            // innerView, que dibuja sobre el contenido).
-            let glow = glowLayers(item: item, canvas: canvas)
-            if let halo = glow?.halo { image = halo.composited(over: image) }
+            // HALO NEÓN debajo del video (el anillo se retiró — ver SceneGlow).
+            if let halo = glowLayer(item: item, canvas: canvas) {
+                image = halo.composited(over: image)
+            }
             image = place(src, item: item, canvas: canvas).composited(over: image)
-            if let ring = glow?.ring { image = ring.composited(over: image) }
         }
-        guard let pb = makeBuffer(canvas) else { return nil }
-        context.render(image, to: pb, bounds: CGRect(origin: .zero, size: canvas),
-                       colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
-        return pb
+        return image
+    }
+
+    /// Recorte de las ventanas de medición (mismo exceso para las cuatro).
+    private func trimVentanas() {
+        guard composeMs.count > 600 else { return }
+        let exceso = composeMs.count - 600
+        composeMs.removeFirst(exceso)
+        if grafoMs.count >= exceso { grafoMs.removeFirst(exceso) }
+        if bufferMs.count >= exceso { bufferMs.removeFirst(exceso) }
+        if renderMs.count >= exceso { renderMs.removeFirst(exceso) }
+    }
+
+    /// COMPOSICIÓN CANALIZADA — lanza el render de ESTE frame sin esperarlo y
+    /// devuelve el del tick ANTERIOR, ya terminado por la GPU.
+    ///
+    /// El contrato con el llamador cambia: lo que sale NO es el frame que
+    /// acabas de pedir, es el de hace un tick — por eso trae su propio
+    /// `hostTime`. Devolver nil es normal en el primer tick (todavía no hay
+    /// nada anterior que entregar).
+    func composePipelined(scene: StudioScene, canvas: CGSize, t: Double,
+                          hostNow: CMTime, frames: LatestFrameStore,
+                          starved: inout Set<StudioSourceKind>,
+                          stale: inout Set<StudioSourceKind>) -> Listo? {
+        lock.lock(); defer { lock.unlock() }
+
+        // 1) RECOGER lo que la GPU pintó mientras tanto. Si por lo que sea no
+        //    terminó, se espera aquí — pero ese tiempo ya se solapó con el
+        //    trabajo del tick anterior, que es justamente la ganancia.
+        var listo: Listo?
+        if let task = pendingTask, let buf = pendingBuffer, let ht = pendingHostTime {
+            do {
+                try task.waitUntilCompleted()
+                listo = Listo(buffer: buf, hostTime: ht)
+            } catch {
+                // Un render fallido no puede matar la grabación: se cuenta y se
+                // sigue (el frame se pierde, pero jamás en silencio).
+                pipelineFallos += 1
+                bufferFailures += 1
+            }
+            pendingTask = nil; pendingBuffer = nil; pendingHostTime = nil
+        }
+
+        // 2) ARMAR y LANZAR el de este tick, sin esperarlo.
+        let t0 = CACurrentMediaTime()
+        let image = buildImage(scene: scene, canvas: canvas, t: t,
+                               frames: frames, starved: &starved, stale: &stale)
+        let tGrafo = CACurrentMediaTime()
+        guard let pb = makeBuffer(canvas) else {
+            bufferFailures += 1
+            return listo
+        }
+        let tBuffer = CACurrentMediaTime()
+        let dest = CIRenderDestination(pixelBuffer: pb)
+        dest.colorSpace = renderColorSpace
+        do {
+            pendingTask = try context.startTask(toRender: image,
+                                                from: CGRect(origin: .zero, size: canvas),
+                                                to: dest, at: .zero)
+            pendingBuffer = pb
+            pendingHostTime = hostNow
+            composed += 1
+        } catch {
+            pipelineFallos += 1
+            bufferFailures += 1
+        }
+        let tLanzado = CACurrentMediaTime()
+        composeMs.append((tLanzado - t0) * 1000)
+        grafoMs.append((tGrafo - t0) * 1000)
+        bufferMs.append((tBuffer - tGrafo) * 1000)
+        renderMs.append((tLanzado - tBuffer) * 1000)
+        trimVentanas()
+        return listo
+    }
+
+    /// Suelta el frame en vuelo (al parar el motor o cambiar de lienzo): sin
+    /// esto, un buffer del pool viejo quedaría retenido para siempre.
+    func drainPipeline() {
+        lock.lock()
+        if let t = pendingTask { try? t.waitUntilCompleted() }
+        pendingTask = nil; pendingBuffer = nil; pendingHostTime = nil
+        lock.unlock()
+    }
+
+    var pipelineFailures: Int { lock.lock(); defer { lock.unlock() }; return pipelineFallos }
+
+    /// Desglose de compose() en sus tres sub-fases (p50 de cada una).
+    func subFases() -> (grafo: Double, buffer: Double, render: Double) {
+        lock.lock(); defer { lock.unlock() }
+        func p50(_ x: [Double]) -> Double {
+            guard !x.isEmpty else { return 0 }
+            let s = x.sorted(); return s[s.count / 2]
+        }
+        return (p50(grafoMs), p50(bufferMs), p50(renderMs))
     }
 
     private func sourceImage(kind: StudioSourceKind, t: Double, canvas: CGSize,
@@ -782,12 +1485,12 @@ final class Compositor: @unchecked Sendable {
         let glow: String
         let opacity: Int
     }
-    private var glowCache: [GlowKey: (halo: CIImage, ring: CIImage)] = [:]
+    private var glowCache: [GlowKey: CIImage] = [:]
 
-    /// Devuelve las dos capas del aro. **Cacheadas**: dibujar el anillo y
-    /// desenfocar el halo en cada frame costaría 30 veces por segundo lo mismo
-    /// que cuesta una vez; solo cambian si cambia el rect, el color o el recorte.
-    private func glowLayers(item: SceneItem, canvas: CGSize) -> (halo: CIImage, ring: CIImage)? {
+    /// El HALO (ya no hay anillo — ver `SceneGlow`). **Cacheado**: desenfocar en
+    /// cada frame costaría 30 veces por segundo lo que cuesta una; solo cambia
+    /// si cambia el rect, el color o el recorte.
+    private func glowLayer(item: SceneItem, canvas: CGSize) -> CIImage? {
         guard let rgb = item.glow.rgb else { return nil }
         let target = targetRect(item, canvas: canvas)
         guard target.width > 4, target.height > 4 else { return nil }
@@ -798,40 +1501,36 @@ final class Compositor: @unchecked Sendable {
         if let hit = glowCache[key] { return hit }
 
         let minSide = min(target.width, target.height)
-        let ringW = max(2.0, minSide * SceneGlow.ringFraction)
-        let halo = minSide * SceneGlow.haloFraction
+        let halo = SceneGlow.halo(itemMinSide: minSide,
+                                  canvasMinSide: min(canvas.width, canvas.height))
         // El desenfoque gaussiano muere a ~3σ: ese es el margen que hay que
         // dejar alrededor o el halo sale cortado en recto (el mismo error que
         // el `glowPad` corrige en el NSPanel de la burbuja).
-        let pad = halo * 3 + ringW
+        let pad = halo * 3
         let box = target.insetBy(dx: -pad, dy: -pad)
         // Con `circleMask` el video se recorta al círculo INSCRITO (lado menor,
-        // centrado — ver `place`). El aro tiene que ser ESE círculo, no un
-        // óvalo del rect completo, o quedaría despegado del recorte.
+        // centrado — ver `place`). El halo tiene que salir de ESE círculo, no de
+        // un óvalo del rect completo, o quedaría despegado del recorte.
         var shape = target.offsetBy(dx: -box.origin.x, dy: -box.origin.y)
         if item.circleMask {
             shape = CGRect(x: shape.midX - minSide / 2, y: shape.midY - minSide / 2,
                            width: minSide, height: minSide)
         }
-        let radius = item.circleMask ? minSide / 2 : minSide * 0.035
-        let alpha = item.opacity
-
-        guard let ringImg = drawShape(size: box.size, rect: shape, radius: radius, rgb: rgb,
-                                      alpha: SceneGlow.ringAlpha * alpha, stroke: ringW),
-              let bodyImg = drawShape(size: box.size, rect: shape, radius: radius, rgb: rgb,
-                                      alpha: SceneGlow.haloAlpha * alpha, stroke: nil)
+        let radius = SceneGlow.cornerRadius(minSide: minSide,
+                                            fullBleed: SceneGlow.isFullBleed(item.rect),
+                                            circle: item.circleMask)
+        guard let bodyImg = drawShape(size: box.size, rect: shape, radius: radius, rgb: rgb,
+                                      alpha: SceneGlow.haloAlpha * item.opacity, stroke: nil)
         else { return nil }
 
-        let blurred = bodyImg
+        let layer = bodyImg
             .clampedToExtent()
             .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: halo])
             .cropped(to: CGRect(origin: .zero, size: box.size))
-        let offset = CGAffineTransform(translationX: box.origin.x, y: box.origin.y)
-        let layers = (halo: blurred.transformed(by: offset),
-                      ring: ringImg.transformed(by: offset))
+            .transformed(by: CGAffineTransform(translationX: box.origin.x, y: box.origin.y))
         if glowCache.count > 24 { glowCache.removeAll() }   // techo simple
-        glowCache[key] = layers
-        return layers
+        glowCache[key] = layer
+        return layer
     }
 
     /// Dibuja el círculo/rect redondeado en un bitmap transparente: relleno para
@@ -890,6 +1589,13 @@ final class Compositor: @unchecked Sendable {
         let dx = target.midX - img.extent.midX
         let dy = target.midY - img.extent.midY
         img = img.transformed(by: CGAffineTransform(translationX: dx, y: dy))
+        // ESPEJADO HORIZONTAL alrededor del CENTRO del rect del item: la
+        // reflexión manda el target sobre sí mismo, así que el recorte y la
+        // máscara (simétricos respecto al centro) no se enteran.
+        if item.flipH {
+            img = img.transformed(by: CGAffineTransform(scaleX: -1, y: 1)
+                .concatenating(CGAffineTransform(translationX: 2 * target.midX, y: 0)))
+        }
         if item.fit == .fill {
             img = img.cropped(to: target)
         }
@@ -903,6 +1609,26 @@ final class Compositor: @unchecked Sendable {
             g.setValue(CIColor.white, forKey: "inputColor0")
             g.setValue(CIColor(red: 0, green: 0, blue: 0, alpha: 0), forKey: "inputColor1")
             if let mask = g.outputImage?.cropped(to: target) {
+                img = img.applyingFilter("CIBlendWithAlphaMask", parameters: [
+                    kCIInputMaskImageKey: mask,
+                    kCIInputBackgroundImageKey: CIImage.empty(),
+                ])
+            }
+        } else if item.kind == .camera {
+            // ESQUINAS REDONDEADAS (9 ago). El espejo las pintaba y el programa
+            // NO: la cámara a tamaño completo salía a escuadra en el video y
+            // redondeada en el panel. Daniel lo cazó a ojo — "no parten de la
+            // misma función" — y tenía razón literal. Mismo radio que
+            // `MirrorLayout.shapePath`: lado menor × 0.035.
+            //
+            // Solo la CÁMARA: redondear la fuente Pantalla le pondría esquinas
+            // curvas al video entero, que no es lo que nadie pidió.
+            let r = min(target.width, target.height) * SceneGlow.cornerFraction
+            if let mask = CIFilter(name: "CIRoundedRectangleGenerator", parameters: [
+                "inputExtent": CIVector(cgRect: target),
+                "inputRadius": r,
+                "inputColor": CIColor.white,
+            ])?.outputImage?.cropped(to: target) {
                 img = img.applyingFilter("CIBlendWithAlphaMask", parameters: [
                     kCIInputMaskImageKey: mask,
                     kCIInputBackgroundImageKey: CIImage.empty(),
@@ -935,6 +1661,337 @@ final class Compositor: @unchecked Sendable {
         var pb: CVPixelBuffer?
         CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
         return pb
+    }
+}
+
+/// EL GUARDIÁN DE LA CADENCIA — por qué a OBS "no se le bajan los fps".
+///
+/// Con el render ya canalizado, el handler cuesta ~3.7 ms de 33.3. Pero un
+/// `DispatchSourceTimer` con `repeating` **no recupera los disparos perdidos**:
+/// si el sistema lo posterga 70 ms (un hipo de scheduler, un pico de
+/// WindowServer), esos dos ticks no vuelven y el archivo queda con un hueco.
+/// Eso es lo que producía los saltos de 750 ms del 9 ago.
+///
+/// La cura no es componer más rápido — es **no dejar huecos en la cadencia**:
+/// cuando faltan ticks, se reemiten los frames que faltan con el ÚLTIMO
+/// contenido disponible. Un frame repetido y un frame que nunca se compuso
+/// muestran EXACTAMENTE lo mismo en pantalla; la diferencia está en el
+/// contenedor, y un mp4 de 30 fps constantes es lo que cualquier editor quiere
+/// (los NLEs sufren el frame-rate variable). Es literalmente lo que hace OBS
+/// con sus "lagged frames".
+final class CadenceKeeper: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastEmitted: CMTime = .invalid
+    private var repetidos = 0
+    private var maxRelleno = 8
+
+    func reset() {
+        lock.lock(); lastEmitted = .invalid; repetidos = 0; lock.unlock()
+    }
+
+    var repeatedFrames: Int { lock.lock(); defer { lock.unlock() }; return repetidos }
+
+    /// Devuelve los timestamps que hay que emitir para llegar a `target` sin
+    /// dejar huecos: los de relleno primero (con el contenido anterior) y el
+    /// del frame nuevo al final.
+    ///
+    /// El relleno se topa a `maxRelleno`: si el hueco es enorme (la app estuvo
+    /// suspendida, el disco se atoró) no tiene sentido inventar dos segundos de
+    /// imagen congelada — ahí el hueco es información honesta.
+    func timestamps(for target: CMTime, fps: Int) -> [CMTime] {
+        lock.lock(); defer { lock.unlock() }
+        let paso = 1.0 / Double(max(fps, 1))
+        guard lastEmitted.isValid else {
+            lastEmitted = target
+            return [target]
+        }
+        let hueco = CMTimeGetSeconds(CMTimeSubtract(target, lastEmitted))
+        guard hueco > paso * 1.6 else {
+            lastEmitted = target
+            return [target]
+        }
+        let faltan = min(Int((hueco / paso).rounded()) - 1, maxRelleno)
+        guard faltan > 0 else { lastEmitted = target; return [target] }
+        var out: [CMTime] = []
+        for i in 1...faltan {
+            out.append(CMTimeAdd(lastEmitted,
+                                 CMTime(seconds: paso * Double(i), preferredTimescale: 90_000)))
+        }
+        repetidos += faltan
+        out.append(target)
+        lastEmitted = target
+        return out
+    }
+}
+
+/// PERFIL DEL RENDER LOOP — dónde se van los milisegundos, por fase.
+///
+/// El 9 ago el compositor medía 4 ms en el bench aislado y **23 ms en vivo**.
+/// Con un solo número agregado no hay forma de saber si eso es la GPU
+/// componiendo, el pool dando buffers, el encoder tragando o el preview: son
+/// cuatro curas distintas y opuestas. Esto las separa.
+final class RenderProfile: @unchecked Sendable {
+    private let lock = NSLock()
+    private var compose: [Double] = []
+    private var preview: [Double] = []
+    private var encode: [Double] = []
+    private var total: [Double] = []
+
+    func add(compose c: Double, preview p: Double, encode e: Double, total t: Double) {
+        lock.lock()
+        compose.append(c); preview.append(p); encode.append(e); total.append(t)
+        if compose.count > 900 {
+            compose.removeFirst(300); preview.removeFirst(300)
+            encode.removeFirst(300); total.removeFirst(300)
+        }
+        lock.unlock()
+    }
+
+    func reset() {
+        lock.lock()
+        compose.removeAll(); preview.removeAll(); encode.removeAll(); total.removeAll()
+        lock.unlock()
+    }
+
+    struct Fase { var p50 = 0.0; var p95 = 0.0; var max = 0.0 }
+    private static func stat(_ xs: [Double]) -> Fase {
+        guard !xs.isEmpty else { return Fase() }
+        let s = xs.sorted()
+        return Fase(p50: s[s.count / 2],
+                    p95: s[min(s.count - 1, Int(Double(s.count) * 0.95))],
+                    max: s[s.count - 1])
+    }
+
+    func snapshot() -> (compose: Fase, preview: Fase, encode: Fase, total: Fase, n: Int) {
+        lock.lock(); defer { lock.unlock() }
+        return (Self.stat(compose), Self.stat(preview), Self.stat(encode),
+                Self.stat(total), compose.count)
+    }
+
+    /// Una línea legible para el log/QA.
+    func line() -> String {
+        let s = snapshot()
+        return String(format: "compose %.1f/%.1f/%.1f · preview %.1f/%.1f · encode %.1f/%.1f/%.1f "
+                      + "· TOTAL %.1f/%.1f/%.1f ms (p50/p95/max, n=%d)",
+                      s.compose.p50, s.compose.p95, s.compose.max,
+                      s.preview.p50, s.preview.p95,
+                      s.encode.p50, s.encode.p95, s.encode.max,
+                      s.total.p50, s.total.p95, s.total.max, s.n)
+    }
+}
+
+/// EL GOVERNOR — la diferencia entre bajar de fps y ROMPERSE.
+///
+/// El 9 ago la grabación no "bajó a 10 fps": se quedó a 30 pedidos entregando
+/// 10, con huecos IRREGULARES de hasta 750 ms. Un talking-head a 15 fps
+/// constantes se ve pobre pero fluido; el mismo material con saltos de tres
+/// cuartos de segundo se ve ROTO, y encima no hay interpolación que lo salve.
+///
+/// Pedir 30 cuando la máquina da 10 no consigue 30: consigue 10 feos. Este
+/// comparador mide la cadencia REAL y baja el objetivo a un escalón que la Mac
+/// sí pueda sostener, de forma regular. Cuando el sistema se despeja, sube solo
+/// (despacio y con histéresis: nadie quiere que oscile a mitad de una toma).
+final class RenderGovernor: @unchecked Sendable {
+    private let lock = NSLock()
+    private var windowStart: Double = 0
+    private var framesInWindow = 0
+    private var badWindows = 0
+    private var goodWindows = 0
+    private var current = 0
+    private(set) var steppedDownAt: Double?
+    /// Ventanas buenas necesarias para SUBIR un escalón. Crece cuando una
+    /// subida fracasa: sin esto el governor oscila (medido el 9 ago con
+    /// `--chokems 60`: bajó 30→24→19→15, aguantó 10 s, subió a 19, no alcanzó,
+    /// y habría vuelto a bajar en bucle). Una cadencia que sube y baja cada 15
+    /// segundos es exactamente el video irregular que vinimos a evitar: más
+    /// vale quedarse un escalón por debajo que ir a tirones.
+    private var upRequirement = 5
+    private var lastUpAt: Double?
+
+    /// Ventana de evaluación. 2 s es suficiente para distinguir una caída real
+    /// de un tropiezo, y bastante más rápido que el latido de 15 s (que el 9 ago
+    /// vio el colapso pero no podía hacer nada con él).
+    private let window: Double = 2.0
+
+    func reset(target: Int, now: Double) {
+        lock.lock()
+        current = target; windowStart = now; framesInWindow = 0
+        badWindows = 0; goodWindows = 0; steppedDownAt = nil
+        upRequirement = 5; lastUpAt = nil
+        floorFailingSince = nil; floorAchieved = 0; everSteppedDown = false
+        lock.unlock()
+    }
+
+    /// Cuánto lleva fallando el piso, en segundos. 0 = no está fallando.
+    func floorFailingFor(now: Double) -> Double {
+        lock.lock(); defer { lock.unlock() }
+        guard let desde = floorFailingSince else { return 0 }
+        return now - desde
+    }
+
+    var effective: Int { lock.lock(); defer { lock.unlock() }; return current }
+
+    /// PISO DURO DE CADENCIA — orden de Daniel, 17 ago 2026:
+    ///
+    ///   "Queda prohibido bajar los frames por segundo. Prefiero que antes de eso
+    ///    se pause y me diga algo, pero mantener estables los frames. 30 frames,
+    ///    mínimo 24, pero no menos. Prefiero que se pause si es así y yo arreglar
+    ///    otros detalles."
+    ///
+    /// Cambia la filosofía del governor: antes degradaba con gracia hasta 12 fps
+    /// (30→24→19→15) y el archivo salía a 30 rellenando con frames repetidos, lo
+    /// cual se ve como tirones. La toma del 15 ago se quedó en 15/30 siete minutos
+    /// y salió con 12.8 fps de movimiento real. Eso ya no se permite.
+    ///
+    /// Ahora hay UN escalón de gracia y punto. Si no aguanta el piso, no se
+    /// degrada más: se DETIENE la toma y se le dice (ver `cadenceGuard` en
+    /// StudioRecorder — mismo patrón que el guard de voz, que detiene a los 20 s
+    /// sin micrófono en vez de grabar media hora en silencio).
+    static let hardFloorFPS = 24
+    private func ladder(_ target: Int) -> [Int] {
+        // Nunca por debajo de 24 absolutos ni del 80% del objetivo, y nunca por
+        // encima del objetivo (si pide 20, el piso ES 20: no hay escalón).
+        let piso = max(min(target, Self.hardFloorFPS), Int(Double(target) * 0.8))
+        return piso >= target ? [target] : [target, piso]
+    }
+
+    /// Desde cuándo el governor está EN EL PISO y aun así no alcanza. `nil` = va
+    /// bien o todavía tiene escalón de gracia. Es la señal que el guard de
+    /// cadencia convierte en "detén la toma y dile".
+    private(set) var floorFailingSince: Double?
+    /// A cuántos fps se está quedando corto cuando falla el piso (para el mensaje).
+    private(set) var floorAchieved: Double = 0
+    /// ¿El governor bajó UN escalón en algún momento de esta toma?
+    ///
+    /// No es lo mismo que `effective < target`, que es un valor INSTANTÁNEO. El QA
+    /// preguntaba lo segundo y por eso reprobaba con "el governor NUNCA bajó — eso
+    /// sí es un bug" en tomas donde sí había bajado y ya se había recuperado a 30
+    /// antes del stop. Un gate que confunde "se recuperó" con "nunca actuó" acusa
+    /// al código de un bug que no existe.
+    private(set) var everSteppedDown = false
+
+    /// Un frame compuesto. Devuelve el nuevo fps si hay que re-agendar.
+    func frameComposed(now: Double, target: Int) -> Int? {
+        lock.lock(); defer { lock.unlock() }
+        if current == 0 { current = target; windowStart = now }
+        framesInWindow += 1
+        guard now - windowStart >= window else { return nil }
+        let achieved = Double(framesInWindow) / (now - windowStart)
+        framesInWindow = 0
+        windowStart = now
+        let steps = ladder(target)
+        let idx = steps.firstIndex(of: current) ?? 0
+
+        // EN EL PISO la vara es más estricta, y se evalúa aparte.
+        //
+        // El 0.85 de abajo existe para decidir si vale la pena BAJAR un escalón, y
+        // con el piso en 24 eso daría por bueno cualquier cosa arriba de 20.4 fps.
+        // La orden es "mínimo 24, pero no menos", así que en el piso la vara es
+        // 0.93 (≈22.3 fps): margen para el ruido de medir en ventanas de 2 s, no
+        // para degradarse de a poquito por debajo de lo pactado.
+        let enElPiso = idx + 1 >= steps.count
+        if enElPiso {
+            if achieved < Double(current) * 0.93 {
+                if floorFailingSince == nil { floorFailingSince = now }
+                floorAchieved = achieved
+            } else {
+                floorFailingSince = nil
+            }
+        }
+
+        // ¿La Mac está entregando lo que le pedimos?
+        if achieved < Double(current) * 0.85 {
+            badWindows += 1; goodWindows = 0
+            if badWindows >= 2, idx + 1 < steps.count {
+                // ¿Venimos de una subida reciente? Entonces esa subida fue un
+                // error de juicio: el techo real está aquí abajo. Se encarece
+                // el próximo intento (backoff) hasta un tope de ~6 minutos.
+                if let up = lastUpAt, now - up < 25 {
+                    upRequirement = min(upRequirement * 3, 180)
+                }
+                current = steps[idx + 1]
+                badWindows = 0
+                steppedDownAt = now
+                everSteppedDown = true
+                return current
+            }
+        } else if achieved >= Double(current) * 0.97 {
+            goodWindows += 1; badWindows = 0
+            // Subir cuesta MÁS que bajar, y cada vez más si ya falló antes.
+            if goodWindows >= upRequirement, idx > 0 {
+                current = steps[idx - 1]
+                goodWindows = 0
+                lastUpAt = now
+                return current
+            }
+        } else {
+            badWindows = 0; goodWindows = 0
+        }
+        return nil
+    }
+}
+
+/// EL RELOJ DEL PROGRAMA — el que decide en qué instante VIVE cada frame
+/// compuesto dentro del archivo.
+///
+/// Hasta el 9 ago el frame se estampaba con `CMClockGetTime(hostClock)` al
+/// TERMINAR de componer. Dos errores en una línea:
+///
+///  1. La imagen que lleva dentro es más vieja que ese instante — la cámara
+///     tardó en entregarla (transporte UVC) y el compositor tardó en pintarla.
+///     El audio, en cambio, sí se escribe con su PTS real. Resultado: los
+///     labios van detrás de la voz, y se ve justo cuando la cara es grande.
+///  2. Al estampar DESPUÉS de componer, cuanto más se atrasa la Mac, más crece
+///     el desfase — el error empeora exactamente cuando ya estabas sufriendo.
+///
+/// Este reloj corrige las dos: toma el instante de ANTES de componer y le resta
+/// la latencia MEDIDA de la fuente crítica. Y lo hace despacio (`maxSlew`), para
+/// que un cambio de latencia no produzca un salto audible, con monotonicidad
+/// estricta porque `AVAssetWriter` rechaza un PTS que no avance.
+final class ProgramClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var applied: Double = 0
+    private var anchored = false
+    private var lastPTS = CMTime.invalid
+
+    /// Cuánto puede moverse la corrección por frame. 2 ms a 30 fps = 60 ms/s:
+    /// alcanza una latencia típica de cámara en un par de segundos sin que se
+    /// oiga el ajuste. Un salto de golpe sería un tirón en el audio.
+    private let maxSlew: Double = 0.002
+
+    /// Empieza una grabación: la PRIMERA corrección se ancla de golpe (el motor
+    /// lleva rato midiendo antes del REC, así que el valor ya es bueno) y de ahí
+    /// en adelante solo se desliza.
+    func begin() {
+        lock.lock(); applied = 0; anchored = false; lastPTS = .invalid; lock.unlock()
+    }
+
+    /// `hostNow` DEBE tomarse antes de componer. `target` es la latencia medida
+    /// de la fuente crítica (nil = no hay medición fiable ⇒ no se corrige).
+    func stamp(hostNow: CMTime, target: Double?) -> CMTime {
+        lock.lock(); defer { lock.unlock() }
+        if let target {
+            if !anchored {
+                applied = target
+                anchored = true
+            } else {
+                let delta = target - applied
+                applied += max(-maxSlew, min(maxSlew, delta))
+            }
+        }
+        var pts = CMTimeSubtract(hostNow, CMTime(seconds: applied, preferredTimescale: 1_000_000_000))
+        // Monotonicidad ESTRICTA: el writer descarta en silencio un frame cuyo
+        // PTS no avanza, y ese descarte no aparece en ningún contador.
+        if lastPTS.isValid, CMTimeCompare(pts, lastPTS) <= 0 {
+            pts = CMTimeAdd(lastPTS, CMTime(value: 1, timescale: 1000))
+        }
+        lastPTS = pts
+        return pts
+    }
+
+    /// Corrección que se está aplicando ahora mismo, en ms (para el sensor).
+    var appliedMs: Double {
+        lock.lock(); defer { lock.unlock() }; return applied * 1000
     }
 }
 
@@ -994,12 +2051,62 @@ final class LatestFrameStore: @unchecked Sendable {
     private var store: [StudioSourceKind: CVPixelBuffer] = [:]
     private var stamps: [StudioSourceKind: Double] = [:]
     private var counts: [StudioSourceKind: Int] = [:]
-    func set(_ pb: CVPixelBuffer, for kind: StudioSourceKind) {
+
+    // MARK: - LATENCIA DE CADA FUENTE (la cura del lip-sync)
+    //
+    // Un frame de cámara NO nace cuando lo recibimos: nace cuando el sensor lo
+    // capturó, y llega tarde por el transporte (la ZV-E10 por UVC es de las
+    // peores en esto). El audio, en cambio, se escribe con su PTS REAL de
+    // captura. Estampar el video con "ahora" y el audio con "cuando de verdad
+    // pasó" es exactamente la asimetría que desincroniza los labios — y se
+    // notaba justo en la escena "Mi cámara solo", donde la cara ocupa todo.
+    //
+    // Aquí se MIDE esa deuda (hostAhora − ptsDelFrame) por fuente. El render
+    // loop la resta al estampar. No se supone un valor: se mide el que sea, y
+    // si la cámara cambia el suyo, el número lo sigue.
+    private var latencySamples: [StudioSourceKind: [Double]] = [:]
+    private var latencyMedian: [StudioSourceKind: Double] = [:]
+
+    /// Cota de cordura: por encima de esto la muestra se descarta como reloj de
+    /// otro dominio, no como latencia. Sin este techo, un PTS en otra base de
+    /// tiempo metería un desfase absurdo y el archivo saldría peor que antes.
+    static let maxPlausibleLatency: Double = 0.75
+
+    func set(_ pb: CVPixelBuffer, for kind: StudioSourceKind, pts: CMTime? = nil) {
+        let now = CACurrentMediaTime()
         lock.lock()
         store[kind] = pb
-        stamps[kind] = CACurrentMediaTime()
+        stamps[kind] = now
         counts[kind] = (counts[kind] ?? 0) + 1
+        if let pts, pts.isValid, pts.isNumeric {
+            let lat = now - CMTimeGetSeconds(pts)
+            if lat >= 0, lat <= Self.maxPlausibleLatency {
+                var s = latencySamples[kind] ?? []
+                s.append(lat)
+                if s.count > 90 { s.removeFirst(s.count - 90) }
+                latencySamples[kind] = s
+                let sorted = s.sorted()
+                latencyMedian[kind] = sorted[sorted.count / 2]
+            }
+        }
         lock.unlock()
+    }
+
+    /// Latencia MEDIANA medida de esa fuente, en segundos. `nil` = todavía no
+    /// hay muestras válidas (o los relojes no son comparables) ⇒ el llamador no
+    /// debe corregir nada: mejor sin corregir que corrigiendo a ciegas.
+    func latency(_ kind: StudioSourceKind) -> Double? {
+        lock.lock(); defer { lock.unlock() }
+        guard let m = latencyMedian[kind], (latencySamples[kind]?.count ?? 0) >= 8 else { return nil }
+        return m
+    }
+
+    /// Muestras acumuladas de latencia (para el QA y el heartbeat).
+    func latencyReport() -> [(StudioSourceKind, Double, Int)] {
+        lock.lock(); defer { lock.unlock() }
+        return latencyMedian.compactMap { k, v in
+            (k, v, latencySamples[k]?.count ?? 0)
+        }
     }
     func get(_ kind: StudioSourceKind) -> CVPixelBuffer? {
         lock.lock(); defer { lock.unlock() }; return store[kind]
@@ -1121,6 +2228,36 @@ enum AudioMath {
     nonisolated(unsafe) static var traceAudio = false      // --studiobench
     nonisolated(unsafe) private static var traceN: [String: Int] = [:]
     private static let describeLock = NSLock()
+
+    // MARK: - latencia del AUDIO (la otra mitad de la sincronía)
+
+    /// El audio se escribe con su PTS real, así que su latencia no se corrige —
+    /// pero SÍ hay que conocerla: el desfase que se ve en pantalla es la
+    /// DIFERENCIA entre la de la cámara y la del mic, no la de la cámara sola.
+    /// Sin este número, "compensar la cámara" sería media medición.
+    nonisolated(unsafe) private static var audioLatSamples: [Double] = []
+    nonisolated(unsafe) private static var audioLatMedian: Double?
+    private static let audioLatLock = NSLock()
+
+    static func noteLatency(_ sb: CMSampleBuffer) {
+        let pts = CMSampleBufferGetPresentationTimeStamp(sb)
+        guard pts.isValid, pts.isNumeric else { return }
+        let lat = CACurrentMediaTime() - CMTimeGetSeconds(pts)
+        guard lat >= 0, lat <= LatestFrameStore.maxPlausibleLatency else { return }
+        audioLatLock.lock()
+        audioLatSamples.append(lat)
+        if audioLatSamples.count > 90 { audioLatSamples.removeFirst(audioLatSamples.count - 90) }
+        let s = audioLatSamples.sorted()
+        audioLatMedian = s[s.count / 2]
+        audioLatLock.unlock()
+    }
+
+    /// Latencia mediana del mic en ms (nil = sin muestras suficientes).
+    static var lastLatencyMs: Double? {
+        audioLatLock.lock(); defer { audioLatLock.unlock() }
+        guard audioLatSamples.count >= 8, let m = audioLatMedian else { return nil }
+        return m * 1000
+    }
 
     /// Traza periódica (solo en bench): la foto de un buffer CADA ~2s. El primer
     /// buffer siempre sale en silencio (arranque de la sesión) y por eso no

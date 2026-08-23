@@ -77,6 +77,27 @@ rm -rf /Applications/SFCast.app && cp -R dist/SFCast.app /Applications/   # inst
 ./infra/deploy.sh               # sube el worker al VPS y reinicia el servicio
 ```
 
+## URL scheme `sfcast://` (18 ago 2026)
+
+`sfcast://rodaje` (alias `//studio`) abre el Estudio a **pantalla completa en el
+monitor IZQUIERDO** (el de menor `minX` en el arreglo — pedido de Daniel: el
+rodaje va en el izquierdo) **con el drawer "El Set" abierto**. Handler en
+`main.swift` (`applicationWillFinishLaunching` + kAEGetURL, registrado en WILL
+para que llegue aunque LaunchServices arranque la app por la URL); fullscreen en
+`StudioController.enterFullScreen()`. Consumidor: el MODO RODAJE (F4 del Logi) —
+`business-os/entorno-fisico/modo-rodaje.sh`.
+
+**El drawer "El Set"** (`SetPanelDrawer`, 18 ago): el panel del estudio físico
+(`entorno-fisico/panel_server.py`, :8088) embebido como WKWebView a la derecha
+del Estudio — luces/Pixoo/cámara sin salir de pantalla completa, también
+grabando. Toggle: botón 💡 en la barra. El panel web sigue siendo la ÚNICA
+implementación (esto es espejo, no copia); requiere `NSAllowsLocalNetworking`
+en Info.plist y que el servicio :8088 esté arriba (modo-rodaje.sh lo garantiza).
+Trae **resizer** (`SetResizeHandle`, 300-560px) y MEMORIA: ancho y
+abierto/cerrado persisten en UserDefaults (`studio.setPanelWidth` /
+`studio.setPanelOpen`); el acordeón interno del panel persiste en su propio
+localStorage. `sfcast://rodaje` fuerza el drawer abierto.
+
 ## Modo Estudio (v2.5, 25 jul 2026)
 
 Estudio multi-escena estilo OBS/piel Screen Studio, ADITIVO sobre el Loom:
@@ -96,13 +117,32 @@ open -W /Applications/SFCast.app --args --studiotest 8                 # E2E com
 open -W /Applications/SFCast.app --args --studiobench 45               # PESO por archivo + mic + salud
 open -W /Applications/SFCast.app --args --studiobench 30 --killstream  # mata el stream: prueba la recuperación
 open -W /Applications/SFCast.app --args --glowtest                     # aro neón: PNGs + costo por frame
+open -W /Applications/SFCast.app --args --mirrortest 6                 # ESPEJO: invisibilidad, alineación, arrastre, tamaños, sensor, costo
+open /Applications/SFCast.app --args --mirrorlook 16                   # ESPEJO capturable, para revisar el diseño con screenshot
 ```
+
+`--mirrortest` imprime en `~/Library/Logs/sfcast.log` (con `open` no hay stdout).
 
 Los tres bugs de la sesión real del 25 jul (mixer clavado, 15x el peso de OBS,
 pantalla congelada 50 min) y sus raíces medidas están en `DECISIONS.md` §v2.4.
 Resumen operativo: el programa sale a **~0.8 Mbps** (OBS hace 0.93), los RAW van
 **apagados por default** (nada los consumía) y hay watchdog del stream +
 guardias de disco con auto-stop.
+
+## Espejo (v2.9, 9 ago 2026)
+
+La burbuja del programa **proyectada sobre la pantalla que se captura**, para ver
+—y poder mover— lo que estás tapando. `StudioMirror.swift`: NSPanel
+`sharingType = .none` (invisible en el video), colocado por la **inversa de la
+colocación de la fuente Pantalla** (`MirrorGeometry`), video colgado de la sesión
+de cámara que YA tiene el Estudio. Arrastrarlo mueve el item de escena en vivo.
+Se prende en el **clic derecho de la fuente Cámara** → "Espejo en la pantalla"
+(ahí viven también rayos X, fijar y los tamaños); los chips de la burbuja son
+los del Loom (`CameraBubble.Size`). Sin anillo: solo halo, topado contra el
+lienzo para que a tamaño completo no se lea como banda. Sensor de oclusión
+(`OcclusionProbe`) → aro punteado ámbar. Decisiones y el bug que encontró el QA
+(esconder el panel estrangulaba la sesión de cámara: 60 → 0 fps):
+`DECISIONS.md` §v2.9.
 
 ## Invariantes que NO se tocan
 
@@ -137,7 +177,17 @@ guardias de disco con auto-stop.
      la ventana entera (v2.8: el vúmetro a 15 Hz saturó main con layout de
      SwiftUI y el preview cayó a 3 fps con cámara y compositor sanos). Alta
      frecuencia = CALayer directo. Y toda compuerta que TIRA trabajo para
-     degradar con gracia lleva contador visible (`flowCounts()`).
+     degradar con gracia lleva contador visible (`flowCounts()`). Los arrastres
+     (preview y espejo) van por `setItemRectLive` → `sceneBox`; `config` se
+     escribe UNA vez al soltar.
+   - El tramo **DESPUÉS** se mide igual que el durante (v2.9). Apagar el espejo
+     estrangulaba la sesión de cámara (60 → 0 fps) y el QA no lo veía porque
+     medía "antes" y "con espejo", los dos perfectos. Todo lo que se prende y se
+     apaga tiene que **devolver el sistema a su línea base**, y eso se afirma.
+   - Un sensor que mide sobre imagen reescalada **no puede inventar la señal
+     que busca** (v2.9): reducir con escala afín cruda y amplificar el filtro
+     hacía que tres zonas distintas de la pantalla midieran lo mismo. Lanczos,
+     intensidad por defecto, y el umbral se fija del RANGO medido.
 6. **Destino local vs VPS** (toggle del micropanel, `autoUpload` en settings.json, v1.7):
    ON = sube al VPS al terminar (lo de siempre); OFF = SOLO guarda en local, sin subir.
    Se empuja luego con "↑ subir" del Historial. El push posterior NO comprime en sitio

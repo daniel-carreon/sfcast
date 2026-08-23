@@ -36,6 +36,25 @@ let studioBenchSeconds: Int? = {
     return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 60
 }()
 
+/// QA DEL ESPEJO (`--mirrortest N`): prende el espejo sobre la config REAL y
+/// mide lo que no se puede suponer — que el panel NO se cuela en la captura
+/// (si se colara, la cara saldría duplicada en el video), que cae donde el
+/// programa dice, que el arrastre mueve el rect de escena y persiste, y cuánto
+/// cuesta en fps. Ver `StudioController.runMirrorTest`.
+let mirrorTestSeconds: Int? = {
+    guard let i = cliArgs.firstIndex(of: "--mirrortest") else { return nil }
+    return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 6
+}()
+
+/// QA VISUAL del espejo (`--mirrorlook N`): lo muestra N segundos CAPTURABLE
+/// (y solo en este modo) para poder revisar el diseño con un screenshot,
+/// paseándolo por los cuatro tamaños del Loom. Sin esto no hay forma de MIRAR
+/// el espejo: por diseño es invisible a cualquier captura.
+let mirrorLookSeconds: Int? = {
+    guard let i = cliArgs.firstIndex(of: "--mirrorlook") else { return nil }
+    return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 12
+}()
+
 /// QA del compresor (`--compresstest <dir>`): corre Transcoder sobre una COPIA
 /// del directorio dado y reporta antes/después. Existe porque comprimir es lo
 /// único del flujo que toca el MP4 en sitio: quiero poder probar el camino real
@@ -56,6 +75,49 @@ if let i = cliArgs.firstIndex(of: "--compresstest"), i + 1 < cliArgs.count {
         sem.signal()
     }
     sem.wait()
+    exit(0)
+}
+
+/// QA VISUAL del contador de marcas (`--hudlook N`): lo muestra N segundos y
+/// CAPTURABLE (solo en este modo), subiendo los contadores, para poder revisar
+/// el diseño con un screenshot. Sin esto no hay forma de mirarlo: por diseño es
+/// invisible a cualquier captura.
+let hudLookSeconds: Int? = {
+    guard let i = cliArgs.firstIndex(of: "--hudlook") else { return nil }
+    return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 10
+}()
+
+/// QA DEL ARCHIVO (`--rectest N [--chokems M]`): graba de verdad y verifica el
+/// MP4 — pistas alineadas, cadencia, y nada perdido en silencio.
+let recTestSeconds: Int? = {
+    guard let i = cliArgs.firstIndex(of: "--rectest") else { return nil }
+    return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 12
+}()
+
+/// QA DE SINCRONÍA (`--synctest N`): mide la latencia real de cámara, pantalla
+/// y mic contra el reloj del host. Es el número que decide cuánto compensa el
+/// `ProgramClock` — y el que no se pudo sacar del archivo por correlación.
+let syncTestSeconds: Int? = {
+    guard let i = cliArgs.firstIndex(of: "--synctest") else { return nil }
+    return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 10
+}()
+
+/// QA DE COSTO DEL COMPOSITOR (`--compbench [N]`): headless, sin TCC, sin
+/// grabar. Mide cuántos ms cuesta componer UN frame en esta Mac a cada tamaño
+/// de lienzo, con las escenas reales. Es el número que decide el default del
+/// lienzo: hasta hoy se elegía "nativa" sin saber que el presupuesto son 33 ms.
+/// SOAK (`--soak <minutos>`): resistencia headless con la escena compuesta real.
+/// No depende de TCC, así que puede correr donde el permiso de pantalla no está.
+if let i = cliArgs.firstIndex(of: "--soak") {
+    let mins = (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 30
+    StudioCompBench.soak(minutes: mins)
+    exit(0)
+}
+
+if cliArgs.contains("--compbench") {
+    let i = cliArgs.firstIndex(of: "--compbench")!
+    let n = (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 90
+    StudioCompBench.run(iterations: n)
     exit(0)
 }
 
@@ -138,11 +200,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.paneltest = paneltest
     }
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // URL scheme sfcast:// — la puerta programática (Modo Rodaje / F4 del
+        // Logi). Se registra en WILL: si LaunchServices arranca la app por la
+        // URL, el evento llega antes de DidFinish.
+        NSAppleEventManager.shared().setEventHandler(
+            self, andSelector: #selector(handleURLEvent(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL))
+    }
+
+    @objc private func handleURLEvent(_ event: NSAppleEventDescriptor,
+                                      withReplyEvent reply: NSAppleEventDescriptor) {
+        guard let s = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
+              let url = URL(string: s), url.scheme == "sfcast" else { return }
+        switch url.host {
+        case "rodaje", "studio":
+            // El Estudio al frente y a pantalla completa, con EL SET a la
+            // vista: el modo rodaje completo en una sola pantalla.
+            Task { @MainActor in
+                StudioController.shared.open()
+                StudioController.shared.showSetPanel = true
+                StudioController.shared.enterFullScreen()
+            }
+        default:
+            Log.info("URL sfcast:// sin verbo conocido: \(s)")
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusBar.setup()
         Log.info("SFCast arriba (demo=\(demo.map(String.init) ?? "no") selftest=\(selftest.map(String.init) ?? "no"))")
         if cliArgs.contains("--glowtest") {
             Task { @MainActor in await StudioController.shared.runGlowTest() }
+        } else if let seconds = mirrorLookSeconds {
+            Task { @MainActor in await StudioController.shared.runMirrorLook(seconds: seconds) }
+        } else if let seconds = mirrorTestSeconds {
+            Task { @MainActor in await StudioController.shared.runMirrorTest(seconds: seconds) }
+        } else if let seconds = hudLookSeconds {
+            Task { @MainActor in
+                let hud = MarkerHUD()
+                hud.show()
+                var c = 0, b = 0
+                for i in 0..<seconds {
+                    try? await Task.sleep(nanoseconds: 700_000_000)
+                    if i % 3 == 2 { b += 1; hud.update(cortes: c, buenos: b, pulso: "bueno") }
+                    else { c += 1; hud.update(cortes: c, buenos: b, pulso: "retoma") }
+                }
+                hud.snapshot(to: "/tmp/sfcast-hud.png")
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                hud.hide()
+                exit(0)
+            }
+        } else if let seconds = recTestSeconds {
+            Task { @MainActor in await StudioController.shared.runRecTest(seconds: seconds) }
+        } else if let seconds = syncTestSeconds {
+            Task { @MainActor in await StudioController.shared.runSyncTest(seconds: seconds) }
         } else if let seconds = studioBenchSeconds {
             Task { @MainActor in await StudioController.shared.runBench(seconds: seconds) }
         } else if let seconds = studioTestSeconds {

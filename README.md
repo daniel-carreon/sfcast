@@ -134,6 +134,33 @@ liga al cdhash del binario. Cámara y micrófono NO se revocan porque la firma
   como el pill). Escenas en `~/Library/Application Support/SFCast/scenes.json`.
 - Grabación Loom y Estudio son excluyentes (guard cruzado con aviso).
 
+### Espejo (v2.9 — ver qué estás tapando, y moverlo desde ahí)
+
+> **Clic derecho en la fuente Cámara** → «Espejo en la pantalla».
+
+En el Estudio la cámara no toca la pantalla física (la pega el compositor), así
+que la burbuja te tapa el texto y no te enteras. El espejo proyecta esa burbuja
+**sobre la pantalla que se está grabando**, en su posición, tamaño, forma y aro
+exactos. Es **invisible en el video** (`sharingType = .none`, medido en cada
+corrida de `--mirrortest`: fuga neta 0.0007 sobre 1.0).
+
+- **Arrástrala en la pantalla** y el programa la sigue en el mismo frame (y al
+  revés: si la mueves en el preview del Estudio, el espejo va detrás).
+- **Al hover** salen los chips de tamaño — los cuatro del Loom (S · M · L ·
+  completo). Clic derecho: el mismo menú.
+- **Aviso de oclusión**: si debajo de la burbuja hay contenido de verdad, sale
+  un **aro punteado ámbar**, y el punto de la fila Cámara (panel Fuentes) se
+  pone ámbar.
+- **Rayos X** (mismo menú): baja la burbuja al 18% para ver qué hay debajo.
+  **Fijar**: deja de recibir clics, para que no te coma la esquina en plena
+  toma; se suelta desde el mismo menú.
+- **Sin borde, solo halo**: el aro definido se retiró de las dos cámaras (la del
+  programa y la del espejo) a pedido de Daniel. El halo se topa contra el
+  lienzo, así que a tamaño completo no crece hasta leerse como una banda.
+- Se apaga solo, diciendo por qué, cuando la escena no lo admite ("aquí la
+  cámara no tapa la pantalla" en Lado a lado, "esta escena no tiene cámara" en
+  Completa). El toggle vive en `scenes.json` (`mirrorEnabled`) y se recuerda.
+
 **Regalable:** el Estudio no toca el VPS ni credenciales. Para regalar el build:
 `./scripts/build-app.sh` → compartir `dist/SFCast.app` (arrastrar a /Applications).
 El tercero aprueba cámara/mic/pantalla en su primer uso; si no quiere el VPS,
@@ -245,7 +272,32 @@ data.json con el transcript). Dile a Levy:
 /Applications/SFCast.app/Contents/MacOS/SFCast --paneltest 8      # muestra el pill sin grabar
 /Applications/SFCast.app/Contents/MacOS/SFCast --compresstest ~/Movies/SFCast/{id}   # compresor sobre una COPIA
 open -W /Applications/SFCast.app --args --studiotest 8            # QA del Modo Estudio E2E
+open -W /Applications/SFCast.app --args --rectest 14                 # graba y VERIFICA el MP4 (pistas alineadas, cadencia, nada perdido)
+open -W /Applications/SFCast.app --args --rectest 22 --chokems 60    # ahoga el loop a propósito → ejerce el governor
+open -W /Applications/SFCast.app --args --rectest 24 --failstream    # mata el reenganche de pantalla → ¿sobrevive la toma? ¿avisa?
+open -W /Applications/SFCast.app --args --synctest 12                # latencia REAL de cámara/pantalla/mic
+./.build/debug/SFCast --compbench 60                                 # costo y RAM por lienzo (headless, sin TCC)
+./.build/debug/SFCast --soak 40                                      # RESISTENCIA: 40 min con la escena compuesta, headless
 ```
+
+**`--soak` es la prueba de duración que no depende de permisos.** Las dos pruebas
+largas con la app real tienen un hueco cada una: una tuvo la escena compuesta pero
+el permiso de pantalla se cayó a mitad, y la otra corre con cámara sola porque ese
+permiso, tras un rebuild, necesita un gesto humano. `--soak` corre el pipeline
+entero (timer + compose + writer + CadenceKeeper + ProgramClock) con pantalla 4K y
+burbuja sintéticas, todo el tiempo que se le pida, y da veredicto `SOAK_OK/FAIL`
+(fps ≥ 29 · repetidos < 15% · cero drops · peor ventana de 20 s ≥ 27 fps).
+Puede correr **en paralelo** con una grabación real: dos pipelines a la vez es, de
+paso, una buena prueba de estrés.
+
+**`--rectest` es el gate del archivo (v3.0).** Verifica contra el MP4 —no contra la
+intención— las tres cosas que el 9 ago salieron mal y nadie vio hasta el día
+siguiente: que las dos pistas arrancan en el mismo instante (antes: video 0.000,
+audio 0.152 en TODAS las grabaciones), que la cadencia se sostiene o baja pareja, y
+que nada se pierde en silencio. Con `--chokems N` se ahoga el render loop a propósito:
+un mecanismo de recuperación que nunca se disparó no es un fix, es una intención.
+`--synctest` y `--compbench` salen al LOG (`~/Library/Logs/sfcast.log`) porque una app
+lanzada con `open` no tiene stdout.
 
 **OJO --studiotest:** lánzalo con `open` (launchd), no con el binario directo —
 desde terminal el TCC se atribuye a la TERMINAL y pantalla/cámara salen "sin
@@ -254,6 +306,63 @@ señal" (graba solo el patrón de prueba, que es el fallback diseñado). Deja en
 por escena + PNG de la ventana. Restaura `scenes.json` al salir.
 
 ---
+
+## 9b. MARCADORES EN VIVO (v3.2) — lo que sabes al grabar, para quien edita
+
+Mientras grabas, con la mano izquierda y sin mirar:
+
+| Tecla | Significa |
+|---|---|
+| **⌥C** | *"la regué, **C**orta esto"* — tira la toma que ACABA aquí |
+| **⌥X** | ★ *"esto estuvo bueno"* — candidato a highlight / cold open |
+| **⌥Z** | deshacer la última marca (te equivocaste al marcar) |
+
+La mnemónica no es un detalle: esto se usa **bajo presión, hablando a cámara**.
+Si hay que pensar cuál era la tecla, no se usa. (Primera versión: ⌘⇧X/⌘⇧M —
+Daniel: *"para ambos requiero dos manos, no lo siento práctico"*. Segunda: ⌥X
+para cortar — *"X no entiendo qué hace"*. Las dos veces tenía razón. ⌥X acabó
+siendo la ESTRELLA: cuando la marca dejó de llamarse 'bueno' y pasó a ser un
+icono, la tecla ya no necesitaba mnemónica de palabra, le bastó ser vecina de C.)
+
+Van a `manifest.json` (`markers`) y el editor los lee con
+`edicion-de-video/scripts/sfcast_manifest.py`. **Acuse: el contador de la esquina superior derecha** de la pantalla que grabas
+— **✂︎ N** en ámbar (cortes) y **★ N** en verde (buenos), lado a lado. Es ESTADO,
+no evento: mientras hablas necesitas saber cuántas llevas de cada una, no que
+algo parpadee y se vaya (el destello del aro fue la v1; Daniel: *"el aro no me
+convence… yo puedo ver ambas cosas"*). Lleva `sharingType = .none` e ignora el
+ratón: lo ves tú, no sale en el video y jamás te roba un clic. Para revisar su
+diseño: `--hudlook` (único modo donde es capturable).
+
+⚠️ **Solo están vivos MIENTRAS SE GRABA.** Un hotkey global se come la tecla, y
+⌥C escribe `ç` y ⌥X escribe `≈`: dejarlos puestos siempre te quitaría esos
+caracteres en todas tus apps a cambio de nada. Se registran al dar REC y se
+sueltan al detener.
+
+⚠️ **Pulsa cuando te des cuenta, no intentes ser preciso.** Se guarda el instante
+de la pulsación sabiendo que un humano reacciona 1-2 s tarde; el editor tiene el
+transcript con tiempos por palabra y encuentra la frontera de la frase hacia
+atrás. Tú pones la intención, él la precisión.
+
+## 9c. GUARD DE VOZ (v3.3) — la app NO te deja grabar en silencio
+
+El 10 ago se grabaron **35 minutos sin una sola muestra de voz**. El sensor
+existía: el latido escribió `mic:MUDO` **140 veces**, desde el segundo 15. Nadie
+hizo nada con eso. Ahora:
+
+| Cuándo | Qué pasa |
+|---|---|
+| Al dar REC | **Preflight de voz**: si el mic no entrega, aviso + notificación ANTES de hablar |
+| A los 3 s | Si van 0 muestras: alerta en pantalla + notificación al sistema |
+| A los 20 s | Si siguen 0: **DETIENE la grabación**. A los 20 s no perdiste nada; a los 35 min lo perdiste todo |
+| A los 15 s | Si llegan datos pero el pico es ~0: *"¿está muteado o con la ganancia en cero?"* |
+| A mitad | Si la voz enmudece >8 s: alerta + notificación (la imagen sigue) |
+
+Y el manifest guarda `micDevice` (qué entrada se usó DE VERDAD) y `micSamples`
+— **si es 0, la grabación no tiene voz**, y el editor lo sabe antes de invertir
+una hora en cortarla.
+
+Ejercerlo: `--rectest 90 --mutemic` (corta la entrada de mic a propósito).
+Medido: preflight avisa · alerta a los 3 s · **auto-stop a los 20 de 90 pedidos**.
 
 ## 10. Invariantes (para quien toque el código — Levy incluido)
 
@@ -270,8 +379,42 @@ por escena + PNG de la ventana. Restaura `scenes.json` al salir.
    llena a los ~64KB y bloquea al hijo para siempre. Mismo pie, dos veces ya.
 5. **camOnly graba `.mov`; los otros modos `.mp4`.** Cualquier cosa que itere
    segmentos debe cubrir las dos extensiones.
-6. **La captura no baja de resolución** (nativa × backingScaleFactor): todo
-   bitrate fijo hay que escalarlo por píxeles o el texto sale borroso en Retina.
+6. **La captura no baja de resolución POR SÍ SOLA** (nativa × backingScaleFactor):
+   todo bitrate fijo hay que escalarlo por píxeles o el texto sale borroso en
+   Retina. ⚠️ **Enmienda v3.0:** sí baja cuando el LIENZO es menor — ahí se le pide
+   a SCK la captura ya escalada (`StudioEngine.captureSize`, aspecto preservado,
+   nunca hacia arriba) porque cada buffer pesa lo que pesa la salida: 302 MB de
+   pool a 4K contra 66 MB a 1080p. El bitrate sigue escalándose por píxeles.
+6b. **El programa se estampa con el reloj de ANTES de componer, menos la latencia
+   MEDIDA de la fuente crítica** (`ProgramClock`). Estampar al terminar suma el
+   tiempo de composición al desfase de labios, y lo empeora justo cuando la Mac va
+   mal. Y **las dos pistas arrancan en el mismo instante**: el warmup del audio se
+   mide contra el primer AUDIO, jamás contra el primer video (eso dejaba
+   `audio start_time = 0.152` en todas las grabaciones).
+6d. **El render de la GPU JAMÁS se espera en el hilo de la cadencia** (v3.1).
+   `CIContext.render` es síncrono y la GPU es compartida (WindowServer con dos
+   monitores 4K, el encoder, el preview, el espejo): esperar ahí costaba 22 ms de
+   un presupuesto de 33. Ahora el frame N **lanza** su render (`startTask`) y el
+   N+1 recoge el resultado. Consecuencia obligatoria: **el `hostTime` viaja pegado
+   a su buffer** — el frame que se entrega es del tick anterior y estamparlo con
+   "ahora" reintroduce el desfase de audio. Y al parar o cambiar de lienzo hay que
+   `drainPipeline()`, o queda un buffer del pool viejo retenido para siempre.
+6e. **La cadencia del archivo no depende de que la Mac alcance.** Un
+   `DispatchSourceTimer` no recupera disparos perdidos; `CadenceKeeper` reemite los
+   timestamps que falten con el último contenido (los *lagged frames* de OBS). Un
+   frame repetido y uno que nunca se compuso muestran lo MISMO en pantalla: la
+   diferencia es el contenedor, y 30 fps constantes es lo que el editor quiere.
+   El relleno usa el fps **pedido**, nunca el efectivo del governor.
+6f. **Un sensor sin actuador no es un sensor.** El latido decía `mic:MUDO` 140
+   veces mientras se perdían 35 minutos. Medir y no ACTUAR es la forma más cara
+   de este bug, porque deja la evidencia para el post-mortem y no salva nada.
+   Todo sensor nuevo nace con su alarma, y si el daño es irrecuperable (el
+   audio), con su freno.
+6c. **Lo que puede fallar en silencio se cuenta en el sitio donde falla.** Un
+   `return nil` en el camino caliente es un frame que desaparece del archivo sin
+   aparecer en ningún contador — fue exactamente el bug del 9 ago. Y **ninguna
+   alarma se decide por promedio**: por peor ventana. Un promedio de 45 minutos
+   esconde un colapso de 6.
 7. **Las vistas layer-backed de AppKit tienen las animaciones implícitas
    APAGADAS.** `layer.transform = x` salta. Usa `CABasicAnimation` explícita.
 8. **El pill lleva `sharingType = .none`**: es invisible a CUALQUIER captura,
@@ -286,6 +429,13 @@ por escena + PNG de la ventana. Restaura `scenes.json` al salir.
 
 - **Burbuja quemada** = no editable después. A cambio: link instantáneo.
 - **Modo ventana = sin burbuja** (la burbuja vive en el display, no en la ventana).
+- **El Estudio graba SOLO el display principal** (`CGMainDisplayID`), y no hay
+  selector. Con dos monitores, lo que pongas en el segundo **no sale en el
+  video**. El espejo (v2.9) lo delata de rebote: solo aparece en la pantalla que
+  sí se está grabando.
+- **Si la cámara elegida no está conectada, se cae a otra en silencio** (en el
+  QA del 9 ago: la ZV-E10 apagada → grabó de "OBS Virtual Camera"). El nombre
+  RESUELTO sale en el log al arrancar la sesión y en `--mirrortest`.
 - **Grabación en pausa no sobrevive** al reinicio de la app.
 - **No controlamos el bitrate de captura**: `SCRecordingOutputConfiguration` solo
   expone outputURL, fileType y codec. Bajarlo en origen exigiría re-arquitecturar

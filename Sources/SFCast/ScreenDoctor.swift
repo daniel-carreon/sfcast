@@ -82,6 +82,12 @@ enum ScreenDoctor {
         if await pollGranted(seconds: 150) { offerRelaunch(); return }
 
         // Sin aprobación en la ventana: guía explícita, cero bucles.
+        // Mismo candado que arriba — un modal jamás cae sobre una toma viva.
+        guard !grabandoAhora else {
+            Log.error("Doctor pantalla: sin permiso, pero HAY GRABACIÓN VIVA — "
+                      + "no interrumpo la toma; se lo digo al terminar")
+            return
+        }
         let a = NSAlert()
         a.messageText = "Falta aprobar «Grabación de pantalla»"
         a.informativeText = "Apruébala en Ajustes → Privacidad y seguridad → Grabación de pantalla, y reabre SFCast."
@@ -120,9 +126,28 @@ enum ScreenDoctor {
         }
     }
 
+    /// ¿Hay una grabación viva ahora mismo? Un `NSAlert` es MODAL: bloquea el
+    /// main thread hasta que alguien lo cierre. Si eso pasa mientras Daniel
+    /// habla a cámara, el pill y el preview se congelan y el Detener no
+    /// responde — el peor momento posible para pedirle una decisión.
+    /// (El render loop vive en `renderQueue` y seguiría escribiendo, pero la
+    /// app se ve muerta y el humano no sabe si sigue grabando.)
+    @MainActor
+    private static var grabandoAhora: Bool {
+        StudioController.shared.recorder.isRecording
+            || RecordingController.shared.state != .idle
+    }
+
     /// macOS solo aplica el permiso de pantalla a un proceso NUEVO. Un clic,
     /// jamás automático: si hubiera una grabación viva, Daniel decide.
     private static func offerRelaunch() {
+        // ⛔ Nunca un modal encima de una toma. El permiso ya quedó aprobado:
+        // se aplica al siguiente arranque, y eso puede esperar a que termine.
+        guard !grabandoAhora else {
+            Log.info("Doctor pantalla: permiso aprobado, pero HAY GRABACIÓN VIVA — "
+                     + "no interrumpo la toma; aplica al reabrir")
+            return
+        }
         Log.info("Doctor pantalla: permiso aprobado — ofreciendo reabrir")
         let a = NSAlert()
         a.messageText = "Permiso de pantalla aprobado"

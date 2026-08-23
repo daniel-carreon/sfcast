@@ -16,7 +16,7 @@ enum Theme {
 @MainActor
 final class HubWindowController: NSObject, NSWindowDelegate {
     static let shared = HubWindowController()
-    private var window: NSWindow?
+    fileprivate var window: NSWindow?
 
     func show() {
         if window == nil {
@@ -32,7 +32,9 @@ final class HubWindowController: NSObject, NSWindowDelegate {
             w.isReleasedWhenClosed = false
             w.center()
             w.delegate = self
-            w.contentViewController = NSHostingController(rootView: HubView())
+            // El zoom es de la APP: ⌘+ en el Estudio también agranda esto.
+            let hub = NSHostingView(rootView: HubView())
+            w.contentView = ZoomHost.envolver(hub)
             window = w
         }
         // Con el hub abierto SFCast es una app "de verdad": icono en el Dock,
@@ -402,7 +404,7 @@ private func card(_ title: String, @ViewBuilder content: () -> some View) -> som
 extension HubWindowController {
     func hide() {
         // acceso interno para el botón Grabar (cierra el hub antes del countdown)
-        NSApp.windows.first(where: { $0.contentViewController is NSHostingController<HubView> })?.orderOut(nil)
+        HubWindowController.shared.window?.orderOut(nil)
         NSApp.setActivationPolicy(.accessory)   // sin hub, sin icono en el Dock
     }
 }

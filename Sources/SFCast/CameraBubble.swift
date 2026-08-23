@@ -39,8 +39,8 @@ final class CameraBubble: NSObject {
         case ambar, morado, nada
         var color: NSColor? {
             switch self {
-            case .ambar: return NSColor(calibratedRed: 1.0, green: 0.567, blue: 0.004, alpha: 1)   // #ff9101
-            case .morado: return NSColor(calibratedRed: 0.549, green: 0.153, blue: 0.945, alpha: 1) // #8C27F1
+            case .ambar: return NSColor(srgbRed: 1.0, green: 0.567, blue: 0.004, alpha: 1)   // #ff9101
+            case .morado: return NSColor(srgbRed: 0.549, green: 0.153, blue: 0.945, alpha: 1) // #8C27F1
             case .nada: return nil
             }
         }

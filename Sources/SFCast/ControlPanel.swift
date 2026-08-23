@@ -44,7 +44,7 @@ final class ControlPanel {
 
     var windowNumber: Int { panel?.windowNumber ?? -1 }
 
-    static let mostaza = NSColor(calibratedRed: 1.0, green: 0.567, blue: 0.004, alpha: 1)
+    static let mostaza = NSColor(srgbRed: 1.0, green: 0.567, blue: 0.004, alpha: 1)
 
     // MARK: - ciclo de vida
 
@@ -399,7 +399,7 @@ enum Countdown {
 
         let label = NSTextField(labelWithString: "")
         label.font = .systemFont(ofSize: 120, weight: .bold)
-        label.textColor = NSColor(calibratedRed: 1.0, green: 0.567, blue: 0.004, alpha: 1)
+        label.textColor = NSColor(srgbRed: 1.0, green: 0.567, blue: 0.004, alpha: 1)
         label.alignment = .center
         label.frame = view.bounds
         view.addSubview(label)

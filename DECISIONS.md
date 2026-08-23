@@ -705,3 +705,638 @@ vúmetro publicando.
 - Toda compuerta que TIRA trabajo para degradar con gracia lleva contador, y
   el contador se muestra. Degradar en silencio es cómo el 25 jul grabó 50 min
   congelado y cómo este preview murió de hambre sin decirlo.
+
+---
+
+## v2.9 — El ESPEJO: la burbuja del programa, sobre la pantalla que grabas (9 ago 2026)
+
+**El problema, en las palabras de Daniel:** dos monitores, a punto de grabar un
+video de YouTube, escenas "Burbuja derecha" / "Burbuja izquierda". *"En ocasiones
+mi texto queda por detrás de mi cámara y quiero ser consciente cuando eso pase."*
+
+**Por qué pasaba.** En Modo Estudio la cámara **nunca toca la pantalla física**:
+la pega el compositor sobre el canvas (`Compositor.place`). El modo Loom sí la
+enseña, pero porque allá la burbuja **es** un `NSPanel` real que se quema en el
+video. En el Estudio la pantalla no sabe que la burbuja existe, y con la ventana
+del Estudio en el otro monitor no hay nada que mirar mientras trabajas. Números
+de su setup: burbuja de **412 pt de diámetro** (28.6% del alto) en la esquina
+inferior de un BenQ de 2560×1440 — un cuadrado de ~415 pt comiéndose el texto.
+
+**Lo que se construyó.** Un panel flotante sobre la pantalla capturada, en la
+posición, el tamaño, la forma y el aro EXACTOS de la burbuja del programa. Se
+arrastra con el mouse y el programa la sigue en el mismo frame.
+
+### Las tres decisiones que lo sostienen
+
+1. **`sharingType = .none`, y probado, no supuesto.** Si el panel se colara a la
+   captura saldría la cara **duplicada** (el panel real + la burbuja compuesta
+   encima) — la clase de bug que se descubre viendo la grabación al día
+   siguiente. `--mirrortest` mide el frame de pantalla real con el espejo
+   apagado y prendido. Medido: **fuga neta 0.0007** sobre 1.0.
+   - Con una salvedad que costó una corrida: comparar apagado vs prendido a
+     secas NO sirve, porque el escritorio de abajo está VIVO. En una corrida el
+     movimiento de un chat levantó el promedio 0.051 y el test gritó FUGA sin
+     que nada se hubiera colado. La cura es una **región de control** del mismo
+     tamaño donde el espejo jamás cae: se mide la diferencia de diferencias.
+2. **La geometría es la INVERSA de la colocación de la fuente Pantalla**
+   (`MirrorGeometry`), no una fórmula paralela. De ahí salen gratis los casos
+   raros: en "Lado a lado" la cámara cae FUERA del recuadro de la pantalla y el
+   espejo se apaga solo diciendo *"aquí la cámara no tapa la pantalla"*; en "Mi
+   cámara solo" no hay fuente de pantalla que invertir. Medido: **0.00 px** de
+   error contra la posición del programa, y los tamaños del Loom vuelven
+   exactos (s=180.0/180, m=280.0/280, l=420.0/420, completo=1843.2/1843).
+3. **El video sale de la sesión de cámara que YA tiene el Estudio**
+   (`AVCaptureVideoPreviewLayer` colgado de ella). Ni una sesión nueva
+   (invariante: una sola dueña de cámara/mic), ni un frame extra a main.
+
+### El bug que el QA encontró y que nadie habría visto
+
+Ocultar el espejo con `orderOut` **estrangulaba la sesión de cámara entera**: la
+cámara pasaba de **60 fps a 0** al apagar el espejo, y ese cero se lo come el
+PROGRAMA — cara congelada mientras grabas. Es el patrón del 25 jul otra vez,
+ahora por el lado de la cámara. Un `AVCaptureVideoPreviewLayer` colgado de la
+sesión con su ventana fuera de pantalla no basta con esconderlo: hay que
+**soltar la sesión** (`layer.session = nil`) y desmontar el panel.
+
+**Y la regla que deja:** *el tramo DESPUÉS es tan importante como el durante.*
+El QA medía "antes" y "con espejo", los dos perfectos, y el bug vivía en el
+tercer tramo que no existía. Ahora `MIRRORTEST_FLUJO` mide **antes / con espejo
+/ después** y falla con `LA-CAMARA-NO-VOLVIO` si la cámara no vuelve a su línea
+base. Medido tras el arreglo: 60.0 → 54.6 → 60.0 fps, veredicto `SIN-SECUELAS`.
+
+### El sensor de oclusión (la pregunta original, hecha número)
+
+El espejo hace la oclusión **visible**; el sensor la hace **avisada**. Recorta
+del frame de pantalla el pedazo exacto que la burbuja tapa, lo baja a 360 px,
+mide energía de bordes y prende un **aro punteado ámbar por fuera** del aro real
+(el aro del programa NO se repinta: el espejo tiene que seguir enseñando cómo se
+ve el video, y la alarma debe leerse como UI).
+
+Dos errores de bulto en el primer intento, los dos del mismo tipo — **fabricar
+la señal que se quería medir**:
+- Reducir 825→360 px con una escala afín pelona INVENTA bordes por aliasing.
+- `CIEdges` con `inputIntensity: 4.0` satura y todo lee "lleno de detalle".
+
+Síntoma: tres sitios distintos de la pantalla midiendo 0.2784, 0.2797 y 0.2797
+— un sensor que no distingue nada. Con Lanczos e intensidad 1.0, la rejilla 3×3
+sobre su pantalla real da **0.0000 (escritorio vacío) → 0.3908 (texto denso)**.
+El umbral (**0.100**) se fijó de ese rango, y `--mirrortest` reimprime la
+rejilla en cada corrida para re-calibrarlo con evidencia.
+
+### El arrastre no pasa por `@Published` (v2.8 aplicada, no repetida)
+
+El mouse manda 60-120 eventos por segundo y cada asignación a `config` invalida
+la jerarquía SwiftUI entera. `setItemRectLive` escribe una copia detachada al
+`sceneBox` del compositor y al espejo; `config` se toca UNA vez al soltar. **El
+arrastre del preview del Estudio se migró al mismo camino**: dos arrastres con
+dos verdades habrían sido el siguiente bug.
+
+### Dónde vive cada control (feedback de Daniel a mitad de la construcción)
+
+- **Botón "Espejo"** en la barra del Estudio, junto a los sensores. Clic =
+  prender/apagar; el chevron abre rayos X, fijar/soltar, los cuatro tamaños y la
+  lectura cruda del sensor. Está ahí y no en Fuentes porque no es propiedad de
+  la fuente (eso es el rect, que ya está en Fuentes): es un modo de trabajo.
+- **Rayos X y fijar → en el Estudio**, no en la burbuja: *"el ojo pensaba verlo
+  en el studio, no en el círculo"*. Son decisiones de sesión, se toman una vez.
+- **Sobre la burbuja, solo lo que se hace mirándola: el tamaño.** Y en el idioma
+  que ya existe — se reusa `CameraBubble.Size` del Loom (S 180 · M 280 · L 420 ·
+  completo), no una escala nueva que se despegaría con el tiempo.
+- **Iconos de línea (SF Symbols), cero emojis**: un emoji se pinta con la fuente
+  de color del sistema, no hereda el tint y no pesa igual en cada Mac.
+- **Fijar** existe porque un círculo de ~400 pt comiéndose los clics de una
+  esquina en plena toma sería peor que el bug que vinimos a arreglar.
+
+### QA nuevo
+
+```bash
+open -W /Applications/SFCast.app --args --mirrortest 6   # invisibilidad, alineación, arrastre, tamaños, sensor, costo
+open /Applications/SFCast.app --args --mirrorlook 16     # lo deja CAPTURABLE para revisar el diseño con un screenshot
+```
+
+`--mirrorlook` existe por el mismo motivo que `--paneltest` para el pill: lo que
+es invisible a la captura por diseño también es invisible para quien quiere
+mirarlo, y el auto-retrato por `cacheDisplay` no sabe pintar ni la capa de video
+ni la sombra del halo.
+
+### Hallazgo colateral (no es del espejo, pero muerde)
+
+- **El Estudio solo captura `CGMainDisplayID()`.** No hay selector de display.
+  Con dos monitores, todo lo que Daniel ponga en el segundo **no se graba**. El
+  espejo lo delata de rebote: solo aparece en la pantalla que sí se está
+  grabando.
+- **`Devices.camera(id:)` cae a otra cámara en silencio** si la elegida no está
+  conectada. En el QA la ZV-E10 estaba apagada y el Estudio grabó de "OBS
+  Virtual Camera" (con OBS cerrado: un cuadro fijo). Ahora
+  `engine.cameraDeviceName` expone el dispositivo RESUELTO y el QA lo imprime.
+
+---
+
+## v3.0 — La grabación de 45 minutos que se rompió en los últimos 6 (9 ago 2026)
+
+**Síntoma (Daniel, video real de 45.7 min):** *"el video se empezó a trabar a la
+mitad... desde el minuto uno, cuando hago full en la cámara, mi voz está
+desincronizada"*. Y la pregunta de fondo: *"¿por qué OBS siendo de código abierto
+luce bien y lo nuestro se laguea?"*.
+
+### Lo que el archivo dijo (medir primero, opinar después)
+
+El perfil frame a frame del `seg-001.mp4` no se parece a "se trabó a la mitad":
+
+```
+min  0 → 37     30.0 fps clavados, peor congelamiento 82 ms   ← 82% del material, intacto
+min 38 → 39     17.8 y 10.2 fps                               ← primer bache
+min 40 → 41     30.0 fps                                       ← se recupera solo
+min 42 → 45.7   12.7 / 10.6 / 11.9 / 8.4 fps, saltos de 750 ms ← colapso final
+```
+
+`drops: 0` en todo momento. **El encoder nunca tiró un frame**: los frames NO SE
+COMPUSIERON. Y ahí estaba el agujero: `Compositor.compose` hacía
+`guard let pb = makeBuffer(canvas) else { return nil }` y el render loop hacía
+`return` sin contar nada. **Un frame que no llega a existir no aparecía en ningún
+contador** — por eso el log decía `drops:0` mientras el archivo se caía a 8 fps.
+Cuarta repetición del patrón órgano-sin-sensor, ahora en el único sitio del
+pipeline donde nadie miraba.
+
+### El desfase de audio eran TRES capas, no una
+
+Y solo una era la que todos habrían buscado:
+
+1. **El timestamp se tomaba DESPUÉS de componer.** `appendVideo(pb, hostTime:
+   CMClockGetTime(hostClock))` al final del handler ⇒ el tiempo de composición se
+   sumaba al desfase. El error crecía *justo cuando la Mac ya iba mal*.
+2. **La latencia de captura se ignoraba.** El audio se escribe con su PTS real; el
+   video, con "ahora". Medido con `--synctest`: **ZV-E10 por UVC = 52 ms**, Shure
+   MV7+ = 12.7 ms ⇒ **40 ms netos** de labios detrás de la voz. Sub-umbral solo, pero
+   suma.
+3. **El hueco de arranque de 152 ms** — el que de verdad se veía. El warmup de audio
+   se medía contra el primer frame de VIDEO, así que el track de audio empezaba en
+   `0.152` con el de video en `0.000`. Verificado en **todas** las grabaciones del
+   historial. Un reproductor que respeta `start_time` lo compensa; medio mundo (y
+   varios editores) pega ambas pistas en cero ⇒ **voz 152 ms adelantada**.
+
+**Nota honesta de método:** el desfase se intentó medir desde el archivo por
+correlación audio↔movimiento de boca en 14 ventanas. Dio r≈0.02-0.16 con lags
+contradictorios (+567 y −567 ms): **no daba para afirmar nada**, y no se afirmó. El
+número salió de instrumentar el mecanismo (`--synctest`), no de la estadística.
+
+### El benchmark que refutó la hipótesis obvia
+
+La sospecha inicial era el lienzo 4096×2304. `--compbench` (headless, sin TCC) la
+tumbó: componer a 4K cuesta **3.4 ms** de un presupuesto de 33.3, y el pipeline
+completo —timer + compose + writer HEVC real + buffers retenidos— **sostiene 29.9
+fps a 4K en una máquina limpia**. El diseño aguanta.
+
+Lo que 4K sí cuesta es **memoria**: 244 MB de huella contra 120 MB (1440p) y 85 MB
+(1080p), más el pool de captura (queueDepth 8 × 37.7 MB = 302 MB a 4K contra 66 MB
+a 1080p). **Casi medio giga de diferencia** en un Mac mini M4 de 16 GB con dos
+monitores 4K — que el 9 ago estaba con 15 GB ocupados, 675 MB de swap y 74 MB
+libres. No fue el cómputo: fue el margen.
+
+### Los cinco cambios
+
+1. **`ProgramClock`** — el instante se toma ANTES de componer y se le resta la
+   latencia MEDIDA de la fuente crítica (cámara si hay, si no pantalla), con
+   `maxSlew` de 2 ms/frame (un salto sería un tirón audible) y monotonicidad
+   estricta (`AVAssetWriter` descarta en silencio un PTS que no avanza).
+   `LatestFrameStore` ahora guarda el PTS de cada frame y su latencia mediana.
+2. **Pistas alineadas** — la sesión del writer no arranca hasta poder arrancar
+   **las dos** en el mismo instante (`max(primerVideo, primerAudioTrasWarmup)`),
+   con deadline de 0.6 s para no bloquear jamás una grabación sin mic. Verificado:
+   `video start=0.000 · audio start=0.000`.
+3. **`RenderGovernor`** — pedir 30 cuando la Mac da 10 no consigue 30: consigue 10
+   feos. Baja la cadencia por escalones (30→24→19→15) de forma **regular**, con
+   backoff exponencial en las subidas. Sin el backoff oscilaba: medido con
+   `--chokems 60`, bajaba a 15, subía a 19 a los 10 s, no alcanzaba y volvía —
+   cadencia yo-yo, peor que quedarse abajo.
+4. **Menos trabajo** — lienzo por default a **2560×1440** (migración única avisada,
+   reversible en Ajustes → Video) y **captura escalada**: si el lienzo es menor que
+   el display, se le pide a SCK la captura ya reducida y el downscale lo hace el
+   compositor de ventanas, gratis. El lienzo nativo no compraba nada: sus videos
+   salen a 1080p/1440p en YouTube.
+5. **Sensores que llegan** — fallos de buffer contados; **el aviso se decide por
+   TRAMO, no por promedio** (ese día el promedio fue 92%, por encima del umbral del
+   90%, así que *no avisó*, mientras seis minutos estaban a 10 fps); preflight de
+   ritmo y RAM al dar REC; latido con `comp/sinBuf/cadencia/sync/ram`; y
+   notificación del sistema cuando la cadencia baja **grabando** — el chip de fps ya
+   existía y no sirvió de nada porque vive en la ventana del Estudio, que está en el
+   otro monitor mientras Daniel presenta.
+
+### La respuesta a "¿por qué OBS no?"
+
+No es el código: es el trabajo pedido. OBS escala su salida a 1080p aunque el canvas
+sea la pantalla; SFCast componía **y codificaba** a 4096×2304 — 4.6× más píxeles por
+los que YouTube no paga. Streamlabs es OBS con otra piel.
+
+### Lo que deja
+
+- **Un sensor que mide el promedio no es un sensor.** El promedio de 45 minutos
+  esconde un colapso de 6. Alarma por peor ventana, siempre.
+- **Un `return nil` en el camino caliente es un frame que desaparece del mundo.**
+  Si el código puede fallar en silencio, cuenta el fallo ahí mismo.
+- **Degradar bien es una feature.** 15 fps parejos se ven pobres; 8 fps con saltos
+  de 750 ms se ven rotos, y encima no hay interpolación que los salve.
+
+### QA nuevo
+
+```bash
+open -W /Applications/SFCast.app --args --rectest 14              # graba y verifica el MP4
+open -W /Applications/SFCast.app --args --rectest 22 --chokems 60 # ejerce el governor
+open -W /Applications/SFCast.app --args --synctest 12             # latencia real por fuente
+./.build/debug/SFCast --compbench 60                              # costo/memoria por lienzo (headless)
+```
+
+---
+
+## v3.1 — Por qué OBS no se traba y nosotros sí: **no era componer, era ESPERAR** (9 ago 2026)
+
+Daniel, después de ver el semáforo del governor: *"¿de qué me sirve esta madre con
+semáforo si me va a dar pocos fps? ¿cómo logramos que sean estables a pesar de
+todo, que no se bajen?"*. Tenía toda la razón: v3.0 construyó un **termómetro**
+cuando lo que pidió es que no haya fiebre.
+
+### La medición que lo resolvió (por FASE, no en bloque)
+
+El agregado decía "compose cuesta 20 ms" y con eso no se puede decidir nada: podía
+ser la GPU, el pool, el encoder o el preview — cuatro curas opuestas. Desglosado:
+
+```
+preview          0.0 ms
+encode           0.1 ms          ← el encoder NO era el cuello
+grafo (CPU)      0.58 ms
+buffer (pool)    0.02 ms
+RENDER (GPU)    22.32 ms         ← el 97%
+```
+
+Y el mismo render costaba **2 ms en el bench sintético**. La diferencia no era el
+trabajo: era que **`CIContext.render` es SÍNCRONO** y la GPU no es nuestra —
+WindowServer compone dos monitores 4K, el encoder HEVC codifica, el preview y el
+espejo pintan. Estábamos parados esperando cola ajena **en el único hilo que marca
+la cadencia**.
+
+Eso —y no "mejor código"— es la diferencia con OBS. Ellos no bloquean.
+
+### Las dos piezas
+
+**1. Pipelining (`Compositor.composePipelined`).** El frame N lanza su render con
+`startTask` y NO lo espera; el N+1 recoge el resultado que la GPU pintó mientras
+tanto. Cuesta un frame de latencia, y por eso **el `hostTime` viaja pegado al
+buffer**: lo que se entrega es del tick anterior y debe llevar el timestamp de ESE
+tick, o reintroduciríamos el desfase de audio que v3.0 acababa de matar.
+
+| | antes | después |
+|---|---|---|
+| compose p50 | 21.3 ms | **3.7 ms** |
+| RENDER (GPU) | 22.3 ms | **2.8 ms** |
+| fps del archivo | 29.85 | **29.99** |
+| costo del espejo | −2.5 fps | **−0.2 fps** |
+
+**2. `CadenceKeeper` — por qué a OBS "no se le bajan los fps".** Un
+`DispatchSourceTimer` con `repeating` **no recupera disparos perdidos**: si el
+sistema lo posterga 70 ms, esos dos ticks no vuelven y el archivo queda con un
+hueco. Ahí nacían los saltos de 750 ms. Ahora, cuando faltan ticks, se reemiten los
+timestamps que faltan con el último contenido — los *lagged frames* de OBS.
+
+La clave conceptual: **un frame repetido y un frame que nunca se compuso muestran
+exactamente lo mismo en pantalla.** La diferencia está en el contenedor, y 30 fps
+constantes es lo que cualquier editor quiere (los NLEs sufren el VFR). OBS no
+siempre alcanza — simplemente nunca deja huecos.
+
+### La prueba que cierra la promesa
+
+Con `--chokems 60` (ahogo del **doble** del presupuesto):
+
+```
+antes:  archivo a 14.53 fps
+ahora:  archivo a 29.72 fps   (446 frames rellenados, pistas alineadas 0 ms)
+        el compositor bajó a 15 fps — y el archivo salió a 30 igual
+```
+
+### El governor cambia de sentido (y de mensaje)
+
+Ya no baja "la grabación": baja **cuántos frames nuevos compone**, para darle aire a
+la GPU, mientras el archivo sigue saliendo a los fps pedidos. El mensaje al usuario
+se reescribió por eso — decirle *"bajé tu grabación a 19"* cuando su archivo sale a
+30 sería mentirle y asustarlo de gratis.
+
+### Lo que NO se hizo, a propósito
+
+**Damage tracking** (no recomponer el fondo cuando la pantalla no cambió) quedó
+fuera: con 3.7 ms de 33.3 ya hay 9x de margen, y añadir invalidación de caché sobre
+un compositor que ya funciona es riesgo de artefactos visuales a cambio de un margen
+que no hace falta. Queda documentado como palanca si algún día la hiciera falta.
+
+Los modos de `CIContext` (sin color management, Metal explícito) se midieron: 1.14x.
+Se quedaron porque son gratis, pero el grueso era el bloqueo, no el color.
+
+### La lección
+
+**Un agregado no es una medición.** "Compose cuesta 20 ms" fue verdad todo el tiempo
+y no permitía decidir nada; el desglose por fase señaló la cura en un intento. Y la
+segunda: cuando algo tarda, la pregunta no es solo *"¿cómo lo hago más rápido?"*
+sino *"¿por qué lo estoy ESPERANDO?"*.
+
+### v3.1b — lo que la prueba larga descubrió sola: **la cámara se apaga y nadie avisa**
+
+En la corrida de 50 min, al **minuto 31.6**, la ZV-E10 dejó de entregar frames
+(`cam:30fps → cam:3fps → cam:0fps`) y **la grabación siguió 18 minutos a 30.00 fps
+perfectos componiendo su último frame congelado, sin una sola línea en el log**.
+
+Es la pantalla congelada del 25 jul otra vez, por el otro lado — y es el caso **más
+probable de Daniel**, porque las Sony tienen auto power off y él graba tomas largas.
+El sensor existía (`frames.age(.camera)`); lo que faltaba era que alguien lo MIRARA.
+
+Un frame viejo se compone igual de bien que uno nuevo: **una cámara muerta produce
+un video impecable de una foto fija.** Ahora `checkCameraHealth()` corre en el mismo
+watchdog de 1 Hz: detecta a los 5 s, avisa en la ventana, **manda notificación del
+sistema si está grabando**, y reconcilia la sesión cada 10 s para engancharla sola
+cuando Daniel la vuelva a encender.
+
+Ejercido a voluntad con `--rectest --freezecam` (tira los frames de cámara a
+propósito): **detectado en 5.3 s**, `cameraFrozen=true`, notificación enviada.
+
+### La batería completa, corrida al final
+
+| Prueba | Resultado |
+|---|---|
+| Grabación **44.8 min** (la duración del incidente) | **30.00 fps de 30 — 100%**, 0 rellenados, 0 drops |
+| **Soak 40 min**, escena compuesta, headless | **SOAK_OK** · 29.99 fps · 0.0% repetidos · RAM plana |
+| Estrés `--chokems 60` (doble del presupuesto) | archivo a **29.72 fps** (antes 14.53) |
+| `--failstream` (reenganche de pantalla falla) | grabación **sobrevive** a 29.99 fps + notificación |
+| `--freezecam` (la cámara se apaga) | detectado en **5.3 s** + notificación |
+| `--mirrortest` | alineación 0.00 px · fuga 0.0000 · costo −0.2 fps |
+| `--compbench` / `--studiotest` / `--selftest` / `validate.sh` | verdes |
+
+Las dos pruebas largas corrieron **en paralelo** (dos pipelines de video a la vez en
+la misma Mac), que de paso es la prueba de estrés más realista que se hizo.
+
+---
+
+## v3.2 — El cable a la edición: marcadores en vivo, zonas y daño declarado (10 ago 2026)
+
+Daniel, después de preguntar qué más se podía exportar para facilitar la edición:
+*"debemos armar conectores entre sfstudio y edición de video skill, ese opino será
+el verdadero MOAT de todo esto"*. Es exactamente el diagnóstico: cualquiera puede
+pedirle a un LLM que corte un video; **nadie más tiene la cámara hablándole al
+editor.**
+
+### El problema, con su número
+
+Grabó **45.7 minutos** para un máster de **14:30**. De la hora y media que tardó la
+edición, la mayor parte no fue diseño ni animación: fue **decidir cuál de sus tres
+intentos de cada frase era el bueno**, con seis sub-agentes leyendo transcript.
+
+Él sabía cuál era el bueno **en el momento**. Esa información simplemente no tenía
+dónde vivir, así que se tiraba y luego se reconstruía cara.
+
+### Lo que ahora viaja en el manifest
+
+- **`markers`** — ⌘⇧X ("la regué, corta") y ⌘⇧M ("esto estuvo bueno"), **globales**
+  (`RegisterEventHotKey` de Carbon, que NO pide el permiso de Monitorización de
+  entrada; esta app ya pagó caro esa moneda). Funcionan mientras presenta en otra
+  app, que es justo cuando se traba.
+- **`deadZones`** — los tramos con la imagen CONGELADA. En el archivo son
+  indistinguibles de material sano: el 9 ago la cámara se apagó al minuto 31.6 y la
+  grabación siguió 18 minutos de foto fija a 30 fps impecables. El editor los usaría
+  sin saberlo.
+- **`sceneTimeline`** ya existía y nadie lo leía. Ahora el conector lo traduce a
+  ZONAS con su clase (`talking` / `pantalla`), que es lo que decide la intensidad de
+  edición — algo que el pipeline venía **adivinando** del transcript o de los frames.
+
+El traductor vive del lado de la edición:
+`.claude/skills/edicion-de-video/scripts/sfcast_manifest.py`, y la skill lo declara
+como **PASO 0.1, antes de sondear el raw**.
+
+### Dos decisiones de diseño que importan
+
+**El marcador es una SEÑAL, no un rango.** `t` es cuándo Daniel PULSÓ, y un humano
+reacciona uno o dos segundos tarde. Inventar el rango sería fingir precisión: el
+editor ya tiene el transcript con tiempos por palabra y encuentra la frontera de la
+frase. Él aporta la intención, el editor la precisión.
+
+**El acuse va en el aro del ESPEJO.** No en la ventana del Estudio (está en el otro
+monitor — lección repetida cuatro veces el 9 ago) y no con sonido (se grabaría). El
+espejo lleva `sharingType = .none`: lo ve él y no sale en el video. Sin acuse, un
+marcador se pulsa dos veces "por si acaso" y deja de ser una señal limpia.
+
+### Un bug propio, cazado en vivo el mismo día
+
+El watchdog de cámara (v3.1b, de hace unas horas) reconciliaba la sesión cada 10 s
+mientras la cámara estuviera muerta. Con la ZV-E10 apagada, `Devices.camera(id:)`
+cae a `AVCaptureDevice.default` → enganchaba la **"OBS Virtual Camera"**, que
+entrega un cuadro fijo, y entonces el watchdog **se declaraba satisfecho**.
+
+**Un sensor que se auto-satisface con una imagen falsa es peor que no tener sensor.**
+Ahora solo reintenta si la cámara ELEGIDA reapareció, cada 30 s. Y de paso: si al
+arrancar la resuelta no es la elegida, se avisa — grabar una hora con la webcam
+equivocada es un desastre silencioso, y era posible hasta hoy.
+
+## v3.4 — Los 5m53s del video de 4:28: el compresor peleaba contra la red de hoy (10 ago 2026)
+
+Daniel preguntó por qué SFCast tarda tanto en publicar comparado con Loom. Se midió
+el pipeline entero en vivo, sobre un video real de **4:28** (`ib9z3jvsvog1`):
+
+| Fase | Duración | % |
+|---|---|---|
+| Stop → link al portapapeles | instantáneo | — |
+| Cerrar MP4 + placeholder | 10s | 3% |
+| **Comprimir con ffmpeg en el Mac** | **147s** | **42%** |
+| Subir 184.6 MB por rsync | 16s | 5% |
+| Poller (cada 8s) | 5s | 1% |
+| Concat + thumbnail | 20s | 6% |
+| **Whisper en el VPS** | **153s** | **43%** |
+| LLM (título + capítulos) | 2s | 1% |
+| **TOTAL** | **5m 53s** | |
+
+Dos cerdos se comían el 85%. Lo demás era ruido.
+
+### El compresor estaba trabajando EN CONTRA (y era código correcto)
+
+`Transcoder.swift` se escribió el 15 jul sobre una premisa **medida entonces**: la
+subida iba a ~0.5 Mbps, así que comprimir 5x era comprimir la espera 5x. Impecable
+para ese mundo.
+
+Ese mundo se acabó con la mudanza a Morelia. Medición del 10 ago, con el mismo
+comando rsync que usa la app: **106 Mbps de subida (13.3 MB/s reales)**. Con eso:
+
+- **Con compresión:** 147s de encode + 16s de subida = **163s**
+- **Sin compresión:** 778.9 MB crudos a 13.3 MB/s = **59s**
+
+El compresor costaba **104 segundos netos** y encima degradaba la imagen.
+
+**La lección no es "el compresor estaba mal".** Estaba bien y sus mediciones eran
+honestas. Lo que faltó fue el **sensor de su propia premisa**: nadie volvió a medir
+el ancho de banda, así que el órgano siguió optimizando para una restricción que ya
+no existía. Es el patrón del órgano sin sensor otra vez, pero en su forma más
+tramposa: no falla, no hace ruido, y sigue haciendo bien un trabajo que ya no hay
+que hacer.
+
+### La raíz de TODO: se capturaba a 4096x2304
+
+`SCRecordingOutput` no expone bitrate, y a nativo Retina el archivo NACÍA a
+**23 Mbps** (778.9 MB por 4:28). Ese tamaño explicaba las dos cosas a la vez:
+
+- `targetBitrate` escala por píxeles ⇒ objetivo 1200 × 4.55 = **5461 kbps**.
+- El encoder por hardware, que a 1080p corre a ~7x tiempo real, **a 4K cae a 0.55x**
+  (de ahí los 147s para 268s de video).
+
+Ahora `AppSettings.captureMaxHeight = 1440` capa la captura. Medido en la prueba E2E:
+4096x2304 → **2560x1440** (escalado exacto, sin deformar) y el archivo baja de
+23 Mbps a **7.7 Mbps**: **3x más chico desde el origen**, sin re-encodear nada.
+
+Loom, para referencia, graba a 1080p.
+
+### La pre-subida mientras grabas, y por qué no puede costar un video
+
+Es el truco por el que Loom se siente instantáneo: cuando le das stop, ya tiene
+arriba casi todo. `Uploader.liveSync` hace `rsync --inplace --append` del directorio
+de sesión cada 20s mientras `state == .recording`.
+
+`--append` **asume** que el remoto es un prefijo del local. Un MP4 en escritura lo
+cumple casi siempre (el mdat crece secuencial, el moov se escribe al cerrar), pero
+la garantía no puede depender de eso. La garantía real es que **el rsync del stop
+corre SIN `--append`** — delta completo — y deja el remoto byte a byte igual al
+local pase lo que pase.
+
+Eso se verificó rompiendo el remoto a propósito: 10 MB de ceros en medio del archivo
+más la cola truncada. El rsync final lo dejó **idéntico en 2.1s**. La pre-subida solo
+puede ahorrar tiempo, jamás costar un video.
+
+Dos detalles que sí importan:
+
+- **Nunca crea `UPLOAD_DONE`.** Es ese marcador el que hace visible una sesión al
+  poller; sin él, el worker no puede ver una sesión a medias.
+- **Cancelar una grabación borra lo pre-subido** (`Uploader.discardRemote`). Sin eso,
+  cada cancelación dejaría un directorio a medias en `incoming/` que nadie mira nunca
+  — que es exactamente la basura que encontramos del 15 jul: 2 sesiones huérfanas,
+  95 MB, 26 días invisibles.
+
+### Resultado medido (demo E2E sin manos, contra un incoming de pruebas)
+
+```
+captura: 4096x2304 → 2560x1440 (tope 1440p)
+live-sync: 2 tandas pre-subidas durante la grabación
+Upload OK → … (intento 1, 5.5s de cola)      ← 163s en la ruta vieja
+```
+
+Sin línea de `Transcoder:` (compresión apagada) y los dos segmentos llegaron con
+**md5 idéntico** al local.
+
+El segundo de "cola" en `Upload OK` es el **sensor del live-sync**: con la pre-subida
+funcionando tiene que quedar en pocos segundos aunque el video pese cientos de MB.
+Si vuelve a crecer, el live-sync dejó de servir y hay que mirarlo.
+
+### Lo que quedó FUERA y por qué
+
+El lado VPS (publicación en dos tiempos, transcript por Groq, transcode a H.264) NO
+se tocó en esta tanda: otra sesión estaba trabajando `infra/sfcast_worker.py` sin
+commitear y corriendo un backfill a R2. Dos plumas sobre el mismo archivo se pisan.
+
+Queda medido y listo para quien lo tome:
+
+- **Groq `whisper-large-v3-turbo`: 2.0s contra los 153s de faster-whisper**
+  estrangulado por `CPUQuota=200%` (2 de 8 cores). Transcript equivalente: 97
+  segmentos / 3,925 chars contra 107 / 3,969. Costo $0.003 por video.
+- **La página espera al transcript sin necesidad.** El `video.mp4` estuvo
+  reproducible en el servidor 2m35s antes de que el worker escribiera el viewer.
+  Loom publica el reproductor en cuanto el media aterriza y mete el transcript
+  después.
+- **Se sirve HEVC 4096x2304, y eso NO reproduce en Chrome/Windows** ni en Firefox
+  ni en buena parte de Android. Verificado también contra R2: mismo archivo, mismo
+  códec. El transcode a H.264 no es optimización, es corrección — y tiene que
+  correr ANTES del espejo a R2 para no subir dos veces.
+
+## v3.5 — El VPS: publicar en tres fases, y el códec que nadie estaba mirando (10 ago 2026)
+
+Continuación de v3.4, ya con el lado VPS. Mismo video de referencia (`ib9z3jvsvog1`,
+4:28): antes **5m53s** de punta a punta.
+
+### El reproductor ya no espera al transcript
+
+El `video.mp4` estaba reproducible en el servidor **2m35s antes** de que la página
+dejara de decir "Procesando". Se hacía esperar a un video por su transcript, que es
+justo lo que nadie necesita para ver un video.
+
+`process_session` ahora corre en tres fases:
+
+1. **Se puede VER** — concat + thumbnail → publica con `ready:false`.
+2. **Se puede LEER** — transcript + título + capítulos → republica con `ready:true`.
+3. **Se puede DISTRIBUIR** — transcode a H.264 → espejo a R2.
+
+La página abierta se completa **sola**: sondea `data.json` cada 4s y pinta lo que
+falta sin recargar y sin tocar el `<video>`. Recargar habría reiniciado el video que
+la persona ya está viendo — por eso se pinta en vez de refrescar.
+
+Medido con una sesión real de 45s: **reproducible en 1s, completa en 4s.**
+
+### Groq: 2.0s contra 153s, y por qué el local se queda
+
+El cuello no era el modelo, era el techo: el servicio corre con `CPUQuota=200%`
+sobre 3 cores permitidos — **2 de los 8** del EPYC — y ese techo existe para que una
+clase en vivo del Meet siempre gane. Subirlo habría sido romper un invariante bueno
+para arreglar el síntoma.
+
+Groq hace lo mismo en 2.0s y el transcript es equivalente (97 segmentos / 3,925
+chars contra 107 / 3,969). $0.003 por video, ~2 centavos al mes a la cadencia real.
+
+`faster-whisper` se queda de red de seguridad a propósito: así un corte de internet
+o una llave vencida **degradan** el servicio (más lento) en vez de **tumbarlo** (sin
+transcript). Solo se carga si se usa, o sea que ya no cuesta 1.4 GB de RAM ni 80s de
+arranque.
+
+### El hallazgo que nadie estaba buscando: se servía HEVC
+
+`SCRecordingOutput` **solo** escribe HEVC — está forzado en el Mac a propósito,
+porque esquiva el tope de H.264 a 4096x2304 en Retina/5K. Excelente para grabar.
+Pésimo para distribuir: HEVC no reproduce en Chrome/Windows sin la extensión de pago
+de Microsoft, ni en Firefox en varias plataformas, ni en buena parte de Android.
+
+Verificado el mismo día contra R2: el video del anuncio a ~570 miembros se servía
+como `hevc/hvc1 4096x2304`, 193 MB. **Reproductor en negro para una parte de la
+comunidad, y en silencio** — un video que no carga no genera reporte; la gente asume
+que está roto y se va.
+
+Por eso la fase 3 no es optimización, es corrección. Y va **antes** del espejo a R2:
+subir el HEVC y reemplazarlo después es pagar la subida dos veces y dejar un rato el
+archivo malo como el público.
+
+Resultado en el video del anuncio: **194 MB → 27 MB**, `h264/avc1 2560x1440`, 92s de
+transcode que nadie esperó. `backfill_h264.py` cerró el pasado: 10 casts nativos en
+HEVC (los 52 importados de Loom ya venían compatibles y se saltaron solos).
+
+### Las huérfanas: recuperar antes que borrar
+
+El sensor nuevo (`orphans()`) delató 2 sesiones del 15 jul sin `UPLOAD_DONE` — 26
+días invisibles, porque el poller solo mira lo que tiene el marcador. Un órgano sin
+sensor se ve idéntico a uno sano.
+
+Lo fácil era borrarlas: 95 MB de basura de un día de pruebas. Antes de tocarlas se
+revisó, y resultó que **eran las únicas copias** (sin respaldo local, fuera del
+historial de la app) y estaban **truncadas** — el meta decía 45.9s y el archivo tenía
+39.9s: la subida murió a media transferencia.
+
+Se procesaron en vez de borrarse. Salieron «Edición de Video: Ajuste de Elementos y
+Transición a IA» y «Mejoras en la interfaz de grabación de SaaS Factory». Contenido
+real. **Ante la duda, recuperar: borrar es la única operación que no se deshace.**
+
+### Un sensor propio que exageraba, cazado en el acto
+
+`sin_distribuir_h264` contaba "sin marcador" como "sin distribuir", y marcaba 51
+pendientes que en realidad ya eran H.264 (los importados de Loom, que nunca pasaron
+por el transcodificador porque no lo necesitaban).
+
+Es exactamente el defecto que se le señaló ese mismo día al verificador de
+`publish_cast_r2.py` (decía 0/9 publicados y las 9 URLs respondían 200). Un sensor
+que exagera se deja de leer, y el día que tenga razón nadie le va a creer. Se
+estamparon los marcadores de los ya-compatibles y el contador dice la verdad: 0.
+
+### El antes y el después
+
+| | Antes | Después |
+|---|---|---|
+| Stop → se puede VER | 5m 53s | **~40s** (1s de worker + subida ya casi hecha) |
+| Stop → transcript listo | 5m 53s | **~45s** |
+| Transcript | 153s (2 de 8 cores) | **2.0s** (Groq) |
+| Compresión en el Mac | 147s | **0s** (murió) |
+| Cola de subida al detener | 163s | **5.5s** |
+| Códec servido | HEVC 4K (negro en Chrome) | **H.264 1440p** |

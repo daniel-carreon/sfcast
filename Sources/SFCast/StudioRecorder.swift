@@ -28,12 +28,51 @@ final class StudioRecorder {
     private var screenRawFiles: [String] = []
     private var health: Task<Void, Never>?
     private var lowDiskWarned = false
+    /// Lo que Daniel marcó en vivo y los tramos con imagen congelada. Los dos
+    /// viajan al manifest: son el cable entre lo que pasó AL GRABAR y lo que el
+    /// editor necesita saber DESPUÉS (v3.2).
+    private var markers: [StudioManifest.Marker] = []
+    /// ENVOLVENTE DEL MICRÓFONO — nivel cada 100 ms, para el corte de silencios.
+    ///
+    /// La app ya mide esto 15 veces por segundo para pintar el vúmetro… y lo
+    /// tira. Guardarlo cuesta 10 números por segundo (36 KB en 45 minutos) y le
+    /// ahorra al editor re-analizar el audio entero para encontrar los silencios.
+    /// Es el dato más barato de todo el sistema: ya está medido.
+    private var envelope: [Float] = []
+    private var envelopeTask: Task<Void, Never>?
+    private var voiceTask: Task<Void, Never>?
+    /// Guard de cadencia: detiene la toma si la Mac no sostiene el piso de fps.
+    private var cadenceTask: Task<Void, Never>?
+    /// POR QUÉ se detuvo sola la última toma (nil = la detuvo Daniel).
+    ///
+    /// Existe para que el QA no confunda "el sujeto se protegió" con "el sujeto
+    /// falló". El caso del guard de voz ya estaba resuelto a mano con un
+    /// `--mutemic` especial; esto lo generaliza a cualquier guard, incluido el de
+    /// cadencia, que dispara sin ninguna bandera de CLI.
+    private(set) var lastAutoStopReason: String?
+    /// Dispositivo de micrófono que quedó DE VERDAD en la sesión (va al
+    /// manifest). El Shure cambia de formato entre arranques y sin registrar
+    /// qué entrada se usó, el próximo diagnóstico vuelve a ser a ciegas.
+    private var micDeviceName: String?
+    private var deadZones: [StudioManifest.DeadZone] = []
+    private var frozenSince: [String: Double] = [:]
+    /// CADA ESCALÓN DEL GOVERNOR durante la toma (v3.6). El evento ya existía
+    /// (`engine.onCadenceChange`) y solo pintaba un banner que se pierde en el
+    /// otro monitor. Guardarlo cuesta tres números por escalón y es lo único que
+    /// permite distinguir, después, "30 fps de verdad" de "15 fps rellenados a 30".
+    private var cadenceLog: [StudioManifest.CadencePoint] = []
 
     var isRecording: Bool { state == .recording }
+    /// Última carpeta escrita (la usa el QA cuando el auto-stop cerró la sesión
+    /// antes de que el test pidiera el stop).
+    private(set) var lastDir: URL?
     var elapsed: TimeInterval { state == .recording ? Date().timeIntervalSince(startedAt) : 0 }
 
     /// Avisos hacia la UI (disco, congelada, auto-stop).
     var onAlert: ((String, Bool) -> Void)?
+    /// FPS que de verdad quedaron en el archivo de la última grabación
+    /// (frames escritos ÷ duración). -1 = todavía no se midió.
+    private(set) var achievedFPS: Double = -1
     /// Lo llama el health monitor si el disco se acaba: hay que DETENER.
     var onEmergencyStop: (() -> Void)?
 
@@ -59,6 +98,30 @@ final class StudioRecorder {
         String(format: "%.1f GB", Double(bytes) / 1_000_000_000)
     }
 
+    /// Memoria del sistema que se puede usar sin empezar a comprimir/swapear.
+    /// No es un lujo de telemetría: el 9 ago la Mac tenía 15 de 16 GB ocupados
+    /// y 675 MB de swap, y ESA es la condición bajo la que el pool de buffers
+    /// se vuelve caro y el compositor pierde el ritmo. Grabar a 4K pide ~550 MB
+    /// entre pool de captura y programa; a 1440p, la mitad.
+    static func availableRAM() -> Int64 {
+        var stats = vm_statistics64_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size
+                                           / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &stats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return .max }
+        let page = Int64(vm_kernel_page_size)
+        // Libre + inactiva + purgable: lo que macOS puede entregar sin pelear.
+        return (Int64(stats.free_count) + Int64(stats.inactive_count)
+                + Int64(stats.purgeable_count)) * page
+    }
+
+    /// Por debajo de esto, grabar a lienzo grande es pedir el colapso.
+    static let lowRAMBytes: Int64 = 1_500_000_000
+
     /// Arranca la grabación con el set de salidas configurado. Devuelve error
     /// legible si NINGUNA salida pudo activarse (jamás grabar "nada" en silencio).
     func start(engine: StudioEngine, config: StudioConfig, activeScene: StudioScene?) throws {
@@ -82,6 +145,21 @@ final class StudioRecorder {
         try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
         activeOutputs = config.outputs
         timeline = []
+        // TODO lo que es POR SESIÓN se limpia aquí.
+        //
+        // `markers` y `deadZones` no se limpiaban nunca (bug encontrado el 17 ago
+        // con los propios archivos de Daniel): la marca que puso en el segundo
+        // 103.1 de la sesión de 48 min (u760h7xic9kv, 07:26) aparece IDÉNTICA, en
+        // el mismo t=103.1, en el manifest de la toma siguiente (dw0w7tu0rea1,
+        // 08:19). El puente a la edición lee "retoma" como "tira la toma que
+        // ACABA aquí", así que una marca heredada tira material bueno de otra
+        // grabación. Igual de grave al revés: una zona muerta vieja marca como
+        // inservible un tramo sano.
+        markers = []
+        deadZones = []
+        frozenSince.removeAll()
+        cadenceLog = []
+        lastAutoStopReason = nil
         if let s = activeScene {
             timeline.append(.init(t: 0, sceneID: s.id, sceneName: s.name))
         }
@@ -114,6 +192,11 @@ final class StudioRecorder {
             activated.append("camera.mov")
         }
         if config.outputs.program {
+            // El reloj arranca con la grabación: ancla la corrección de latencia
+            // con las muestras que el motor lleva midiendo desde que se abrió el
+            // Estudio (para el REC ya hay decenas), sin rampa audible.
+            engine.programClock.begin()
+            engine.resetCompositorWindow()
             let s = ProgramSink(url: sessionDir.appendingPathComponent("seg-001.mp4"),
                                 width: Int(engine.canvasSize.width),
                                 height: Int(engine.canvasSize.height),
@@ -132,10 +215,343 @@ final class StudioRecorder {
             throw NSError(domain: "SFCast", code: 11, userInfo: [
                 NSLocalizedDescriptionKey: "Ninguna salida pudo activarse (¿permisos de pantalla/cámara?)."])
         }
+        // El trinquete del governor arranca LIMPIO con cada toma.
+        //
+        // Hasta el 17 ago `governor.reset` solo se llamaba en `startRenderLoop()`
+        // —o sea al ABRIR la ventana de Estudio, no al dar REC— así que el estado
+        // del trinquete (incluido un `upRequirement` ya escalado a 180 ventanas)
+        // se heredaba del preview en reposo y de la toma anterior. Medido: la
+        // sesión dw0w7tu0rea1 (15 ago 08:19) ya reportaba `cadencia:19/30` en su
+        // PRIMER heartbeat a los 15 s — no se degradó en 15 segundos, arrancó
+        // degradada, heredando el 15 fps de la sesión de 48 min que cerró a las
+        // 08:15. Una toma se juzga por lo que pasa DENTRO de ella.
+        engine.governor.reset(target: engine.fps, now: CACurrentMediaTime())
         state = .recording
         Log.info("Estudio: grabando \(videoID) → [\(activated.joined(separator: ", "))] "
                  + "calidad=\(config.programQuality.rawValue) libre=\(Self.gb(free))")
+        preflightRitmo(engine: engine)
+        preflightVoz(engine: engine, micEnabled: config.micEnabled)
+        preflightImagen(engine: engine)
+        micDeviceName = engine.micDeviceName
+        startEnvelope(engine: engine)
+        startVoiceGuard(engine: engine, micEnabled: config.micEnabled)
+        startCadenceGuard(engine: engine)
         startHealthMonitor(engine: engine)
+    }
+
+    // MARK: - preflight de RITMO (avisar antes, no después de 45 minutos)
+
+    /// El motor lleva componiendo desde que se abrió el Estudio, así que al dar
+    /// REC ya hay evidencia de si esta Mac sostiene la cadencia AHORA MISMO. La
+    /// alarma del 9 ago llegó cuando el video ya estaba grabado; ésta llega
+    /// antes de hablar. AVISA, jamás bloquea: la grabación es de Daniel.
+    /// PREFLIGHT DE VOZ — el aviso que llega ANTES de hablar.
+    ///
+    /// El motor lleva corriendo desde que se abrió el Estudio, así que al dar
+    /// REC ya se sabe si el micrófono entrega. Avisar aquí cuesta cero y es la
+    /// diferencia entre perder 3 segundos y perder 35 minutos.
+    private func preflightVoz(engine: StudioEngine, micEnabled: Bool) {
+        guard micEnabled else { return }
+        let fresco = engine.levels.fresh().mic
+        if !fresco {
+            Log.error("Estudio: PREFLIGHT DE VOZ — el micrófono NO está entregando audio")
+            onAlert?("⚠️ El micrófono no está dando señal. Compruébalo ANTES de hablar "
+                     + "(el vúmetro del Mixer debe moverse).", true)
+            notify("SFCast — REVISA EL MICRÓFONO", "No está entrando audio al empezar a grabar.")
+        } else {
+            Log.info(String(format: "Estudio: preflight de voz OK — mic entregando (nivel %.4f)",
+                            engine.levels.get().mic))
+        }
+    }
+
+    /// PREFLIGHT DE IMAGEN — el espejo de `preflightVoz`, que faltaba.
+    ///
+    /// Al micrófono se le preguntaba "¿estás vivo?" antes de grabar. A la cámara
+    /// NO: su vigilancia (`checkCameraHealth`) es de FLANCO — `if dead !=
+    /// cameraFrozen` — así que si la cámara ya estaba muerta al dar REC, la
+    /// transición nunca ocurría: cero alarma, cero notificación, y `noteFrozen`
+    /// jamás se llamaba, por lo que `deadZones` salía VACÍO en una sesión que era
+    /// 100% zona muerta.
+    ///
+    /// Costó una toma real: la sesión hpa3ky02t5ss (15 ago 06:13) grabó 3:52 de
+    /// UNA imagen fija con la ZV-E10 sin entregar un solo frame, y se archivó
+    /// reportando `achievedFps: 29.96`. El puente a la edición leyó ese número y
+    /// le dijo al editor que le metiera "capa rica, captions y zoom" a una foto.
+    ///
+    /// Esto AVISA y REGISTRA; jamás bloquea (la grabación es de Daniel).
+    private func preflightImagen(engine: StudioEngine) {
+        guard engine.cameraAvailable else { return }
+        let age = engine.frames.age(.camera)
+        let muerta = (age ?? .greatestFiniteMagnitude) > StudioEngine.deadAfter
+        guard muerta else {
+            Log.info(String(format: "Estudio: preflight de imagen OK — cámara entregando "
+                            + "(último frame hace %.2fs)", age ?? 0))
+            return
+        }
+        let cuanto = age.map { String(format: "%.1fs sin imagen nueva", $0) }
+            ?? "nunca entregó un frame"
+        Log.error("Estudio: PREFLIGHT DE IMAGEN — la cámara NO está dando imagen (\(cuanto))")
+        onAlert?("⚠️ La cámara no está dando imagen (\(cuanto)). Vas a grabar un frame "
+                 + "CONGELADO. Revísala ANTES de hablar (las Sony se apagan solas).", true)
+        notify("SFCast — REVISA LA CÁMARA",
+               "No está entrando imagen al empezar a grabar: sería un video de una foto.")
+        // El tramo se registra desde el segundo 0: `stop()` cierra los que sigan
+        // abiertos, así que la zona muerta queda en el manifest aunque la cámara
+        // no vuelva nunca — que es justo el caso que antes no dejaba rastro.
+        noteFrozen("camera", frozen: true, reason: "sin imagen desde el inicio de la toma")
+    }
+
+    private func preflightRitmo(engine: StudioEngine) {
+        let objetivo = Double(engine.fps)
+        guard objetivo > 0 else { return }
+        let presupuesto = 1000.0 / objetivo
+        let cs = engine.compositorStats()
+        let ram = Self.availableRAM()
+        var motivos: [String] = []
+        if cs.composed >= 45, cs.composeMsP50 > presupuesto * 0.6 {
+            motivos.append(String(format: "el compositor va a %.0f%% de su presupuesto",
+                                  cs.composeMsP50 / presupuesto * 100))
+        }
+        // LA COLA, que era el punto ciego (v3.6, 17 ago).
+        //
+        // Este preflight solo miraba el p50 de `composeMs`, y `composeMs` arranca
+        // DESPUÉS de esperar a la GPU del frame anterior. O sea: miraba la mediana
+        // del único tramo que nunca se atasca. El 15 ago pasó en verde con p50 =
+        // 8.1 ms mientras la vuelta completa iba a p95 = 97 ms y máx = 232 ms
+        // contra 33.3 de presupuesto, y la toma salió con 12.8 fps de movimiento.
+        //
+        // La falla es de COLA: p50 sano + p95 catastrófico es la firma de una
+        // espera, no de un cálculo caro. Se mira el p95 del loop COMPLETO, que sí
+        // incluye la espera, y se mira ANTES de hablar.
+        let loop = engine.profile.snapshot()
+        if loop.n >= 60, loop.total.p95 > presupuesto {
+            motivos.append(String(format: "la vuelta del loop se va a %.0f ms en su p95 "
+                                  + "(presupuesto %.0f) — es espera de GPU",
+                                  loop.total.p95, presupuesto))
+        }
+        // Y el estado que NADIE miraba: cuánto lleva la app abierta.
+        //
+        // Medido en el propio log: el compositor de esta app pasa de 1.1-2.2 ms
+        // recién abierta a 5.1-8.1 ms tras ~3 días, con el mismo lienzo y la misma
+        // escena, porque su working set se va quedando fuera de RAM (22% de sus
+        // regiones escribibles estaban swapeadas el 17 ago, con 93 MB libres en la
+        // máquina). La prueba de v3.1 —44.8 min a 30.00 fps— era válida Y el bug
+        // era real: la variable que nadie controlaba era el UPTIME de la app.
+        let horas = Date().timeIntervalSince(Self.launchedAt) / 3600
+        if horas >= 12 {
+            motivos.append(String(format: "SFCast lleva %.0f h abierta (el compositor se degrada; "
+                                  + "ciérrala y reábrela antes de la toma buena)", horas))
+        }
+        if ram < Self.lowRAMBytes, ram != .max {
+            motivos.append("quedan \(Self.gb(ram)) de RAM libre")
+        }
+        let px = Int(engine.canvasSize.width * engine.canvasSize.height)
+        if !motivos.isEmpty {
+            let sugerencia = px > 1920 * 1080
+                ? " Baja el lienzo en Ajustes → Video (o cierra apps) antes de la toma buena."
+                : " Cierra lo que esté cargando la Mac antes de la toma buena."
+            let msg = "Ojo: " + motivos.joined(separator: " y ") + "." + sugerencia
+            Log.error("Estudio: PREFLIGHT — " + msg)
+            onAlert?(msg, true)
+        } else {
+            Log.info(String(format: "Estudio: preflight OK — compositor %.1f ms de %.1f "
+                            + "(loop p95 %.1f, n=%d), RAM libre %@, app abierta %.1f h",
+                            cs.composeMsP50, presupuesto, loop.total.p95, loop.n,
+                            Self.gb(ram), horas))
+        }
+    }
+
+    // MARK: - GUARD DE CADENCIA — "prohibido bajar los fps" (17 ago 2026)
+
+    /// Orden de Daniel, verbatim:
+    ///
+    ///   "Queda prohibido bajar los frames por segundo. Prefiero que antes de eso
+    ///    se pause y me diga algo, pero mantener estables los frames. 30 frames,
+    ///    mínimo 24, pero no menos. Prefiero que se pause si es así y yo arreglar
+    ///    otros detalles."
+    ///
+    /// El governor ahora tiene UN escalón de gracia y un piso duro (24, ver
+    /// `RenderGovernor.hardFloorFPS`). Este guard vigila el piso: si la Mac no lo
+    /// aguanta de forma sostenida, la toma se DETIENE en vez de seguir grabando
+    /// material a medio movimiento que se ve fluido en el contenedor y tirón en la
+    /// pantalla.
+    ///
+    /// ⚠️ No es una pausa que reanuda: el recorder solo tiene idle/recording/
+    /// stopping, así que esto DETIENE y conserva lo grabado hasta ese punto. Una
+    /// pausa reanudable de verdad es una feature aparte (segmentos), no un arreglo.
+    ///
+    /// Mismo patrón que el guard de voz, que ya detiene a los 20 s sin micrófono:
+    /// avisa temprano (4 s) y detiene si no se arregla (12 s). El governor ya
+    /// necesita ~4 s de mala evidencia para llegar al piso, así que detener a los
+    /// 12 s de piso fallando son ~16 s de cadencia sostenidamente bajo 24: eso no
+    /// es un tropiezo, es que esta Mac no puede con esta toma AHORA.
+    private static let cadenceWarnAfter: Double = 4
+    private static let cadenceStopAfter: Double = 12
+
+    private func startCadenceGuard(engine: StudioEngine) {
+        cadenceTask?.cancel()
+        // `--chokems` ahoga el loop A PROPÓSITO para ejercer el governor: es el
+        // único instrumento que tenemos para probar la recuperación. Si el guard
+        // detuviera esa corrida, mataríamos justamente la prueba que protege todo
+        // lo demás. El ahogo artificial no es un problema real de la Mac.
+        guard StudioRecTest.chokeMs == 0 else {
+            Log.info("Estudio: guard de cadencia OFF (--chokems activo: es QA del governor)")
+            return
+        }
+        cadenceTask = Task { @MainActor [weak self] in
+            var aviso = false
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, self.state == .recording else { return }
+                let fallando = engine.governor.floorFailingFor(now: CACurrentMediaTime())
+                let piso = engine.governor.effective
+                let logrado = engine.governor.floorAchieved
+                if fallando == 0 { aviso = false; continue }
+
+                if fallando >= Self.cadenceWarnAfter, !aviso {
+                    aviso = true
+                    Log.error(String(format: "Estudio: CADENCIA BAJO EL PISO — %.1f fps contra un piso "
+                                     + "de %d, lleva %.0fs. Si no se arregla, detengo la toma.",
+                                     logrado, piso, fallando))
+                    self.onAlert?(String(format: "⚠️ La Mac no sostiene %d fps (va a %.1f). Cierra lo que "
+                                         + "esté cargando el sistema AHORA: si sigue así detengo la toma "
+                                         + "en %.0fs, porque grabar bajo el piso es grabar tirones.",
+                                         piso, logrado, Self.cadenceStopAfter - fallando), true)
+                    notify("SFCast — LA CADENCIA SE ESTÁ CAYENDO",
+                           String(format: "%.1f fps contra un piso de %d. Libera la Mac o detengo la toma.",
+                                  logrado, piso))
+                }
+                if fallando >= Self.cadenceStopAfter {
+                    Log.error(String(format: "Estudio: DETENIENDO — %.0fs bajo el piso de %d fps (a %.1f). "
+                                     + "Prohibido seguir bajando: mejor detener que entregar tirones.",
+                                     fallando, piso, logrado))
+                    self.onAlert?(String(format: "Detuve la toma: la Mac no sostenía %d fps (iba a %.1f). "
+                                         + "Lo grabado hasta aquí está a salvo. Cierra apps o reinicia "
+                                         + "SFCast y vuelve a empezar.", piso, logrado), true)
+                    notify("SFCast — TOMA DETENIDA",
+                           String(format: "No se sostenían %d fps (iba a %.1f). Lo grabado está a salvo.",
+                                  piso, logrado))
+                    self.lastAutoStopReason = String(format: "el guard de CADENCIA la detuvo "
+                                                     + "(%.1f fps contra un piso de %d)", logrado, piso)
+                    self.onEmergencyStop?()
+                    return
+                }
+            }
+        }
+    }
+
+    /// Cuándo arrancó ESTE proceso. El preflight lo usa porque el costo del
+    /// compositor crece con las horas que la app lleva abierta (medido: 1.1-2.2 ms
+    /// recién abierta → 5.1-8.1 ms a los ~3 días) y ese era el factor que ninguna
+    /// medición registraba. Un benchmark de rendimiento sin el uptime del proceso
+    /// al lado no es reproducible.
+    private static let launchedAt = Date()
+
+    /// Muestrea el nivel del mic a 10 Hz mientras se graba.
+    private func startEnvelope(engine: StudioEngine) {
+        envelope.removeAll()
+        envelopeTask?.cancel()
+        envelopeTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                guard let self, self.state == .recording else { return }
+                self.envelope.append(engine.levels.get().mic)
+            }
+        }
+    }
+
+    /// Escribe `levels.json` junto al video: `{hz, mic:[…]}`. Formato tonto a
+    /// propósito — que el editor no tenga que aprender nada para usarlo.
+    private func writeEnvelope(to dir: URL) {
+        guard !envelope.isEmpty else { return }
+        let payload: [String: Any] = [
+            "hz": 10,
+            "mic": envelope.map { Double(round(1000 * $0) / 1000) },
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload) {
+            try? data.write(to: dir.appendingPathComponent("levels.json"))
+            Log.info("Estudio: envolvente de audio → levels.json (\(envelope.count) muestras a 10 Hz)")
+        }
+    }
+
+    // MARK: - GUARD DE VOZ — el sensor que faltaba y costó 35 minutos
+
+    /// El 10 ago Daniel grabó **35 minutos sin una sola muestra de voz**. El
+    /// sensor EXISTÍA: el latido escribió `mic:MUDO` **140 veces seguidas**,
+    /// desde el segundo 15. Nadie hizo nada con esa información.
+    ///
+    /// Es la quinta repetición del patrón órgano-sin-sensor de este sistema, y
+    /// la más cara: la imagen se regraba, una toma sin voz es basura. La noche
+    /// anterior se construyeron alarmas para pantalla, cámara, fps, memoria y
+    /// disco — y se dejó fuera justo la del audio, que es lo único irrecuperable.
+    ///
+    /// Cubre los tres modos de fallo, que piden avisos distintos:
+    ///  1. **Nunca llega audio** (lo de hoy: cable, el micro apagado, MOTIV
+    ///     tomándolo). Aviso a los 3 s y **auto-stop a los 20** — a los 20
+    ///     segundos no has perdido nada; a los 35 minutos lo has perdido todo.
+    ///  2. **Llegan buffers pero en silencio digital** (muteado, ganancia a
+    ///     cero). `fresh()` diría que sí llega: hay que mirar el NIVEL.
+    ///  3. **Enmudece a mitad de la toma** — el caso que más duele porque ya
+    ///     llevas media hora hablando.
+    private func startVoiceGuard(engine: StudioEngine, micEnabled: Bool) {
+        voiceTask?.cancel()
+        guard micEnabled else {
+            Log.info("Estudio: guard de voz OFF (grabación sin micrófono, a propósito)")
+            return
+        }
+        voiceTask = Task { @MainActor [weak self] in
+            var pico: Float = 0
+            var avisoSinAudio = false, avisoSilencio = false, avisoCaida = false
+            var mudoDesde: Double?
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, self.state == .recording else { return }
+                let el = self.elapsed
+                let samples = self.sink?.snapshot().micSamples ?? 0
+                let fresco = engine.levels.fresh().mic
+                pico = max(pico, engine.levels.get().mic)
+
+                // 1) NUNCA llegó audio
+                if samples == 0, el >= 3, !avisoSinAudio {
+                    avisoSinAudio = true
+                    Log.error("Estudio: SIN VOZ — 3s de grabación y CERO muestras de micrófono")
+                    self.onAlert?("⚠️ NO ESTÁ ENTRANDO TU VOZ. Revisa el micrófono AHORA "
+                                  + "(¿encendido? ¿cable? ¿otra app lo tomó?).", true)
+                    notify("SFCast — NO SE OYE TU VOZ",
+                           "Llevas 3 segundos grabando y no entra audio del micrófono.")
+                }
+                if samples == 0, el >= 20 {
+                    Log.error("Estudio: SIN VOZ a los 20s — DETENIENDO para no perder media hora")
+                    self.onAlert?("Detuve la grabación: no entraba tu voz. Arregla el micrófono "
+                                  + "y vuelve a empezar.", true)
+                    notify("SFCast — GRABACIÓN DETENIDA", "No entraba tu voz. Revisa el micrófono.")
+                    self.lastAutoStopReason = "el guard de VOZ la detuvo (0 muestras de mic en 20s)"
+                    self.onEmergencyStop?()
+                    return
+                }
+                // 2) llegan buffers, pero es silencio digital
+                if samples > 0, el >= 15, pico < 0.002, !avisoSilencio {
+                    avisoSilencio = true
+                    Log.error(String(format: "Estudio: MIC EN SILENCIO — llegan datos pero el pico "
+                                     + "en 15s es %.5f (¿muteado? ¿ganancia en cero?)", pico))
+                    self.onAlert?("El micrófono entrega datos pero NO capta sonido: ¿está muteado "
+                                  + "o con la ganancia en cero?", true)
+                    notify("SFCast — EL MICRÓFONO NO CAPTA", "Llega señal pero está en silencio.")
+                }
+                // 3) enmudeció a mitad
+                if samples > 0 {
+                    if fresco { mudoDesde = nil } else if mudoDesde == nil { mudoDesde = el }
+                    if let d = mudoDesde, el - d > 8, !avisoCaida {
+                        avisoCaida = true
+                        Log.error(String(format: "Estudio: LA VOZ SE CAYÓ en el minuto %.1f", el / 60))
+                        self.onAlert?("Tu voz dejó de entrar. Sigo grabando imagen, pero revisa "
+                                      + "el micrófono.", true)
+                        notify("SFCast — SE CAYÓ TU VOZ",
+                               "Dejó de entrar audio del micrófono. La imagen sigue grabando.")
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - health monitor (el latido que faltaba)
@@ -168,14 +584,25 @@ final class StudioRecorder {
                 let prevDrops = flow.previewDropped - lastFlow.previewDropped
                 lastFlow = flow
                 lastFlowAt = now
+                let cs = engine.compositorStats()
+                let sync = engine.syncReport()
                 Log.info(String(format: "Estudio ❤︎ %ds — stream:%.1fs-mudo (v=%d a=%d) imagen:%@ "
-                                + "mic:%@ sys:%@ frames:%d drops:%d cam:%.0ffps prev:%.0ffps(-%d) libre:%@",
+                                + "mic:%@ sys:%@ frames:%d drops:%d cam:%.0ffps prev:%.0ffps(-%d) libre:%@ "
+                                + "| comp:%.1fms sinBuf:%d cadencia:%d/%d sync:%+.0fms ram:%@",
                                 Int(self.elapsed), engine.screenHealth.silence(),
                                 beats.video, beats.audio,
                                 engine.screenFrozen ? "CONGELADA" : "ok",
                                 fresh.mic ? "ok" : "MUDO", fresh.system ? "ok" : "mudo",
                                 st?.videoFrames ?? 0, st?.droppedFrames ?? 0,
-                                camFPS, prevFPS, prevDrops, Self.gb(free)))
+                                camFPS, prevFPS, prevDrops, Self.gb(free),
+                                cs.composeMsP50, cs.bufferFailures,
+                                engine.effectiveFPS, engine.fps, sync.appliedMs,
+                                Self.gb(Self.availableRAM()))
+                 + String(format: " rellenados:%d", engine.cadence.repeatedFrames))
+                // PERFIL POR FASE cada 4 latidos (1 min): con un solo numero
+                // agregado no se puede distinguir GPU de encoder de pool, y son
+                // curas opuestas.
+                if ticks % 4 == 0 { Log.info("Estudio ⏱ " + engine.profile.line()) }
                 if free < Self.stopFreeBytes {
                     Log.error("Estudio: DISCO CASI LLENO (\(Self.gb(free))) — deteniendo para salvar lo grabado")
                     self.onAlert?("Disco casi lleno (\(Self.gb(free))) — detuve la grabación para no corromperla", true)
@@ -193,6 +620,65 @@ final class StudioRecorder {
         }
     }
 
+    /// MARCADOR EN VIVO. Devuelve el total para que la UI lo enseñe.
+    ///
+    /// No valida ni "corrige" el instante: Daniel pulsa cuando se da cuenta, y
+    /// esa señal cruda es más útil que un rango inventado — el editor tiene el
+    /// transcript con tiempos por palabra para encontrar la frontera de la frase.
+    @discardableResult
+    func mark(_ kind: String, label: String? = nil) -> Int {
+        guard state == .recording else { return markers.count }
+        let t = Date().timeIntervalSince(startedAt)
+        markers.append(.init(t: t, kind: kind, label: label))
+        Log.info(String(format: "Estudio: MARCADOR '%@' en %.1fs (total %d)", kind, t, markers.count))
+        return markers.count
+    }
+
+    var markerCount: Int { markers.count }
+
+    /// DESHACER la última marca (⌥Z). Si te equivocas al marcar, hoy el dato
+    /// quedaba sucio para siempre — y una drop-list con basura es peor que no
+    /// tenerla, porque el editor la obedece.
+    @discardableResult
+    func unmark() -> StudioManifest.Marker? {
+        guard state == .recording, let ultima = markers.popLast() else { return nil }
+        Log.info(String(format: "Estudio: marca DESHECHA ('%@' en %.1fs) — quedan %d",
+                        ultima.kind, ultima.t, markers.count))
+        return ultima
+    }
+
+    /// Cuántas de cada tipo (la UI las muestra por separado).
+    var markerTally: (cortes: Int, estrellas: Int) {
+        (markers.filter { $0.kind == "retoma" }.count,
+         markers.filter { $0.kind != "retoma" }.count)
+    }
+
+    /// Una fuente se congeló o volvió. El tramo se cierra cuando vuelve (o al
+    /// detener), y va al manifest para que el editor no use esos segundos.
+    func noteFrozen(_ source: String, frozen: Bool, reason: String) {
+        guard state == .recording else { return }
+        let t = Date().timeIntervalSince(startedAt)
+        if frozen {
+            if frozenSince[source] == nil { frozenSince[source] = t }
+        } else if let desde = frozenSince.removeValue(forKey: source) {
+            deadZones.append(.init(from: desde, to: t, source: source, reason: reason))
+            Log.error(String(format: "Estudio: TRAMO CONGELADO de %@ — %.1fs a %.1fs (%@)",
+                             source, desde, t, reason))
+        }
+    }
+
+    /// EL ESCALÓN DEL GOVERNOR queda en el manifest (v3.6).
+    ///
+    /// El evento ya existía y solo pintaba un banner. Ahora el dato sobrevive a la
+    /// toma: es la única forma de que después se pueda distinguir un archivo de 30
+    /// fps REALES de uno de 15 fps rellenados a 30 — porque `achievedFps` mide el
+    /// relleno y por construcción no puede delatarse.
+    func cadenceChanged(_ effective: Int, target: Int) {
+        guard state == .recording else { return }
+        cadenceLog.append(.init(t: Date().timeIntervalSince(startedAt),
+                                effectiveFps: effective, targetFps: target))
+    }
+
     /// El switch de escena EN VIVO queda en el timeline (va al manifest).
     func sceneSwitched(_ scene: StudioScene) {
         guard state == .recording else { return }
@@ -206,8 +692,21 @@ final class StudioRecorder {
         guard state == .recording else { return nil }
         state = .stopping
         health?.cancel(); health = nil
+        envelopeTask?.cancel(); envelopeTask = nil
+        voiceTask?.cancel(); voiceTask = nil
+        cadenceTask?.cancel(); cadenceTask = nil
         engine.onNeedNewScreenRawURL = nil
         let duration = Date().timeIntervalSince(startedAt)
+        // Un tramo congelado que seguía abierto al detener se cierra AQUÍ: si no,
+        // el daño más grave (la fuente que nunca volvió) sería justo el que no
+        // quedaría registrado.
+        for (source, desde) in frozenSince {
+            deadZones.append(.init(from: desde, to: duration, source: source,
+                                   reason: "seguía congelada al detener"))
+            Log.error(String(format: "Estudio: TRAMO CONGELADO de %@ — %.1fs al final (%.1fs)",
+                             source, desde, duration - desde))
+        }
+        frozenSince.removeAll()
         let dir = sessionDir!
         let id = videoID
 
@@ -240,6 +739,24 @@ final class StudioRecorder {
             }
             outputs.append(out)
         }
+        // FPS REALES del programa, ANTES de armar el manifest: lo conseguido
+        // tiene que quedar escrito junto a lo pedido (ver el aviso más abajo).
+        let realFPS = (programStats.map { duration > 0.5 ? Double($0.videoFrames) / duration : 0 }) ?? 0
+        achievedFPS = realFPS
+        // FPS DE CONTENIDO ÚNICO — el número que el ojo percibe.
+        //
+        // `realFPS` cuenta frames ESCRITOS. CadenceKeeper rellena los huecos
+        // repitiendo el último frame para que el archivo salga CFR (los NLE
+        // sufren con VFR, y eso se queda así a propósito). Pero entonces
+        // `realFPS` mide la salida del actuador, no el movimiento: el 15 ago
+        // dijo 29.61 sobre un archivo con 12.8 fps de contenido nuevo.
+        // `repeatedFrames` ya se contaba exacto y nadie lo restaba.
+        let repetidos = engine.cadence.repeatedFrames
+        let unicosFPS: Double? = programStats.flatMap { st -> Double? in
+            guard duration > 0.5 else { return nil }
+            return Double(max(0, st.videoFrames - repetidos)) / duration
+        }
+        let compStats = engine.compositorStats()
         let iso = ISO8601DateFormatter()
         let manifest = StudioManifest(
             id: id,
@@ -248,12 +765,22 @@ final class StudioRecorder {
             canvasWidth: Int(engine.canvasSize.width),
             canvasHeight: Int(engine.canvasSize.height),
             fps: engine.fps,
+            achievedFps: realFPS > 0 ? realFPS : nil,
             outputs: outputs,
             sceneTimeline: timeline,
             scenes: config.scenes,
             micEnabled: config.micEnabled,
-            systemAudioEnabled: config.systemAudioEnabled)
+            systemAudioEnabled: config.systemAudioEnabled,
+            markers: markers,
+            deadZones: deadZones,
+            micDevice: micDeviceName,
+            micSamples: programStats?.micSamples ?? 0,
+            repeatedFrames: repetidos,
+            uniqueContentFps: unicosFPS,
+            bufferFailures: compStats.bufferFailures,
+            cadenceTimeline: cadenceLog)
         manifest.write(to: dir)
+        writeEnvelope(to: dir)
 
         // meta.json de compat: si hay programa, el push "↑ subir" del Historial y
         // el worker del VPS lo tratan como un video normal de 1 segmento.
@@ -277,6 +804,102 @@ final class StudioRecorder {
 
         if let st = programStats {
             Log.info("Estudio: programa cerró — \(st.videoFrames) frames, \(st.droppedFrames) drops, mic=\(st.micSamples) sys=\(st.systemSamples)")
+            // FPS REALES DEL ARCHIVO (9 ago). Hasta hoy, una grabación a 21.75
+            // fps se veía IDÉNTICA a una de 30 hasta que alguien la abría con
+            // ffprobe: el manifest declaraba 30 porque 30 es lo CONFIGURADO, no
+            // lo conseguido. Daniel grabó dos videos así sin que nada se lo
+            // dijera (21.75 y 24.86 fps, medidos en sus archivos).
+            //
+            // El número existía —`videoFrames` ya se contaba— y nadie lo
+            // dividía entre la duración. Ahora se divide, se guarda en el
+            // manifest y, si se quedó corto, se AVISA. Invariante 5b: lo que no
+            // se mide se degrada en silencio, y esto se degradó en silencio.
+            let real = realFPS
+            let objetivo = Double(engine.fps)
+            if real > 0, objetivo > 0 {
+                let pct = real / objetivo
+                Log.info(String(format: "Estudio: fps REALES del archivo %.2f de %.0f pedidos (%.0f%%)",
+                                real, objetivo, pct * 100))
+                // …Y EL MOVIMIENTO, que es otra cosa (v3.6, 17 ago).
+                //
+                // La línea de arriba mide la CADENCIA del archivo. Esta mide el
+                // MOVIMIENTO. El 15 ago la primera dijo "29.61 (99%)" sobre una
+                // toma con 12.8 fps de contenido nuevo: 53.6% de los frames eran
+                // repetición. Streamlabs, la misma toma minutos después: 27.3.
+                // El aviso va sobre ESTE número, porque es el que se ve.
+                if let unicos = unicosFPS {
+                    let pctU = unicos / objetivo
+                    let repPct = real > 0 ? Double(repetidos) / (real * duration) * 100 : 0
+                    Log.info(String(format: "Estudio: MOVIMIENTO REAL %.2f fps de contenido único "
+                                    + "(%.0f%% de lo pedido · %.0f%% de los frames eran repetición)",
+                                    unicos, pctU * 100, repPct))
+                    if pctU < 0.9 {
+                        Log.error(String(format: "Estudio: EL MATERIAL SE MUEVE A %.0f%% — el archivo dice "
+                                         + "%.1f fps pero solo %.1f son contenido nuevo", pctU * 100,
+                                         real, unicos))
+                        onAlert?(String(format: "⚠️ El archivo dice %.0f fps pero se MUEVE a %.1f: %.0f%% de "
+                                        + "los frames son repetidos. Cierra y reabre SFCast antes de la "
+                                        + "toma buena (el compositor se degrada con las horas abierto) y "
+                                        + "libera RAM.", real, unicos, repPct), true)
+                        notify("SFCast — LA TOMA SE MUEVE A LA MITAD",
+                               String(format: "%.1f fps de movimiento real (el archivo dice %.0f). "
+                                      + "Reinicia SFCast antes de volver a grabar.", unicos, real))
+                    }
+                }
+                // EL AVISO SE DECIDE POR TRAMO, NO POR PROMEDIO (fix 9 ago).
+                // Ese día el promedio salió 92% —por encima del umbral del 90%,
+                // así que NO avisó— mientras seis minutos del archivo estaban a
+                // 10 fps con congelamientos de 750 ms. El promedio de una
+                // grabación larga es justo el estadístico que oculta un colapso
+                // corto: hay que mirar el PEOR tramo.
+                let peor = st.worstWindow(20)
+                if let peor, peor.fps < objetivo * 0.9 {
+                    let m = peor.startSec / 60, s = peor.startSec % 60
+                    Log.error(String(format: "Estudio: PEOR TRAMO %.1f fps en el minuto %d:%02d "
+                                     + "(promedio %.1f — por eso el promedio no sirve de alarma)",
+                                     peor.fps, m, s, real))
+                    onAlert?(String(format: "Hubo un tramo a %.0f fps (minuto %d:%02d) aunque el promedio "
+                                    + "salió %.0f. La Mac no alcanzó a componer ahí. Baja el lienzo en "
+                                    + "Ajustes → Video o cierra lo que esté cargando el sistema.",
+                                    peor.fps, m, s, real), true)
+                } else if pct < 0.9 {
+                    onAlert?(String(format: "La grabación quedó a %.1f fps, no a %.0f: la Mac no alcanzó a "
+                                    + "componer. Baja el lienzo en Ajustes → Video, o cierra lo que esté "
+                                    + "cargando el sistema.", real, objetivo), true)
+                }
+                // Los frames que NO llegaron a existir por falta de buffer no
+                // aparecían en ningún contador: `drops:0` mientras el archivo se
+                // caía. Ahora se dicen.
+                let cs = engine.compositorStats()
+                if cs.bufferFailures > 0 {
+                    Log.error("Estudio: \(cs.bufferFailures) frames sin buffer (el pool no dio memoria) — "
+                              + "señal de presión de RAM, no de CPU")
+                }
+                // LOS DOS NÚMEROS DEL COMPOSITOR, etiquetados (v3.6, 17 ago).
+                //
+                // Parecían contradecirse: el cierre decía "máx 37.4 ms" mientras
+                // las muestras por minuto de la MISMA sesión decían "máx 232 ms".
+                // No se contradicen: son dos mediciones distintas con la misma
+                // etiqueta. `Compositor.composeMs` arranca su cronómetro DESPUÉS
+                // del `task.waitUntilCompleted()` del frame anterior, así que
+                // excluye la espera de GPU; el cronómetro del render loop la
+                // incluye. Esa diferencia ES el diagnóstico: cuando el total se va
+                // a 232 ms con compose en 12, la Mac no está calculando de más,
+                // está ESPERANDO a la GPU. Ahora se dicen las dos, con su nombre.
+                let bud = 1000.0 / objetivo
+                let loop = engine.profile.snapshot()
+                Log.info(String(format: "Estudio: compositor (solo render, sin esperar GPU) "
+                                + "p50 %.1f ms · máx %.1f — de un presupuesto de %.1f ms",
+                                cs.composeMsP50, cs.composeMsMax, bud))
+                Log.info(String(format: "Estudio: vuelta COMPLETA del loop (incluye la espera de GPU) "
+                                + "p50 %.1f ms · p95 %.1f · máx %.1f (n=%d)",
+                                loop.total.p50, loop.total.p95, loop.total.max, loop.n))
+                if loop.total.p95 > bud {
+                    Log.error(String(format: "Estudio: la COLA es el problema — p95 %.1f ms contra %.1f de "
+                                     + "presupuesto (p50 va bien en %.1f). Es espera de GPU, no cálculo.",
+                                     loop.total.p95, bud, loop.total.p50))
+                }
+            }
         }
         state = .idle
         wroteScreen = false
@@ -299,6 +922,7 @@ final class StudioRecorder {
             Log.error("Estudio: hubo \(engine.screenRestarts) reenganche(s) de pantalla en esta sesión")
         }
         Log.info("Estudio: sesión \(id) guardada en \(dir.path)")
+        lastDir = dir
         return dir
     }
 }
@@ -316,6 +940,25 @@ final class ProgramSink: @unchecked Sendable {
         var droppedFrames = 0
         var micSamples = 0
         var systemSamples = 0
+        /// Frames escritos por segundo de grabación. Es lo que permite hablar
+        /// de TRAMOS en vez de promedios: el 9 ago el archivo promedió 92% del
+        /// objetivo (por eso no saltó ninguna alarma) mientras seis minutos
+        /// estaban a 10 fps. Un promedio de 45 minutos esconde un colapso de 6.
+        var perSecond: [Int] = []
+
+        /// La PEOR ventana continua de `w` segundos: (fps, segundo en que empieza).
+        func worstWindow(_ w: Int = 20) -> (fps: Double, startSec: Int)? {
+            guard perSecond.count >= w else { return nil }
+            var best: (Double, Int)?
+            var sum = perSecond[0..<w].reduce(0, +)
+            best = (Double(sum) / Double(w), 0)
+            for i in w..<perSecond.count {
+                sum += perSecond[i] - perSecond[i - w]
+                let fps = Double(sum) / Double(w)
+                if fps < best!.0 { best = (fps, i - w + 1) }
+            }
+            return best
+        }
     }
 
     private let lock = NSLock()
@@ -333,6 +976,31 @@ final class ProgramSink: @unchecked Sendable {
     private var stopped = false
     private var stats = Stats()
     private var audioErrorLogged = false
+
+    // MARK: - arranque ALINEADO de las dos pistas (fix 9 ago)
+    //
+    // Antes la sesión arrancaba en el PRIMER frame de video, y el audio además
+    // se tiraba durante 150 ms de warmup. Resultado medido en TODAS las
+    // grabaciones: `video start_time = 0.000` y `audio start_time = 0.152`.
+    //
+    // Un reproductor que respeta el start_time lo compensa; medio mundo (y
+    // varios editores) lo IGNORA y pega ambas pistas en cero — y entonces la
+    // voz va 152 ms ADELANTADA. Sumado a la latencia de cámara, eso ya es un
+    // desfase de labios que se ve a simple vista con la cara en pantalla.
+    //
+    // La cura: no arrancar la sesión hasta poder arrancar las dos pistas en el
+    // MISMO instante. Se pagan ~150 ms de cabeza (invisibles: es justo después
+    // del countdown) y los dos tracks salen con start_time 0.
+    private var firstVideoPTS = CMTime.invalid
+    private var firstAudioSeen = CMTime.invalid
+    private var firstAudioUsable = CMTime.invalid
+    private var startDeadline = CMTime.invalid
+    /// Warmup del audio: los primeros buffers de una sesión traen el arranque
+    /// del grafo (el "estruendo" del feedback v2.3).
+    private let audioWarmup: Double = 0.15
+    /// Si el mic no entrega (apagado, mudo, permiso), la grabación NO puede
+    /// quedarse esperando: pasado esto arranca solo con video.
+    private let audioWaitLimit: Double = 0.6
 
     private let quality: StudioQuality
 
@@ -423,10 +1091,24 @@ final class ProgramSink: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard let writer, let videoInput, let adaptor, !stopped, writer.status == .writing else { return }
         if !sessionStarted {
-            writer.startSession(atSourceTime: hostTime)
-            sessionStartTime = hostTime
+            if !firstVideoPTS.isValid {
+                firstVideoPTS = hostTime
+                startDeadline = CMTimeAdd(hostTime, CMTime(seconds: audioWaitLimit, preferredTimescale: 1000))
+            }
+            guard let start = resolveSessionStart(now: hostTime) else {
+                // Todavía no se pueden arrancar las DOS pistas juntas: este
+                // frame se descarta a propósito. Son milésimas del arranque, no
+                // contenido — y a cambio el archivo sale sin hueco de audio.
+                return
+            }
+            writer.startSession(atSourceTime: start)
+            sessionStartTime = start
             sessionStarted = true
+            Log.info(String(format: "ProgramSink: sesión alineada en t=%.3f (video y audio arrancan juntos)",
+                            CMTimeGetSeconds(start)))
         }
+        // Un frame anterior al arranque de sesión rompería el orden del writer.
+        if CMTimeCompare(hostTime, sessionStartTime) < 0 { return }
         guard videoInput.isReadyForMoreMediaData else {
             stats.droppedFrames += 1
             if stats.droppedFrames % 120 == 1 {
@@ -436,6 +1118,13 @@ final class ProgramSink: @unchecked Sendable {
         }
         if adaptor.append(pb, withPresentationTime: hostTime) {
             stats.videoFrames += 1
+            let sec = Int(CMTimeGetSeconds(CMTimeSubtract(hostTime, sessionStartTime)))
+            if sec >= 0, sec < 60 * 60 * 6 {
+                if stats.perSecond.count <= sec {
+                    stats.perSecond.append(contentsOf: repeatElement(0, count: sec - stats.perSecond.count + 1))
+                }
+                stats.perSecond[sec] += 1
+            }
         } else {
             stats.droppedFrames += 1
         }
@@ -451,18 +1140,46 @@ final class ProgramSink: @unchecked Sendable {
 
     private func appendAudio(_ sb: CMSampleBuffer, to input: AVAssetWriterInput?, count: () -> Void) {
         lock.lock(); defer { lock.unlock() }
-        guard let writer, let input, !stopped, writer.status == .writing,
-              sessionStarted, input.isReadyForMoreMediaData else { return }
-        // Warmup: los primeros ~150ms de audio se tiran — el writer recortaba a
-        // MITAD de buffer en el arranque y eso truena (parte del "estruendo").
+        guard let writer, let input, !stopped, writer.status == .writing else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sb)
-        if CMTimeGetSeconds(CMTimeSubtract(pts, sessionStartTime)) < 0.15 { return }
+        guard pts.isValid, pts.isNumeric else { return }
+
+        // El warmup se mide desde el PRIMER audio de la sesión, no desde el
+        // primer video: son dos relojes de arranque distintos y mezclarlos es
+        // lo que producía el hueco de 152 ms.
+        if !firstAudioSeen.isValid { firstAudioSeen = pts }
+        guard CMTimeGetSeconds(CMTimeSubtract(pts, firstAudioSeen)) >= audioWarmup else { return }
+        if !firstAudioUsable.isValid { firstAudioUsable = pts }
+
+        // Antes de que la sesión arranque no hay dónde escribir; el buffer se
+        // pierde, pero ya dejó su marca (`firstAudioUsable`) que es lo que hace
+        // arrancar las dos pistas juntas.
+        guard sessionStarted, input.isReadyForMoreMediaData else { return }
+        if CMTimeCompare(pts, sessionStartTime) < 0 { return }
         if input.append(sb) {
             count()
         } else if !audioErrorLogged {
             audioErrorLogged = true
             Log.error("ProgramSink: append de audio falló (\(writer.error?.localizedDescription ?? "?")) — el video sigue")
         }
+    }
+
+    /// ¿Ya se pueden arrancar las DOS pistas en el mismo instante?
+    /// - con mic vivo: en cuanto hay un audio pasado el warmup (el máximo de
+    ///   los dos primeros PTS, para que ninguna pista tenga que escribir en
+    ///   negativo);
+    /// - sin mic (apagado/mudo/sin permiso): tras `audioWaitLimit`, con video
+    ///   solo. Una grabación JAMÁS se queda esperando al audio (invariante #5).
+    private func resolveSessionStart(now: CMTime) -> CMTime? {
+        guard firstVideoPTS.isValid else { return nil }
+        if firstAudioUsable.isValid {
+            return CMTimeMaximum(firstVideoPTS, firstAudioUsable)
+        }
+        if startDeadline.isValid, CMTimeCompare(now, startDeadline) >= 0 {
+            Log.info("ProgramSink: sin audio en \(audioWaitLimit)s — arranco solo con video")
+            return firstVideoPTS
+        }
+        return nil
     }
 
     /// Stats en vivo para el health monitor.

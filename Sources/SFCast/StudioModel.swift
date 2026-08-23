@@ -47,7 +47,7 @@ enum SceneGlow: String, Codable, CaseIterable {
     var rgb: (r: Double, g: Double, b: Double)? {
         switch self {
         case .nada: return nil
-        case .morado: return (0.549, 0.153, 0.945)   // #8C27F1
+        case .morado: return (0.549, 0.153, 0.945)   // #8C27F1 — el morado de marca
         case .ambar: return (1.0, 0.567, 0.004)      // #ff9101
         }
     }
@@ -59,15 +59,49 @@ enum SceneGlow: String, Codable, CaseIterable {
         }
     }
 
-    // Proporciones heredadas de la burbuja (1.5pt de anillo y 10pt de halo
-    // sobre 280pt de diámetro), en fracción del lado menor del item para que se
-    // vea igual a cualquier tamaño de canvas o de cámara. El halo va un pelo más
-    // ancho que en el Loom: allá tenía que morir dentro del `glowPad` de 34px
-    // del NSPanel o se veía el corte cuadrado; aquí el compositor no recorta.
-    static let ringFraction: Double = 0.007
+    // SIN ANILLO (9 ago, Daniel): "quítales el borde, no me gusta el borde
+    // morado, pero sí el glow morado". El aro definido se fue de las dos
+    // cámaras — la del programa y la del espejo — y queda solo el halo.
+    //
+    // El halo es proporcional al item MIENTRAS es chico, y se TOPA contra el
+    // lienzo cuando el item crece. Con la fracción sola, a tamaño completo el
+    // halo salía de ~46 pt y se leía como una banda ("muy amplio, muy brusco");
+    // topado se queda en ~20 y el aura es la misma a cualquier tamaño, que es
+    // justo lo elegante. Las dos cantidades son FRACCIONES de magnitudes que
+    // escalan igual en el canvas (px) y en la pantalla (pt), así que compositor
+    // y espejo dan el mismo número sin ponerse de acuerdo.
     static let haloFraction: Double = 0.045
-    static let ringAlpha: Double = 0.9
+    static let haloCap: Double = 0.014
     static let haloAlpha: Double = 0.5
+
+    /// Radio del halo para un item, en las MISMAS unidades que se le pasen.
+    static func halo(itemMinSide: Double, canvasMinSide: Double) -> Double {
+        min(itemMinSide * haloFraction, canvasMinSide * haloCap)
+    }
+
+    /// Radio de esquina de una cámara rectangular, en fracción del lado menor.
+    /// Vive AQUÍ y no duplicado en cada lado porque el compositor y el espejo
+    /// tienen que redondear igual: que no lo hicieran fue el bug del 9 ago (el
+    /// panel redondeado y el video a escuadra).
+    static let cornerFraction: Double = 0.035
+
+    /// Radio de esquina para UN item, en px. Vive aquí por la misma razón que
+    /// `cornerFraction`: el compositor y el espejo tienen que redondear igual.
+    ///
+    /// ⛔ A PANTALLA COMPLETA el radio es CERO. El redondeo existe para una cámara
+    /// que flota SOBRE otra fuente; cuando el item cubre el lienzo entero no hay
+    /// nada detrás y las esquinas solo enseñan negro (Daniel lo cazó el 18 ago
+    /// mirando la escena Completa).
+    static func cornerRadius(minSide: Double, fullBleed: Bool, circle: Bool) -> Double {
+        if circle { return minSide / 2 }
+        if fullBleed { return 0 }
+        return minSide * cornerFraction
+    }
+
+    /// ¿El item cubre el lienzo entero? Se mide sobre el rect NORMALIZADO.
+    static func isFullBleed(_ rectNorm: CGRect) -> Bool {
+        rectNorm.width >= 0.995 && rectNorm.height >= 0.995
+    }
 }
 
 /// Un item DENTRO de una escena: qué fuente, dónde y cómo.
@@ -82,6 +116,13 @@ struct SceneItem: Codable, Identifiable, Equatable {
     var enabled = true
     var opacity: Double = 1.0
     var glow: SceneGlow = .nada // aro neón estilo Loom (clic derecho en Fuentes)
+    /// ESPEJADO HORIZONTAL de la fuente (v2.9). Manual, por escena: la cámara de
+    /// Daniel vive a la derecha del monitor y él mira a la izquierda, así que
+    /// según de qué lado quede la burbuja conviene voltearla para que parezca
+    /// que mira HACIA el contenido y no fuera del cuadro. Afecta al PROGRAMA y
+    /// al espejo con el mismo valor: es una propiedad del item, no un adorno del
+    /// panel.
+    var flipH = false
 
     init(kind: StudioSourceKind, rect: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1),
          fit: StudioFit = .fill, circleMask: Bool = false) {
@@ -101,6 +142,7 @@ struct SceneItem: Codable, Identifiable, Equatable {
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         opacity = try c.decodeIfPresent(Double.self, forKey: .opacity) ?? 1.0
         glow = try c.decodeIfPresent(SceneGlow.self, forKey: .glow) ?? .nada
+        flipH = try c.decodeIfPresent(Bool.self, forKey: .flipH) ?? false
     }
 }
 
@@ -252,16 +294,35 @@ struct StudioConfig: Codable {
     var micEnabled = true
     var systemAudioEnabled = true
     var fps = 30
-    var canvasMode = StudioCanvasMode.native
+    var canvasMode = StudioCanvasMode.p1440
     var programQuality = StudioQuality.media
     /// false = la ventana del Estudio es INVISIBLE en capturas/grabaciones
     /// (estilo OBS, default); true = ventana normal, sale en screenshots.
     var windowCapturable = false
+    /// EL ESPEJO (v2.9): proyecta la burbuja del programa sobre la pantalla que
+    /// se captura, para VER lo que estás tapando mientras grabas. Persiste
+    /// porque es una preferencia de trabajo, no un modo de sesión: si lo dejaste
+    /// prendido ayer, mañana sigue prendido. Ver `StudioMirror`.
+    var mirrorEnabled = false
     /// Migración única del 25 jul: apagar los RAW por default. Motivo: NADA los
     /// consumía (el worker del VPS solo glob-ea `seg-*.mp4`, SFStudio y la skill
     /// de edición no los tocan) y entre los dos costaban ~6.9 Mbps de los ~7.8
     /// que pesaba una sesión. Se avisa en la UI y siguen a un clic en Salidas.
     var weightFixApplied = false
+
+    /// Migración única del 9 ago: el lienzo deja de ser "nativa del display".
+    ///
+    /// Medido en el M4 de Daniel (`--compbench`): componer + codificar a
+    /// 4096×2304 pide 244 MB de huella y 5.2 ms por frame; a 2560×1440, 120 MB
+    /// y 3.6 ms. Sumando el pool de captura (queueDepth 8), la diferencia real
+    /// ronda el medio giga. Su Mac tiene 16 GB y dos monitores 4K: ese medio
+    /// giga es justo el margen que le faltó el 9 ago, cuando seis minutos de
+    /// una grabación de 45 salieron a 10 fps.
+    ///
+    /// Y el lienzo nativo no compraba NADA: sus videos salen a 1080p/1440p en
+    /// YouTube. Se pagaba 2.6× de cómputo y memoria por píxeles que se tiran en
+    /// la exportación. Reversible con un clic en Ajustes → Video.
+    var canvasFixApplied = false
 
     static let file = AppSettings.dir.appendingPathComponent("scenes.json")
 
@@ -282,11 +343,17 @@ struct StudioConfig: Codable {
         programQuality = try c.decodeIfPresent(StudioQuality.self, forKey: .programQuality) ?? .media
         windowCapturable = try c.decodeIfPresent(Bool.self, forKey: .windowCapturable) ?? false
         weightFixApplied = try c.decodeIfPresent(Bool.self, forKey: .weightFixApplied) ?? false
+        canvasFixApplied = try c.decodeIfPresent(Bool.self, forKey: .canvasFixApplied) ?? false
+        mirrorEnabled = try c.decodeIfPresent(Bool.self, forKey: .mirrorEnabled) ?? false
     }
 
     /// true si `load()` acaba de aplicar la migración de peso (la UI lo avisa
     /// UNA vez: apagar salidas del usuario en silencio sería peor que el bug).
     static private(set) var weightFixJustApplied = false
+    /// Igual para la migración de lienzo: cambiar la resolución de sus
+    /// grabaciones sin decírselo sería exactamente el "degradar en silencio"
+    /// que causó todos los bugs anteriores del Estudio.
+    static private(set) var canvasFixJustApplied = false
 
     static func load() -> StudioConfig {
         if let data = try? Data(contentsOf: file),
@@ -303,6 +370,17 @@ struct StudioConfig: Codable {
                     Self.weightFixJustApplied = true
                     Log.info("Estudio: migración de peso — RAW de pantalla y cámara apagados "
                              + "(nada los consumía; eran ~6.9 de los ~7.8 Mbps). Reactivables en Salidas.")
+                }
+                cfg.save()
+            }
+            if !cfg.canvasFixApplied {
+                cfg.canvasFixApplied = true
+                if cfg.canvasMode == .native {
+                    cfg.canvasMode = .p1440
+                    Self.canvasFixJustApplied = true
+                    Log.info("Estudio: migración de lienzo — de «nativa del display» a 2560×1440. "
+                             + "Medido: 4K pide el doble de memoria y de tiempo de composición por "
+                             + "píxeles que YouTube tira igual. Reversible en Ajustes → Video.")
                 }
                 cfg.save()
             }
@@ -369,7 +447,62 @@ struct StudioManifest: Codable {
         var sceneName: String
     }
 
-    var schemaVersion = 1
+    /// MARCADOR EN VIVO (v3.2) — lo que Daniel supo EN EL MOMENTO y que hoy se
+    /// perdía para reconstruirse caro después.
+    ///
+    /// Grabó 45.7 min para un máster de 14:30, y hora y media de esa edición se
+    /// fue en decidir cuál de sus tres intentos de cada frase era el bueno. Él
+    /// lo sabía al instante; la información simplemente no tenía dónde vivir.
+    ///
+    /// `t` es cuándo PULSÓ, no cuándo se equivocó: un humano reacciona uno o dos
+    /// segundos tarde, así que esto es una SEÑAL, no un rango. El editor lleva
+    /// el transcript con tiempos por palabra y resuelve la frontera exacta de la
+    /// frase — eso ya lo hace bien, lo que no puede es adivinar la intención.
+    struct Marker: Codable {
+        /// Segundos desde el inicio de la grabación (instante de la pulsación).
+        var t: Double
+        /// `retoma` = "la regué, tira lo anterior" · `bueno` = "esto sirve"
+        var kind: String
+        var label: String?
+    }
+
+    /// TRAMO EN QUE UNA FUENTE SE QUEDÓ CONGELADA (v3.2).
+    ///
+    /// El 9 ago la cámara se apagó sola al minuto 31.6 y la grabación siguió 18
+    /// minutos componiendo su último frame, a 30 fps impecables. En el archivo
+    /// eso es indistinguible de material bueno: **el editor lo usaría sin saber
+    /// que es una foto fija.** Por eso el daño viaja en el manifest y no solo en
+    /// el log de la app.
+    struct DeadZone: Codable {
+        var from: Double
+        var to: Double
+        var source: String      // "camera" | "screen"
+        var reason: String
+    }
+
+    /// ESCALÓN DE CADENCIA (v3.6, 17 ago) — cuándo el compositor dejó de ir al
+    /// ritmo pedido, y a cuánto se cayó.
+    ///
+    /// Es el dato que faltaba para que el archivo dejara de mentir. `CadenceKeeper`
+    /// EXISTE para forzar 30 fps constantes rellenando con el último frame, y
+    /// `achievedFps` MIDE esos 30 fps: por construcción, ese sensor no podía
+    /// reportar la falla — estaba cableado a la salida de su propio actuador.
+    ///
+    /// Medido el 15 ago en la sesión dw0w7tu0rea1: el compositor sostuvo 15/30
+    /// durante el 94% de la toma, el archivo salió con 12.8 fps de contenido
+    /// ÚNICO (53.6% de los frames eran duplicados) y el resumen dijo "29.61 de 30
+    /// pedidos (99%)". La misma toma con Streamlabs minutos después: 27.3 fps
+    /// únicos, 100% de los frames a 33.33 ms exactos.
+    ///
+    /// El archivo sigue saliendo CFR a propósito (los NLE sufren con VFR). Lo que
+    /// cambia es que el daño viaja al lado, aquí, para que la edición lo sepa.
+    struct CadencePoint: Codable {
+        var t: Double           // segundos desde el inicio de la grabación
+        var effectiveFps: Int   // a cuánto está componiendo DE VERDAD
+        var targetFps: Int      // a cuánto se le pidió
+    }
+
+    var schemaVersion = 2
     var id: String
     var kind = "studio"
     var startedAt: String
@@ -377,11 +510,46 @@ struct StudioManifest: Codable {
     var canvasWidth: Int
     var canvasHeight: Int
     var fps: Int
+    /// FPS PEDIDOS vs los que de verdad quedaron en el programa. Se separan a
+    /// propósito: `fps` es la intención y `achievedFps` es el hecho, y el 9 ago
+    /// se descubrió que podían diferir en un 27% sin que nadie se enterara.
+    var achievedFps: Double?
     var outputs: [OutputFile]
     var sceneTimeline: [SceneSwitch]
     var scenes: [StudioScene]
     var micEnabled: Bool
     var systemAudioEnabled: Bool
+    /// Lo que Daniel marcó mientras grababa (⌘⇧X / ⌘⇧M).
+    var markers: [Marker] = []
+    /// Tramos con la imagen congelada — el editor NO debe usarlos.
+    var deadZones: [DeadZone] = []
+    /// Qué entrada de micrófono se usó DE VERDAD. Sin esto, un diagnóstico de
+    /// audio empieza a ciegas: el Shure de Daniel cambia de formato entre
+    /// arranques y el sistema tiene cuatro entradas candidatas.
+    var micDevice: String?
+    /// Muestras de micrófono escritas. **Si es 0, la grabación NO TIENE VOZ** —
+    /// y el editor tiene que saberlo antes de invertir una hora en cortarla.
+    var micSamples: Int = 0
+
+    // MARK: - la verdad del MOVIMIENTO (v3.6, 17 ago)
+    //
+    // `achievedFps` cuenta frames ESCRITOS, incluidos los que CadenceKeeper
+    // rellenó con contenido repetido. Es un número honesto sobre la cadencia del
+    // archivo y una mentira sobre el movimiento. Los tres campos de abajo dicen
+    // la otra mitad, y son los que el puente a la edición debe leer.
+
+    /// Frames escritos que eran REPETICIÓN del anterior (relleno de CadenceKeeper).
+    var repeatedFrames: Int = 0
+    /// **EL NÚMERO QUE IMPORTA:** frames de contenido nuevo por segundo. Es lo que
+    /// el ojo percibe como fluidez. Si `achievedFps` dice 29.61 y esto dice 12.8,
+    /// el material se mueve a la mitad aunque el contenedor diga 30.
+    var uniqueContentFps: Double?
+    /// Frames que nunca llegaron a existir porque el pool no dio memoria. Señal de
+    /// presión de RAM, no de CPU.
+    var bufferFailures: Int = 0
+    /// Cada escalón del governor durante la toma. Un tramo con
+    /// `effectiveFps < targetFps * 0.7` sostenido es material a medio movimiento.
+    var cadenceTimeline: [CadencePoint] = []
 
     func write(to dir: URL) {
         let enc = JSONEncoder()

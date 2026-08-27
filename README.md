@@ -64,6 +64,15 @@ Vive en **/Applications** con su icono propio (anillo mostaza): Spotlight o
 Launchpad, como cualquier app. Con el hub abierto sale en el Dock y Cmd+Tab; al
 cerrarlo queda solo el ⏺ del menu bar. Salir: Cmd+Q o "Salir de SFCast".
 
+⚠️ **`validate.sh` da 4/5 (RED) en cualquier máquina que no sea el Mac Mini, y NO es una
+regresión.** El check `[5/5] healthcheck LiveKit VPS` hace `ssh hermes-vps`, y ese alias solo
+existe en la config SSH del Mini; en el Studio falla con *"Could not resolve hostname"*.
+Verificado el 26 ago corriendo el MISMO `validate.sh` desde un worktree del commit anterior a
+todos los cambios de esa noche: idéntico RED, idéntico error. Los cuatro checks que no
+dependen de SSH (build, worker, /health del VPS, biblioteca gated) sí pasan, y el VPS
+responde por HTTPS. No lo arregles bajando el gate: o corres el script en el Mini, o le das
+al Studio el alias en `~/.ssh/config`.
+
 **El permiso de pantalla NO cuesta un clic por rebuild** (medido el 26 ago 2026;
 este README dijo lo contrario durante un mes). El requisito designado del bundle
 es `identifier "so.saasfactory.sfcast" and certificate leaf = H"3039…"`: habla del

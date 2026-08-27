@@ -41,6 +41,15 @@ enum ScreenDoctor {
         return content.map { !$0.displays.isEmpty } ?? false
     }
 
+    /// ¿Está bloqueada la pantalla? Con la sesión bloqueada macOS deniega la
+    /// captura SIEMPRE, con un error que se lee igual que un permiso revocado
+    /// ("El usuario rechazó la configuración de TCC"). Distinguirlos es la
+    /// diferencia entre no hacer nada y borrarle a Daniel una aprobación buena.
+    static func sesionBloqueada() -> Bool {
+        guard let d = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
+        return (d["CGSSessionScreenIsLocked"] as? Bool) == true
+    }
+
     /// Chequeo + auto-reparación. Se llama al ARRANQUE (rutas interactivas) y
     /// desde los sitios de fallo del Estudio; el candado `ran` hace gratis a
     /// los llamadores duplicados.
@@ -51,6 +60,27 @@ enum ScreenDoctor {
             Log.info("Doctor pantalla: sin canPrompt (lanzada de terminal) — no reparo")
             return
         }
+        // ⛔⛔ LA SESIÓN BLOQUEADA NO ES UN PERMISO ROTO (26 ago 2026, 22:51).
+        //
+        // Este doctor destruyó esa noche un permiso que estaba PERFECTAMENTE
+        // SANO. La Mac llevaba media hora sola, la pantalla se bloqueó, y macOS
+        // —que deniega la captura en sesión bloqueada, por diseño— devolvió
+        // "El usuario rechazó la configuración de TCC". El doctor leyó eso como
+        // fila muerta, corrió `tccutil reset` y borró la aprobación buena.
+        //
+        // Es el peor fallo posible en este archivo: un reparador que rompe. Y es
+        // silencioso, porque de noche no hay nadie mirando — justo cuando la
+        // pantalla está bloqueada y la trampa está armada.
+        //
+        // Con la sesión bloqueada NO se diagnostica y NO se repara. No hay nada
+        // que arreglar y no hay nadie a quien preguntarle.
+        if sesionBloqueada() {
+            Log.info("Doctor pantalla: la sesión está BLOQUEADA (\(razon)) — macOS deniega la captura "
+                     + "por diseño, no es un permiso roto. No toco nada.")
+            ran = false   // que vuelva a mirar cuando Daniel desbloquee
+            return
+        }
+
         // SCShareableContent puede fallar TRANSITORIAMENTE (cero displays en
         // hipos de WindowServer — 7 ago 19:39: cinco reintentos y enganchó).
         // Tres sondas antes de declarar muerto el permiso: resetear la fila
@@ -61,6 +91,13 @@ enum ScreenDoctor {
                 return
             }
             if sonda < 3 { try? await Task.sleep(nanoseconds: 4_000_000_000) }
+        }
+        // Segunda red: la sesión pudo bloquearse DURANTE las tres sondas (son 8-12
+        // segundos). Se vuelve a preguntar justo antes de tocar nada irreversible.
+        if sesionBloqueada() {
+            Log.info("Doctor pantalla: se bloqueó la sesión mientras sondeaba — no reparo")
+            ran = false
+            return
         }
         let preflight = Permissions.screenGranted
         Log.error("Doctor pantalla: permiso de pantalla MUERTO (\(razon), preflight=\(preflight)) — reparando")

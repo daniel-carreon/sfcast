@@ -94,6 +94,12 @@ let recTestSeconds: Int? = {
     return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 12
 }()
 
+/// `--permisos`: imprime el estado de TCC de ESTE bundle y sale. Existe porque
+/// el 26 ago hizo falta saber si un permiso seguía vivo con la pantalla
+/// bloqueada —cuando ninguna captura de prueba puede responderlo— y no había
+/// forma de preguntárselo a la app sin abrirla y ponerse a grabar.
+let soloPermisos = cliArgs.contains("--permisos")
+
 /// QA DEL VIGÍA DE MAIN (`--bloqueamain N`): congela main a propósito.
 let bloqueaMainSeconds: Int? = {
     guard let i = cliArgs.firstIndex(of: "--bloqueamain") else { return nil }
@@ -281,6 +287,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 hud.hide()
                 exit(0)
             }
+        } else if soloPermisos {
+            let pantalla = Permissions.screenGranted
+            let linea = "PERMISOS pantalla=\(pantalla ? "SI" : "NO") "
+                + "camara=\(Permissions.cameraGranted ? "SI" : "NO") "
+                + "mic=\(Permissions.micGranted ? "SI" : "NO") "
+                + "sesionBloqueada=\(ScreenDoctor.sesionBloqueada() ? "SI" : "NO")"
+            Log.info(linea)
+            print(linea)
+            exit(pantalla ? 0 : 1)
         } else if let n = bloqueaMainSeconds {
             // QA DEL VIGÍA (`--bloqueamain N`): bloquea el hilo principal N
             // segundos a propósito. Es la única forma de comprobar que MainWatch

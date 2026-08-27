@@ -458,6 +458,17 @@ final class StudioEngine: NSObject {
         guard let display = content.displays.first(where: { $0.displayID == elegida })
                 ?? content.displays.first(where: { $0.displayID == mainID })
                 ?? content.displays.first else {
+            // EL MENSAJE TIENE QUE DISTINGUIR (26 ago 2026). Con la sesión
+            // bloqueada macOS deniega la captura por diseño y devuelve un error
+            // que se lee idéntico a un permiso revocado. Decirle a Daniel que
+            // vaya a aprobar algo que ya está aprobado es mandarlo a perseguir
+            // un fantasma — y fue el mismo malentendido que llevó al doctor a
+            // borrarle esa noche una aprobación buena.
+            if ScreenDoctor.sesionBloqueada() {
+                throw NSError(domain: "SFCast", code: 4, userInfo: [NSLocalizedDescriptionKey:
+                    "La sesión está bloqueada: macOS no deja capturar la pantalla hasta que "
+                    + "desbloquees. El permiso está bien."])
+            }
             throw NSError(domain: "SFCast", code: 1, userInfo: [NSLocalizedDescriptionKey:
                 "Sin permiso de pantalla efectivo (aprueba «Grabación de pantalla» y reabre)."])
         }
@@ -552,6 +563,10 @@ final class StudioEngine: NSObject {
     func retryScreenIfNeeded() {
         guard isRunning, !screenAvailable, !retryingScreen, !restartingScreen,
               Permissions.screenGranted else { return }
+        // Con la sesión bloqueada no hay nada que reintentar: la captura está
+        // denegada por diseño y volverá sola al desbloquear. Insistir solo
+        // llenaría el log de una falla que no lo es.
+        if ScreenDoctor.sesionBloqueada() { return }
         let ahora = CACurrentMediaTime()
         guard ahora >= nextScreenRetryAt else { return }
         retryingScreen = true

@@ -1495,3 +1495,45 @@ notificación del sistema. Y el `waitUntilExit()` de `tccutil` tiene techo de 2 
 
 QA nuevo: `--tomas N [--dura S] [--pausa S]` · `--bug26ago` (revive el hueco) ·
 `--bloqueamain N` (congela main para ejercer el vigía).
+
+### v3.7b — el reparador que rompe: `tccutil reset` sobre una sesión bloqueada (26 ago, 22:51)
+
+El fallo más caro de la noche lo causó el código que existe para evitar fallos.
+
+**Qué pasó.** 22:51. La Mac llevaba media hora sola, la pantalla se había bloqueado. Una
+prueba abrió el Estudio; macOS **deniega la captura de pantalla con la sesión bloqueada,
+por diseño**, y devuelve *"El usuario rechazó la configuración de TCC"* — un error que se
+lee **idéntico** a un permiso revocado. `ScreenDoctor.checkAndRepair` hizo sus tres sondas,
+concluyó `permiso de pantalla MUERTO (preflight=true)` y ejecutó `tccutil reset`.
+
+Borró una aprobación que estaba perfectamente sana. Verificado después con `--permisos`:
+`pantalla=NO camara=SI mic=SI`. Coste real: un clic de Daniel a las 05:30, justo lo que
+esta sesión había demostrado que ya no hacía falta.
+
+**Por qué es la peor forma de fallar.** (a) Es un reparador que rompe. (b) Es silencioso.
+(c) Solo se dispara **de noche**, con la pantalla bloqueada, que es exactamente cuando no
+hay nadie para verlo — la trampa se arma sola cuando nadie mira.
+
+**Los tres candados:**
+1. `ScreenDoctor.sesionBloqueada()` (vía `CGSessionCopyCurrentDictionary` →
+   `CGSSessionScreenIsLocked`). Con la sesión bloqueada **no se diagnostica y no se
+   repara**: no hay nada que arreglar y no hay a quién preguntarle. Además se limpia `ran`,
+   para que vuelva a mirar cuando Daniel desbloquee.
+2. Segunda consulta **justo antes** de tocar nada irreversible: las tres sondas tardan 8-12 s
+   y la sesión puede bloquearse en medio.
+3. El motor ya no miente: con la sesión bloqueada, `startScreenTap` dice *"La sesión está
+   bloqueada… El permiso está bien"* en vez de mandarlo a Ajustes. Y el bucle de reintentos
+   se calla, porque no hay nada que reintentar.
+
+Verificado en la misma condición que lo causó (sesión bloqueada, las dos rutas de entrada):
+`Doctor pantalla: la sesión está BLOQUEADA — macOS deniega la captura por diseño, no es un
+permiso roto. No toco nada.` Resets de la noche: 1, y ninguno después del arreglo.
+
+**Herramienta nueva:** `--permisos` imprime el estado de TCC de este bundle y sale. Hizo
+falta porque con la pantalla bloqueada **ninguna captura de prueba puede responder** si un
+permiso sigue vivo, y no había forma de preguntárselo a la app sin abrirla y grabar.
+
+**La lección, que vale más que el parche:** *un diagnóstico que no sabe distinguir "no puedo
+ahora" de "está roto" no es un diagnóstico — y si además tiene permiso para reparar, es un
+destructor con buenas intenciones.* Antes de que un órgano ejecute algo irreversible, tiene
+que poder demostrar que el paciente está enfermo, no solo que no responde.

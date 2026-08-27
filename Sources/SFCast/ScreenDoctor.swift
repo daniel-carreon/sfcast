@@ -85,6 +85,31 @@ enum ScreenDoctor {
         // hipos de WindowServer — 7 ago 19:39: cinco reintentos y enganchó).
         // Tres sondas antes de declarar muerto el permiso: resetear la fila
         // por un hipo costaría un prompt innecesario a Daniel.
+        // SIN FILA, SIN SONDEO (26 ago 2026). Las tres sondas existen para el caso
+        // STALE —Ajustes dice que sí y la captura falla igual— y cuestan 8-12 s.
+        // Cuando el preflight dice que NO hay permiso, no hay nada que sondear:
+        // se sabe la respuesta y esos doce segundos son Daniel esperando delante
+        // de la app a las 05:30. Se va directo a pedirlo.
+        if !Permissions.screenGranted {
+            Log.info("Doctor pantalla: no hay permiso de pantalla (\(razon)) — lo pido ya, sin sondear")
+            CGRequestScreenCaptureAccess()
+            if await pollGranted(seconds: 120) { offerRelaunch(); return }
+            Log.error("Doctor pantalla: nadie aprobó el permiso en 120 s")
+            if !grabandoAhora, !estudioVivo {
+                let a = NSAlert()
+                a.messageText = "Falta aprobar «Grabación de pantalla»"
+                a.informativeText = "Apruébala en Ajustes → Privacidad y seguridad → Grabación de pantalla."
+                a.addButton(withTitle: "Abrir Ajustes")
+                a.addButton(withTitle: "Luego")
+                NSApp.activate(ignoringOtherApps: true)
+                if a.runModal() == .alertFirstButtonReturn { Permissions.openPrivacyPane("ScreenCapture") }
+            } else if !grabandoAhora {
+                avisarSinBloquear("Falta aprobar «Grabación de pantalla»",
+                                  "Ajustes → Privacidad y seguridad → Grabación de pantalla, y reabre SFCast.")
+            }
+            return
+        }
+
         for sonda in 1...3 {
             if await screenEffective() {
                 Log.info("Doctor pantalla: permiso efectivo OK (\(razon), sonda \(sonda))")
@@ -230,9 +255,21 @@ enum ScreenDoctor {
                      + "no interrumpo la toma; aplica al reabrir")
             return
         }
+        // CON EL ESTUDIO ABIERTO Y SIN GRABACIÓN: SE REABRE SOLA (26 ago 2026).
+        //
+        // macOS solo aplica el permiso de pantalla a un proceso NUEVO, así que
+        // tras aprobarlo hay que relanzar. Pedírselo a Daniel convertía UN clic
+        // ("Permitir") en tres: permitir, cerrar, abrir. Y aquí no hay nada que
+        // proteger — el guard de `grabandoAhora` ya se cumplió arriba, así que
+        // no hay ninguna toma viva que un relanzamiento pueda costar.
+        //
+        // Es el único caso donde reabrir solo es claramente lo que él quiere:
+        // acaba de aprobar el permiso PARA poder capturar, y la app no puede
+        // capturar hasta reabrirse. No hay decisión que tomar.
         guard !estudioVivo else {
-            avisarSinBloquear("Permiso de pantalla aprobado",
-                              "macOS lo aplica al reabrir SFCast. Ciérrala y ábrela cuando te venga bien.")
+            Log.info("Doctor pantalla: permiso aprobado y sin grabación viva — REABRIENDO sola")
+            notify("SFCast", "Permiso concedido. Me reabro para aplicarlo.")
+            relanzar()
             return
         }
         Log.info("Doctor pantalla: permiso aprobado — ofreciendo reabrir")
@@ -242,13 +279,18 @@ enum ScreenDoctor {
         a.addButton(withTitle: "Reabrir ahora")
         a.addButton(withTitle: "Luego")
         NSApp.activate(ignoringOtherApps: true)
-        if a.runModal() == .alertFirstButtonReturn {
-            let path = Bundle.main.bundlePath
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/bin/sh")
-            p.arguments = ["-c", "sleep 0.6; /usr/bin/open \"\(path)\""]
-            try? p.run()
-            NSApp.terminate(nil)
-        }
+        if a.runModal() == .alertFirstButtonReturn { relanzar() }
+    }
+
+    /// Cierra y vuelve a abrir este mismo bundle. macOS solo aplica el permiso
+    /// de pantalla a procesos nuevos, así que esto es el último paso obligatorio
+    /// de cualquier aprobación.
+    private static func relanzar() {
+        let path = Bundle.main.bundlePath
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "sleep 0.6; /usr/bin/open \"\(path)\""]
+        try? p.run()
+        NSApp.terminate(nil)
     }
 }

@@ -8,6 +8,18 @@ grabar. No tienes que cerrar nada ni entrar a Ajustes.
 
 Comprobarlo, si quieres: `open -W /Applications/SFCast.app --args --permisos` → `pantalla=SI`.
 
+**La app ya abre y graba sin que toques nada** — medido a las 23:05: dos tomas, 30.15 →
+30.14 fps, hueco 0.000, `TOMAS_OK`, con cámara y micrófono íntegros. Lo único que ese clic
+desbloquea es la **fuente de pantalla**. Y no hay forma de dártelo hecho: TCC exige consentimiento
+humano por diseño, TCC.db está protegido por SIP, y disparar el diálogo con la pantalla
+bloqueada lo dejaría huérfano — que se resuelve como DENEGADO y te costaría más.
+
+_Si el diálogo no apareciera_ (le pasó a este repo en julio con la cola de tccd atascada):
+```
+tccutil reset ScreenCapture so.saasfactory.sfcast && open -a /Applications/SFCast.app
+```
+o a mano: Ajustes → Privacidad y seguridad → Grabación de pantalla → SFCast.
+
 **Por qué te debo ese clic.** A las 22:51, con la Mac sola y la pantalla ya bloqueada, macOS
 le negó la captura a la app —lo hace **por diseño** con la sesión bloqueada— y el
 "ScreenDoctor" leyó esa negativa como un permiso podrido y corrió `tccutil reset`. Borró una

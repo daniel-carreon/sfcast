@@ -396,9 +396,12 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     /// Devuelve las teclas al sistema en cuanto termina la toma.
     func soltarAtajosDeMarcador() {
         guard hotkeyRetoma != nil || hotkeyBueno != nil else { return }
-        hotkeyRetoma = nil
-        hotkeyBueno = nil
-        hotkeyDeshacer = nil
+        // desregistrar() ANTES del nil: poner la propiedad en nil no destruye
+        // el objeto (el registro estático lo retiene) y la tecla se quedaba
+        // tomada toda la vida del proceso. Ver GlobalHotKey.desregistrar().
+        hotkeyRetoma?.desregistrar();  hotkeyRetoma = nil
+        hotkeyBueno?.desregistrar();   hotkeyBueno = nil
+        hotkeyDeshacer?.desregistrar(); hotkeyDeshacer = nil
         Log.info("Atajos de marcador liberados (⌥C y ⌥X vuelven a escribir ç y ≈)")
     }
 
@@ -1198,6 +1201,21 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     /// Sube una alarma a la UI. Las críticas se quedan hasta que la situación
     /// se cure; las buenas se borran solas.
     func raiseAlert(_ message: String, critical: Bool, sticky: Bool? = nil) {
+        // ⛔ LO NO-CRÍTICO NO SE PINTA (27 ago 2026). Regla de Daniel: *"que dejen
+        // de salir estas mierdas... si es tan urgente lo sabré"*. Y tiene razón:
+        // este panel vive a un palmo de su cara mientras habla a cámara, y un
+        // banner que informa de algo que ya se resolvió solo ("la GPU respira",
+        // "la pantalla se recuperó", "el micrófono volvió") solo entrena a
+        // ignorar el sitio donde SÍ van a salir las cosas graves.
+        //
+        // Lo crítico sigue gritando, y debe: cámara congelada, micrófono mudo,
+        // pantalla caída o cámara equivocada NO se notan hablando —esos avisos
+        // existen porque cada uno costó una toma— y ahí el silencio sale caro.
+        // El resto queda en el log, que es donde se revisa en frío.
+        guard critical else {
+            Log.info("Estudio (solo log): \(message)")
+            return
+        }
         alert = message
         alertCritical = critical
         if !(sticky ?? critical) {

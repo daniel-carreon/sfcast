@@ -43,8 +43,11 @@ final class GlobalHotKey {
         guard status == noErr, let refLocal else {
             // Que otra app ya tenga el atajo no puede tumbar la grabación: se
             // reporta y se sigue sin él (el marcador tiene otras puertas).
+            // El sospechoso #1 NO es "otra app": es OTRA INSTANCIA DE SFCAST
+            // (o esta misma, que no soltó el atajo de la corrida anterior).
+            // Decirlo mal mandó la cacería del 27 ago al lado equivocado.
             Log.error("Atajo global \(descripcion) NO se registró (status \(status)) "
-                      + "— probablemente otra app ya lo tiene")
+                      + "— otra instancia de SFCast o alguna app lo tiene tomado")
             return nil
         }
         self.ref = refLocal
@@ -53,10 +56,24 @@ final class GlobalHotKey {
         _ = hotKeyID
     }
 
-    deinit {
-        if let ref { UnregisterEventHotKey(ref) }
+    /// SUELTA la tecla de verdad. NO se puede confiar en `deinit`: mientras el
+    /// atajo vive, `registrados[id] = self` es una referencia FUERTE a sí mismo,
+    /// así que poner la propiedad en `nil` desde fuera no destruye nada y el
+    /// hotkey se queda tomado hasta que muere el proceso. Ese era el bug del
+    /// 26-27 ago: `soltarAtajosDeMarcador()` escribía "atajos liberados" en el
+    /// log y no liberaba nada — ⌥C y ⌥X seguían comiéndose ç y ≈ en todas las
+    /// apps, y el siguiente arranque de SFCast chocaba con su propio fantasma
+    /// (`eventHotKeyExistsErr`, -9878) mientras el mensaje culpaba a "otra app".
+    /// Un actuador que reporta su intención no es un sensor.
+    func desregistrar() {
+        guard let r = ref else { return }
+        UnregisterEventHotKey(r)
+        ref = nil
         GlobalHotKey.registrados[id] = nil
     }
+
+    /// Red de seguridad: si alguien SÍ logra soltar la última referencia.
+    deinit { desregistrar() }
 
     private static func instalarHandlerSiHaceFalta() {
         guard !handlerInstalado else { return }

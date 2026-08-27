@@ -64,9 +64,17 @@ Vive en **/Applications** con su icono propio (anillo mostaza): Spotlight o
 Launchpad, como cualquier app. Con el hub abierto sale en el Dock y Cmd+Tab; al
 cerrarlo queda solo el ⏺ del menu bar. Salir: Cmd+Q o "Salir de SFCast".
 
-**Cada rebuild cuesta UNA re-aprobación del permiso de pantalla.** macOS 26 lo
-liga al cdhash del binario. Cámara y micrófono NO se revocan porque la firma
-("SFlow Dev") es estable — por eso existe.
+**El permiso de pantalla NO cuesta un clic por rebuild** (medido el 26 ago 2026;
+este README dijo lo contrario durante un mes). El requisito designado del bundle
+es `identifier "so.saasfactory.sfcast" and certificate leaf = H"3039…"`: habla del
+**certificado**, no del cdhash. Con la identidad estable "SFlow Dev", TCC
+revalida contra ese requisito y pantalla, cámara y micrófono aguantan. Verificado
+en 7 ciclos seguidos de compilar + reinstalar, con cdhash distinto cada vez.
+
+⚠️ Lo que **sí** rompe el permiso es sustituir el bundle **con la app corriendo**:
+el proceso vivo se queda con una firma que ya no coincide con el disco. Cierra
+SFCast antes de copiar. (Los cinco días de agosto con 8,193 reintentos fallidos
+encajan con eso, no con el mito del rebuild.)
 
 ---
 

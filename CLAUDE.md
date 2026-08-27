@@ -119,7 +119,19 @@ open -W /Applications/SFCast.app --args --studiobench 30 --killstream  # mata el
 open -W /Applications/SFCast.app --args --glowtest                     # aro neón: PNGs + costo por frame
 open -W /Applications/SFCast.app --args --mirrortest 6                 # ESPEJO: invisibilidad, alineación, arrastre, tamaños, sensor, costo
 open /Applications/SFCast.app --args --mirrorlook 16                   # ESPEJO capturable, para revisar el diseño con screenshot
+open -W /Applications/SFCast.app --args --tomas 6 --dura 8              # TOMAS ENCADENADAS: 6 grabaciones con pausas crecientes
+open -W /Applications/SFCast.app --args --tomas 6 --dura 8 --bug26ago   # …con el hueco de cabeza REVIVIDO a propósito
+open -W /Applications/SFCast.app --args --bloqueamain 12                # congela main: ejerce el vigía MainWatch
 ```
+
+⚠️ **`--tomas` es el arnés que faltaba** (26 ago 2026). Todo lo demás de esta lista
+prueba UNA toma, y el bug del hueco de cabeza solo aparecía **de la segunda en
+adelante** — la primera de cada sesión siempre salía perfecta. Si tocas el arranque
+o el cierre de una grabación, este es el test que tiene que quedar verde.
+
+⚠️ **Nunca sustituyas el bundle con la app corriendo.** Ahí sí se rompe el permiso
+de pantalla (el proceso vivo se queda con una firma que ya no coincide con el
+disco). Cierra SFCast, copia, abre.
 
 `--mirrortest` imprime en `~/Library/Logs/sfcast.log` (con `open` no hay stdout).
 
@@ -153,8 +165,22 @@ lienzo para que a tamaño completo no se lea como banda. Sensor de oclusión
 3. **La firma "SFlow Dev" es un cert local ESTABLE** (sin Apple Developer Program).
    macOS 15+ rompe ScreenCaptureKit con firma ad-hoc, y un cert estable mantiene el
    TCC de cámara/micrófono entre rebuilds. Por eso existe — no la cambies.
-4. **Cada rebuild cuesta UNA re-aprobación del permiso de pantalla** (macOS lo liga al
-   cdhash del binario). Es esperado, no un bug.
+4. **El permiso de pantalla SÍ sobrevive a los rebuilds** (medido el 26 ago 2026, y
+   corrige lo que este archivo afirmó durante un mes). El requisito designado del
+   bundle es `identifier "so.saasfactory.sfcast" and certificate leaf =
+   H"3039…"` — **habla del CERTIFICADO, no del cdhash**. Con la identidad estable
+   "SFlow Dev", TCC revalida contra ese requisito y el permiso aguanta. Verificado
+   esa noche en **7 ciclos seguidos de compilar + reinstalar** con cdhash distinto
+   cada vez (`ddbd3d11` → `9c0918b9` → … → `a70e619d`): las grabaciones de pantalla
+   siguieron funcionando sin un solo clic.
+   ⚠️ Lo que sí lo rompe es otra cosa, y conviene no confundirlas: sustituir el
+   bundle **con la app corriendo** deja al proceso vivo con una firma que ya no
+   coincide con el disco. Por eso `scripts/instalar` (y cualquier mano) debe
+   CERRAR SFCast antes de copiar. El apagón de cinco días de agosto (8,193
+   reintentos fallidos, 21 ago 22:07 → 26 ago 07:04) encaja con eso o con una
+   firma hecha por otro camino — **no con "cada rebuild cuesta un clic"**, que es
+   lo que se creyó y lo que dejó dos veces un "⏳ pendiente de un gesto de Daniel"
+   sin ejercer.
 5. **La grabación siempre queda a salvo en local** (`~/Movies/SFCast/{id}/`) aunque la
    subida falle. `--partial` reanuda.
 

@@ -88,6 +88,11 @@ enum ScreenDoctor {
                       + "no interrumpo la toma; se lo digo al terminar")
             return
         }
+        guard !estudioVivo else {
+            avisarSinBloquear("Falta aprobar «Grabación de pantalla»",
+                              "Ajustes → Privacidad y seguridad → Grabación de pantalla, y reabre SFCast.")
+            return
+        }
         let a = NSAlert()
         a.messageText = "Falta aprobar «Grabación de pantalla»"
         a.informativeText = "Apruébala en Ajustes → Privacidad y seguridad → Grabación de pantalla, y reabre SFCast."
@@ -119,7 +124,16 @@ enum ScreenDoctor {
         p.arguments = ["reset", "ScreenCapture", Bundle.main.bundleIdentifier ?? "so.saasfactory.sfcast"]
         do {
             try p.run()
-            p.waitUntilExit()
+            // Con TECHO (26 ago 2026). El comentario de arriba dice "<100 ms" y es
+            // verdad casi siempre; un `waitUntilExit()` sin freno en MainActor
+            // convierte ese "casi" en una app colgada para siempre. Si tccutil se
+            // atasca, se le deja atrás y se dice.
+            let limite = Date().addingTimeInterval(2.0)
+            while p.isRunning, Date() < limite { usleep(20_000) }
+            if p.isRunning {
+                Log.error("Doctor pantalla: tccutil lleva >2 s — sigo sin esperarlo")
+                return
+            }
             Log.info("Doctor pantalla: tccutil reset → exit \(p.terminationStatus)")
         } catch {
             Log.error("Doctor pantalla: tccutil no corrió: \(error.localizedDescription)")
@@ -138,6 +152,33 @@ enum ScreenDoctor {
             || RecordingController.shared.state != .idle
     }
 
+    /// ⛔ AMPLIADO EL 26 AGO 2026: tampoco con el Estudio simplemente ABIERTO.
+    ///
+    /// El guard de arriba solo cubría "hay grabación viva", y el cuelgue que
+    /// Daniel reportó esa noche pasó **en el preview, antes de dar REC**: abrió
+    /// el Estudio a las 19:18:17 y a las 19:21:46 lo cerró, con el chip de fps
+    /// clavado y la ventana sin responder — y el log mudo los tres minutos y
+    /// medio de en medio, porque los sensores viven en `Timer` de RunLoop y un
+    /// modal los para a todos.
+    ///
+    /// Y este doctor se dispara **2.5 s después de cada apertura del Estudio**,
+    /// siempre. Un modal que puede aparecer detrás de la ventana del Estudio, o
+    /// en el monitor que Daniel no está mirando, es una app colgada desde la
+    /// silla. Con el Estudio vivo el aviso va por donde no bloquea a nadie: la
+    /// barra de la propia ventana y una notificación del sistema.
+    @MainActor
+    private static var estudioVivo: Bool {
+        StudioController.shared.window?.isVisible == true
+    }
+
+    /// Aviso que NO bloquea. Misma información, cero modales.
+    @MainActor
+    private static func avisarSinBloquear(_ titulo: String, _ cuerpo: String) {
+        Log.error("Doctor pantalla: \(titulo) — \(cuerpo) (aviso sin modal: el Estudio está vivo)")
+        StudioController.shared.raiseAlert("\(titulo). \(cuerpo)", critical: true, sticky: true)
+        notify("SFCast — \(titulo)", cuerpo)
+    }
+
     /// macOS solo aplica el permiso de pantalla a un proceso NUEVO. Un clic,
     /// jamás automático: si hubiera una grabación viva, Daniel decide.
     private static func offerRelaunch() {
@@ -146,6 +187,11 @@ enum ScreenDoctor {
         guard !grabandoAhora else {
             Log.info("Doctor pantalla: permiso aprobado, pero HAY GRABACIÓN VIVA — "
                      + "no interrumpo la toma; aplica al reabrir")
+            return
+        }
+        guard !estudioVivo else {
+            avisarSinBloquear("Permiso de pantalla aprobado",
+                              "macOS lo aplica al reabrir SFCast. Ciérrala y ábrela cuando te venga bien.")
             return
         }
         Log.info("Doctor pantalla: permiso aprobado — ofreciendo reabrir")

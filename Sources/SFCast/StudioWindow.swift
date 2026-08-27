@@ -132,7 +132,10 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     @Published var freeDiskNote: String?
 
     var testMode = false          // --studiotest: ventana capturable
-    private var window: NSWindow?
+    /// Internal (no private): el ScreenDoctor necesita saber si el Estudio está
+    /// vivo para NO abrir un modal encima — un modal bloquea main y con él todos
+    /// los sensores del Estudio, que viven en Timers de RunLoop.
+    private(set) var window: NSWindow?
     private var meterTimer: Timer?
 
     // (El self-view "Burbuja" se ELIMINÓ en v2.3 a pedido de Daniel: el modo

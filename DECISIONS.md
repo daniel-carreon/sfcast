@@ -1340,3 +1340,158 @@ estamparon los marcadores de los ya-compatibles y el contador dice la verdad: 0.
 | Compresión en el Mac | 147s | **0s** (murió) |
 | Cola de subida al detener | 163s | **5.5s** |
 | Códec servido | HEVC 4K (negro en Chrome) | **H.264 1440p** |
+
+---
+
+## v3.7 — "se empezó a lagear": el archivo abría segundos en el pasado (26 ago 2026)
+
+Daniel iba a grabar el curso de Claude Code. Verbatim: *"en el preview me mostraba
+0fps, luego se trababa"*. Tercera vez que este proyecto persigue "el lag" y la
+tercera con una causa distinta — pero esta vez el ganador estaba a la vista de
+todos, gritando en el log, y nadie le había creído.
+
+### Lo primero: el compositor NO era el problema
+
+Contra la intuición y contra las dos rondas anteriores (v3.0, v3.1), esa noche el
+motor estaba impecable: `comp 3.0-4.0 ms de 33.3` · `drops:0` · `cadencia 30/30` ·
+`sinBuf:0` · 13.4 GB de RAM libre · 751 GB de disco. Las curas del 9 ago
+(pipelining, `CadenceKeeper`, `.userInteractive`) seguían haciendo su trabajo.
+
+Lo que sí estaba roto era **dónde empezaba el archivo**.
+
+### La medición que lo partió en dos
+
+`ffprobe` sobre las nueve tomas de esa noche, mirando el primer PTS de cada una:
+
+| toma | pausa desde la anterior | vacío al principio |
+|---|---|---|
+| syr8x52hk8a8 | 1 s | **1.067 s** |
+| ct2cn7yi7ts0 | 1 s | **1.198 s** |
+| 5le1anmwd54z | 2 s | **1.400 s** |
+| otzyk4ej1b6p | 2 s | **2.067 s** |
+| jr8yt2cayxra | 6 s | **6.032 s** |
+| gwsstr6crmk5 | 7 s | **6.767 s** |
+| ty3jayx5tk6k | 9 s | **9.467 s** |
+
+**El hueco ES la pausa.** Y la PRIMERA toma de cada sesión salía siempre perfecta
+(100% de contenido único, cero repetición), porque no había toma anterior que la
+envenenara. Ahí está la razón de que ningún test lo viera en un mes: **todos
+probaban una sola toma.**
+
+En `gwsstr6crmk5`, contando frames por segundo del archivo:
+
+```
+ 0s:0  1s:0  2s:0  3s:0  4s:0  5s:0  6s:7  7s:30  8s:30 …
+```
+
+397 frames en los primeros 20 s = 19.9 fps. Y la alarma de la app decía, textual,
+`PEOR TRAMO 19.9 fps en el minuto 0:00`. **El sensor tenía razón desde el primer
+día.** Lo que faltaba era alguien que fuera a mirar el archivo en vez de discutir
+con el número.
+
+### Las dos condiciones (hacían falta LAS DOS, por eso costó)
+
+1. **`CadenceKeeper.lastEmitted` sobrevivía a la toma anterior.**
+   `engine.programClock.begin()` se llamaba **por toma** (StudioRecorder:198) y
+   `cadence.reset()` solo dentro de `startRenderLoop()`, o sea **una vez por
+   motor**. Dos relojes de la misma grabación, reiniciados en sitios distintos, y
+   uno se quedó atrás. Al dar REC, el primer tick creía llevar N segundos sin
+   emitir y devolvía hasta 8 frames de relleno **fechados en la toma pasada**.
+2. **`resolveSessionStart` anclaba la sesión en `firstVideoPTS`** cuando el audio
+   no llegaba en 0.6 s — y `firstVideoPTS` lo fijaba justo el primer relleno viejo.
+   Las 15 tomas de esa noche dijeron `sin audio en 0.6s — arranco solo con video`.
+
+Con las dos: `writer.startSession(atSourceTime:)` abría la línea de tiempo
+segundos antes del primer frame real, y todo lo que se calculara sobre la duración
+—fps, movimiento, peor tramo— salía castigado por un hueco que no era material,
+era contabilidad. En una toma de 7 s, el hueco ERA la toma.
+
+### Los tres arreglos
+
+- `cadence.reset()` viaja junto a `programClock.begin()`, donde siempre debió estar.
+- `CadenceKeeper` **se re-ancla** ante un hueco que no cabe en su relleno máximo:
+  eso no es un timer que perdió disparos, es una discontinuidad.
+- Al renunciar al audio, la sesión arranca en **`now`**, no en `firstVideoPTS`. Los
+  frames intermedios ya se descartaron; anclarse ahí no los recupera, solo abre el
+  archivo donde no hay nada. Esto solo ya costaba **0.6 s de vacío en toda toma sin
+  audio temprano**, sistemático y en silencio.
+
+### El A/B, con el bug revivido a propósito (`--bug26ago`)
+
+| | toma 1 | toma 4 (pausa 4 s) | toma 6 (pausa 10 s) | caída |
+|---|---|---|---|---|
+| **con el bug** | 30.6 fps | hueco 3.91 s · 20.3 fps | hueco 9.94 s · 13.6 fps | **−55.6%** |
+| **con el fix** | 30.6 fps | hueco 0.000 s · 30.5 fps | hueco 0.000 s · 30.5 fps | **0.3%** |
+
+### El segundo hallazgo, que habría arruinado la clase igual
+
+**La pantalla se duerme a los 5 minutos.** `pmset -g custom` → `displaysleep 5`.
+Grabar un curso hablando a cámara es exactamente eso: minutos sin tocar teclado ni
+ratón. Cuando el monitor se apaga, SCK deja de tener pantalla y el stream se cae
+con *"No se encontraron pantallas ni ventanas por capturar"* — está en el log del
+26 ago dos veces (06:15 y 07:02), las dos con la máquina sola. OBS declara la
+aserción de energía desde siempre; SFCast no la tenía. Ahora se toma al dar REC y
+se suelta al parar (`PowerAssertion.swift`).
+
+### El mito que se cayó: "cada rebuild cuesta un clic"
+
+El invariante #4 del repo decía que macOS liga el permiso de pantalla al cdhash y
+que cada rebuild cuesta una re-aprobación. **Es falso.** El requisito designado del
+bundle es `identifier "so.saasfactory.sfcast" and certificate leaf = H"3039…"` —
+habla del **certificado**, no del cdhash. Verificado esa noche en **7 ciclos
+seguidos de compilar + reinstalar**, con cdhash distinto cada vez: la captura
+siguió funcionando sin un solo clic. Lo que sí rompe el permiso es **sustituir el
+bundle con la app corriendo**. Esa creencia costó dos "⏳ pendiente de un gesto de
+Daniel" sin ejercer, y con ella cae el techo que impedía iterar de noche.
+
+### Los sensores nuevos (ninguno nace sin su alarma)
+
+- **`MainWatch`** — el latido de main, vigilado **desde fuera**. Los sensores del
+  Estudio viven en `Timer` de RunLoop y **dejan de dispararse justo cuando main se
+  bloquea**: por eso el cuelgue de las 19:18 no dejó una sola línea en tres minutos
+  y medio. Ahora escribe, notifica y **vuelca la pila con `sample`**. Ejercido con
+  `--bloqueamain 12`: detectado a los 3.0 s, pila con la línea exacta, y *"main
+  VOLVIÓ tras 12466 ms"*.
+- **Latido del Estudio EN REPOSO** — el ❤︎ solo existía grabando, y el preview se
+  cayó ANTES de dar REC. Reporta los MISMOS números que el chip que Daniel mira.
+- **`headVoidSec` y `preSessionDrops`** — el hueco se mide y se grita; el descarte
+  "frame anterior al arranque de sesión" era un `return` mudo en el camino caliente.
+- **`screenRestarts` por TOMA** — las 15 grabaciones decían *"hubo 7 reenganches en
+  esta sesión"* cuando los 7 pasaron a las 06:15 de la mañana.
+- **Qué pantalla se está grabando**, listada con la elegida y la principal marcadas.
+  Primer uso: reveló que se captura la **#5**, que no es la principal (#2).
+
+### El bucle sin freno
+
+`retryScreenIfNeeded` reintentaba cada 3 s **para siempre**: 8,193 fallos seguidos
+del 21 ago 22:07 al 26 ago 07:04 — cinco días —, cada uno pidiendo
+`SCShareableContent` en MainActor y escribiendo una línea de ERROR. El
+`sfcast.log` llegó a 7.75 MB y esas líneas idénticas sepultaron todo lo demás.
+Ahora: espera que se dobla con techo de 60 s, log en potencias de dos, y al tercer
+fallo el aviso **sale de la ventana** hacia el humano, que es el único que puede
+aprobar el permiso.
+
+### Y el modal que podía congelar el Estudio sin estar grabando
+
+El `ScreenDoctor` corre **2.5 s después de cada apertura del Estudio** y termina en
+`NSAlert.runModal()`. Su único candado era *"¿hay grabación viva?"*, y el cuelgue
+que Daniel reportó pasó **en el preview, antes de dar REC**. Un modal detrás de la
+ventana del Estudio, o en el monitor que no está mirando, es una app colgada desde
+la silla. Ahora, con el Estudio vivo, el aviso va por la barra de la ventana y una
+notificación del sistema. Y el `waitUntilExit()` de `tccutil` tiene techo de 2 s.
+
+### Lecciones
+
+- **Un test que solo prueba el primer intento prueba el caso más fácil que existe.**
+  Daniel no graba una toma: graba, se equivoca, para, respira y vuelve. El arnés
+  nuevo (`--tomas N`) encadena tomas con pausas crecientes porque el daño era
+  proporcional a la pausa.
+- **Cuando el sensor y tú no coincidan, el que va a mirar el archivo eres tú.** La
+  alarma llevaba toda la noche diciendo la verdad y se leyó como ruido.
+- **Dos relojes de la misma cosa reiniciados en sitios distintos van a divergir.**
+  No es cuestión de si, es de cuándo.
+- **Un instrumento que se apaga con el paciente no es un instrumento.** Todo sensor
+  que deba hablar de un cuelgue tiene que vivir fuera del hilo que se cuelga.
+
+QA nuevo: `--tomas N [--dura S] [--pausa S]` · `--bug26ago` (revive el hueco) ·
+`--bloqueamain N` (congela main para ejercer el vigía).

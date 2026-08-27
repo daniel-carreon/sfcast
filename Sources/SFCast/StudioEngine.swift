@@ -649,7 +649,28 @@ final class StudioEngine: NSObject {
         // captura); añadirlos a la sesión es cirugía y va a sessionQueue.
         if cameraVideoOut == nil {
             let out = AVCaptureVideoDataOutput()
-            out.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+            // ⭐ NV12, NO BGRA (27 ago 2026). Esto es lo que separaba a SFCast de
+            // OBS con la MISMA camara: OBS recibia 30.00 fps y nosotros 25.
+            //
+            // Pedir `32BGRA` obliga a AVFoundation a CONVERTIR cada frame desde
+            // el formato nativo del dispositivo. A 1920x1080 son 8.3 MB por
+            // cuadro (4 bytes/pixel) contra 3.1 MB de NV12: 249 MB/s de
+            // conversion y ancho de banda a 30 fps, por una imagen que acto
+            // seguido se entrega a CoreImage, que traga NV12 sin despeinarse.
+            // La cadena no sostenia el ritmo y entregaba 25 — y como la API
+            // reportaba "30 fps" tan campante, tres cacerias del "lag" pasaron
+            // de largo por aqui.
+            //
+            // El buffer de camara NUNCA se lee byte a byte (va directo a
+            // `frames.set` y de ahi a CIImage), asi que el subespacio de color
+            // es indiferente para todo lo demas.
+            let deseado = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange   // '420v' = NV12
+            let soportados = out.availableVideoPixelFormatTypes
+            let elegidoPF = soportados.contains(deseado) ? deseado : kCVPixelFormatType_32BGRA
+            if elegidoPF != deseado {
+                Log.error("Estudio: la camara no ofrece NV12 — me quedo en BGRA (puede costar fps)")
+            }
+            out.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: elegidoPF]
             out.alwaysDiscardsLateVideoFrames = true
             out.setSampleBufferDelegate(self, queue: videoQueue)
             cameraVideoOut = out
@@ -694,9 +715,14 @@ final class StudioEngine: NSObject {
             // A CUÁNTOS FPS ENTREGA LA CÁMARA, dicho al enganchar (26 ago 2026).
             // El latido decía `cam:25fps` toda la noche y no había forma de saber
             // si eso lo pedía SFCast o lo mandaba la cámara. No lo pide nadie:
-            // `sessionPreset = .high` acepta el formato activo, y una Cam Link
-            // presenta lo que le llegue por HDMI. O sea que 25 fps es la ZV-E10
-            // en PAL, y se arregla en la cámara (NTSC → 30p), no aquí.
+            // ⚠️ AQUI VIVIA UNA MENTIRA QUE COSTO MEDIO DIA: "25 fps es la ZV-E10
+            // en PAL, se arregla en la camara". FALSO, y medido el 27 ago: la
+            // camara estaba en NTSC, y OBS —misma camara, mismo cable, misma
+            // Cam Link— recibia 30.00 fps de contenido unico mientras nosotros
+            // recibiamos 25. El culpable era NUESTRO (pedir BGRA, ver abajo).
+            // Un comentario que afirma una causa sin medirla manda al siguiente
+            // que lo lea a cambiarle los menus a la camara, que fue justo lo que
+            // estuvo a punto de pasar.
             //
             // Un lienzo a 30 con una fuente a 25 significa que uno de cada seis
             // frames del programa repite cara. No es un bug, pero es una decisión
@@ -721,23 +747,94 @@ final class StudioEngine: NSObject {
             if let cam = devs.first(where: { $0.hasMediaType(.video) }) {
                 let objetivo = Double(self.fpsParaCamara)
                 let actualAntes = 1.0 / max(CMTimeGetSeconds(cam.activeVideoMinFrameDuration), 1.0 / 1000)
-                let mejor = cam.activeFormat.videoSupportedFrameRateRanges
-                    .filter { abs($0.maxFrameRate - objetivo) <= 1.5 }
-                    .max(by: { $0.maxFrameRate < $1.maxFrameRate })
-                if let r = mejor, abs(actualAntes - r.maxFrameRate) > 0.5 {
+
+                // ⭐ SE ELIGE EL **FORMATO**, NO SOLO LA CADENCIA (27 ago 2026).
+                //
+                // La versión anterior sólo tocaba `activeVideoMin/MaxFrameDuration`
+                // y dejaba el formato en manos de `sessionPreset = .high`. Con eso
+                // la API respondía "30 fps" y la Cam Link seguía entregando 25:
+                // en un dispositivo UVC la tasa es parte del formato NEGOCIADO,
+                // y la duración de cuadro sólo puede TIRAR frames, nunca fabricar
+                // los que el stream no trae. El log decía 30, el contador decía 25,
+                // y la cara de Daniel se repetía 5 de cada 30 cuadros.
+                //
+                // Daniel lo cazó con el dato que ningún log tenía: *"¿por qué es
+                // diferente a OBS? allá funciona con la misma config"*. OBS elige
+                // `activeFormat` explícitamente — resolución Y tasa juntas. Eso
+                // pasa la sesión a `.inputPriority`, que es justo lo que hace falta.
+                //
+                // El miedo del comentario viejo ("cambiar de formato cambiaría la
+                // resolución") era legítimo y se respeta: sólo se consideran
+                // formatos con LAS MISMAS DIMENSIONES que el activo. Si ninguno de
+                // ésos ofrece la tasa, no se toca nada y se dice por qué.
+                let dimAct = CMVideoFormatDescriptionGetDimensions(cam.activeFormat.formatDescription)
+                func mejorRango(_ f: AVCaptureDevice.Format) -> AVFrameRateRange? {
+                    // Tolerancia 1.5 porque los rangos reales son 29.97/59.94 (NTSC),
+                    // no números redondos: comparar por igualdad no encuentra nada.
+                    f.videoSupportedFrameRateRanges
+                        .filter { abs($0.maxFrameRate - objetivo) <= 1.5 }
+                        .max(by: { $0.maxFrameRate < $1.maxFrameRate })
+                }
+                // DIAGNÓSTICO: qué ofrece de verdad el dispositivo. Sin esto la
+                // discusión "la cámara no puede" vs "no se lo pedimos bien" no
+                // se puede cerrar con datos.
+                func fourCC(_ f: AVCaptureDevice.Format) -> String {
+                    let c = CMFormatDescriptionGetMediaSubType(f.formatDescription)
+                    let b = [UInt8((c >> 24) & 255), UInt8((c >> 16) & 255),
+                             UInt8((c >> 8) & 255), UInt8(c & 255)]
+                    return String(bytes: b, encoding: .ascii) ?? "????"
+                }
+                let inventario = cam.formats.enumerated().map { (i, f) -> String in
+                    let d = CMVideoFormatDescriptionGetDimensions(f.formatDescription)
+                    let rr = f.videoSupportedFrameRateRanges
+                        .map { String(format: "%.2f", $0.maxFrameRate) }.joined(separator: "/")
+                    let act = (f == cam.activeFormat) ? "◀ACTIVO" : ""
+                    return "[\(i)]\(fourCC(f)) \(d.width)x\(d.height)@\(rr)\(act)"
+                }.joined(separator: " · ")
+                Log.info("Estudio: formatos de «\(cam.localizedName)» → \(inventario)")
+
+                let candidatos = cam.formats.filter {
+                    let d = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
+                    return d.width == dimAct.width && d.height == dimAct.height
+                }
+                // ⭐ ENTRE FORMATOS EMPATADOS, GANA EL QUE EL DISPOSITIVO LISTA
+                // PRIMERO. La Cam Link presenta cada resolución DOS veces —
+                // `yuvs` (4:2:2 empaquetado, lo que de verdad sale por USB) y
+                // `420v` (4:2:0, que el driver SINTETIZA)— y ambas anuncian los
+                // mismos rangos 60/50/30/25. `max(by:)` con empates devuelve el
+                // ÚLTIMO, así que caíamos siempre en el sintetizado, que no
+                // sostiene el ritmo: la sonda de PTS medía 40.000 ms clavados
+                // (25.00 fps de metrónomo) mientras la API juraba 30.
+                // El orden de `device.formats` es el del descriptor USB, y ahí
+                // el nativo va primero.
+                let elegido = candidatos
+                    .compactMap { f in mejorRango(f).map { (f, $0) } }
+                    .max(by: { a, b in
+                        if a.1.maxFrameRate != b.1.maxFrameRate { return a.1.maxFrameRate < b.1.maxFrameRate }
+                        // empate en tasa: el de índice MENOR gana
+                        let ia = cam.formats.firstIndex(of: a.0) ?? .max
+                        let ib = cam.formats.firstIndex(of: b.0) ?? .max
+                        return ia > ib
+                    })
+
+                if let (formato, r) = elegido {
                     do {
                         try cam.lockForConfiguration()
+                        if formato != cam.activeFormat {
+                            cam.activeFormat = formato      // ⇒ la sesión pasa a .inputPriority
+                        }
                         cam.activeVideoMinFrameDuration = r.minFrameDuration
                         cam.activeVideoMaxFrameDuration = r.minFrameDuration
                         cam.unlockForConfiguration()
-                        Log.info(String(format: "Estudio: le PEDI %.2f fps a la camara (venia a %.2f)",
-                                        r.maxFrameRate, actualAntes))
+                        Log.info(String(format: "Estudio: FORMATO fijado %dx%d @ %.2f fps (venia a %.2f)",
+                                        dimAct.width, dimAct.height, r.maxFrameRate, actualAntes))
                     } catch {
-                        Log.error("Estudio: no pude fijar los fps de la camara: \(error.localizedDescription)")
+                        Log.error("Estudio: no pude fijar el formato de la camara: \(error.localizedDescription)")
                     }
-                } else if mejor == nil {
-                    Log.info(String(format: "Estudio: la camara no ofrece nada cerca de %.0f fps — se queda a %.2f",
-                                    objetivo, actualAntes))
+                } else {
+                    Log.error(String(format: "Estudio: NINGUN formato de %dx%d ofrece ~%.0f fps — se queda a %.2f. "
+                                     + "Revisa la salida HDMI de la camara.",
+                                     dimAct.width, dimAct.height, objetivo, actualAntes))
                 }
             }
             if let cam = devs.first(where: { $0.hasMediaType(.video) }) {
@@ -1179,7 +1276,7 @@ final class StudioEngine: NSObject {
                 Log.error(String(format: "Estudio: PANTALLA CONGELADA — el stream lleva %.1fs mudo "
                                  + "(motivo: %@, latidos video=%d audio=%d). Reenganchando…",
                                  silence, bad ?? "silencio", b.video, b.audio))
-                onAlert?("Pantalla congelada — reenganchando la captura", true)
+                onAlert?("Pantalla congelada — reenganchando la captura", false)   // se está curando; si falla, 1346 sí grita
                 restartScreenTap(reason: bad ?? String(format: "%.1fs sin latido", silence))
             } else {
                 Log.info("Estudio: pantalla viva de nuevo")
@@ -1311,7 +1408,7 @@ extension StudioEngine: SCStreamDelegate {
             guard let self, self.isRunning else { return }
             self.screenAvailable = false
             self.frames.drop(.screen)
-            self.onAlert?("La captura de pantalla se cayó — reenganchando", true)
+            self.onAlert?("La captura de pantalla se cayó — reenganchando", false)   // idem
             self.onStatusChange?()
             self.restartScreenTap(reason: "didStopWithError")
         }
@@ -1353,6 +1450,46 @@ extension StudioEngine: SCStreamOutput {
     }
 }
 
+extension StudioEngine {
+    // MARK: - SONDA DE CADENCIA DE LA CÁMARA (27 ago 2026 — SE QUEDA)
+    //
+    // El sensor que por fin dijo la verdad. El contador de callbacks decía
+    // "cam:25fps" y la API de AVFoundation decía "30 fps": con esos dos datos
+    // no se puede saber si el dispositivo MANDA 25 o si manda 30 y nosotros
+    // tiramos 5, y esa duda costó medio día y cuatro hipótesis falsas (PAL,
+    // formato, pixel format, MovieFileOutput). Los PTS lo resolvieron en una
+    // corrida: 40.000 ms clavados, 120 de 120 — un metrónomo a 25.00, o sea
+    // señal de entrada, no pérdida nuestra.
+    //
+    // REGLA: cuando un contador y una API se contradigan, mide el INTERVALO,
+    // no la cuenta. La cuenta te dice cuántos llegaron; el intervalo te dice
+    // a qué ritmo los MANDAN, que es la pregunta.
+    nonisolated(unsafe) private static var sondaUlt: Double = 0
+    nonisolated(unsafe) private static var sondaDeltas: [Double] = []
+    nonisolated(unsafe) private static let sondaLock = NSLock()
+    nonisolated static func sondaPTS(_ pts: CMTime) {
+        guard pts.isValid, pts.isNumeric else { return }
+        let t = CMTimeGetSeconds(pts)
+        sondaLock.lock(); defer { sondaLock.unlock() }
+        if sondaUlt > 0 {
+            let d = t - sondaUlt
+            if d > 0, d < 1 { sondaDeltas.append(d) }
+        }
+        sondaUlt = t
+        if sondaDeltas.count >= 1800 {   // ~1 min, no cada 4 s
+            let ds = sondaDeltas.sorted()
+            let med = ds[ds.count/2]
+            var hist: [Int: Int] = [:]
+            for d in ds { hist[Int((d*1000).rounded()), default: 0] += 1 }
+            let top = hist.sorted { $0.value > $1.value }.prefix(4)
+                .map { "\($0.key)ms×\($0.value)" }.joined(separator: " ")
+            Log.info(String(format: "SONDA cámara: mediana %.1f ms (=%.2f fps) · min %.1f · max %.1f · top: %@",
+                            med*1000, 1/med, ds.first!*1000, ds.last!*1000, top))
+            sondaDeltas.removeAll()
+        }
+    }
+}
+
 extension StudioEngine: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
     nonisolated func captureOutput(_ output: AVCaptureOutput, didOutput sb: CMSampleBuffer, from connection: AVCaptureConnection) {
         if output is AVCaptureVideoDataOutput {
@@ -1362,6 +1499,9 @@ extension StudioEngine: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureA
             // sigue produciendo 30 fps impecables de una foto fija.
             if StudioEngine.qaFreezeCamera { return }
             guard let pb = CMSampleBufferGetImageBuffer(sb) else { return }
+            // SONDA (27 ago): ¿el dispositivo MANDA 25, o manda 30 y nosotros
+            // tiramos 5? El PTS lo dice y el contador de callbacks no.
+            StudioEngine.sondaPTS(CMSampleBufferGetPresentationTimeStamp(sb))
             // El PTS viaja con el frame: es la única forma de saber CUÁNDO se
             // capturó de verdad esta imagen y no cuándo nos llegó.
             frames.set(pb, for: .camera, pts: CMSampleBufferGetPresentationTimeStamp(sb))

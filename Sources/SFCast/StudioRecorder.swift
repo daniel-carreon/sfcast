@@ -34,6 +34,8 @@ final class StudioRecorder {
     /// a las 06:15 y 07:02 de la mañana. Un contador que no se resetea es un
     /// sensor que miente, y un sensor que miente se deja de leer.
     private var screenRestartsAtStart = 0
+    /// Mientras se graba, la pantalla NO se duerme. Ver PowerAssertion.
+    private let energia = PowerAssertion(motivo: "SFCast está grabando")
     /// Lo que Daniel marcó en vivo y los tramos con imagen congelada. Los dos
     /// viajan al manifest: son el cable entre lo que pasó AL GRABAR y lo que el
     /// editor necesita saber DESPUÉS (v3.2).
@@ -203,6 +205,7 @@ final class StudioRecorder {
             // Estudio (para el REC ya hay decenas), sin rampa audible.
             engine.programClock.begin()
             screenRestartsAtStart = engine.screenRestarts
+            energia.tomar()
             // Y EL GUARDIÁN DE CADENCIA TAMBIÉN (fix 26 ago 2026). Estaban a una
             // línea de distancia y solo uno se reiniciaba: `programClock.begin()`
             // aquí, `cadence.reset()` allá arriba en `startRenderLoop()`, o sea
@@ -959,6 +962,7 @@ final class StudioRecorder {
             }
         }
         state = .idle
+        energia.soltar()
         wroteScreen = false
         wroteCamera = false
         // Contabilidad de PESO en el log: sin esto no hay forma de notar que una

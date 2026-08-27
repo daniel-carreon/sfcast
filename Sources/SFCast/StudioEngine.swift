@@ -404,6 +404,17 @@ final class StudioEngine: NSObject {
         // comportamiento viejo intacto cuando no hay eleccion guardada, y
         // sobrevive a desconectar el monitor elegido (cae a la principal).
         let mainID = CGMainDisplayID()
+        // QUÉ PANTALLA SE ESTÁ GRABANDO, dicho en voz alta (26 ago 2026). Daniel
+        // tiene TRES salidas —dos BenQ y una Kamvas, dos de ellas en espejo por
+        // hardware— y hasta hoy el log no decía cuál se capturaba. "Grabé 45
+        // minutos de la pantalla equivocada" era un desenlace posible y mudo.
+        Log.info("Estudio: pantallas visibles = "
+                 + content.displays.map { d in
+                     "#\(d.displayID) \(d.width)x\(d.height)"
+                       + (d.displayID == mainID ? " (principal)" : "")
+                       + (d.displayID == (AppSettings.load().screenDisplayID.flatMap { UInt32($0) } ?? 0)
+                          ? " ←ELEGIDA" : "")
+                   }.joined(separator: " · "))
         let elegida = AppSettings.load().screenDisplayID.flatMap { UInt32($0) }
         guard let display = content.displays.first(where: { $0.displayID == elegida })
                 ?? content.displays.first(where: { $0.displayID == mainID })
@@ -482,17 +493,58 @@ final class StudioEngine: NSObject {
     /// Reintento de pantalla: si el permiso llegó DESPUÉS de abrir el Estudio
     /// (el re-toggle post-rebuild), engancha el tap sin reabrir la ventana.
     /// Lo llama el controller cada ~3s mientras la ventana está abierta.
+    /// Reintentos del enganche de pantalla, CON FRENO (fix 26 ago 2026).
+    ///
+    /// Antes esto reintentaba cada 3 segundos para siempre. Medido en el log de
+    /// Daniel: **8,193 reintentos fallidos seguidos**, del 21 ago 22:07 al 26 ago
+    /// 07:04 — cinco días. Cada uno pedía `SCShareableContent` en MainActor y
+    /// escribía una línea de ERROR; el `sfcast.log` llegó a 7.75 MB y las 8,193
+    /// líneas idénticas sepultaron todo lo demás que ese log tenía que contar.
+    ///
+    /// Un órgano que reintenta para siempre no es resiliencia: es un órgano que
+    /// no sabe que está fallando. Ahora la espera se dobla (3 → 6 → 12 → 24 → 60 s,
+    /// con techo), el log habla cuando el número cambia de orden de magnitud, y al
+    /// tercer fallo seguido el aviso SALE DE LA VENTANA hacia el humano — que es
+    /// lo único que puede resolverlo (aprobar el permiso).
+    private var screenRetryFails = 0
+    private var nextScreenRetryAt: Double = 0
+    private var screenRetryNotified = false
+
     func retryScreenIfNeeded() {
         guard isRunning, !screenAvailable, !retryingScreen, !restartingScreen,
               Permissions.screenGranted else { return }
+        let ahora = CACurrentMediaTime()
+        guard ahora >= nextScreenRetryAt else { return }
         retryingScreen = true
         Task { @MainActor in
             do {
                 try await startScreenTap(systemAudio: systemAudioWanted)
-                Log.info("Estudio: pantalla enganchada en reintento")
+                if screenRetryFails > 0 {
+                    Log.info("Estudio: pantalla enganchada tras \(screenRetryFails) intento(s)")
+                } else {
+                    Log.info("Estudio: pantalla enganchada en reintento")
+                }
+                screenRetryFails = 0
+                nextScreenRetryAt = 0
+                screenRetryNotified = false
                 onStatusChange?()
             } catch {
-                Log.error("Estudio: reintento de pantalla falló: \(error.localizedDescription)")
+                screenRetryFails += 1
+                let espera = min(60.0, 3.0 * pow(2.0, Double(screenRetryFails - 1)))
+                nextScreenRetryAt = CACurrentMediaTime() + espera
+                // Se habla en 1, 2, 4, 8, 16… y nunca más: el ruido de 8,193
+                // líneas idénticas es lo que hizo ilegible el log de agosto.
+                if screenRetryFails & (screenRetryFails - 1) == 0 {
+                    Log.error("Estudio: reintento de pantalla falló (\(screenRetryFails)): "
+                              + "\(error.localizedDescription) — próximo en \(Int(espera))s")
+                }
+                if screenRetryFails >= 3, !screenRetryNotified {
+                    screenRetryNotified = true
+                    notify("SFCast — SIN PANTALLA",
+                           "No puedo capturar la pantalla. Aprueba «Grabación de pantalla» en Ajustes.")
+                    onAlert?("No consigo capturar la pantalla. Aprueba «Grabación de pantalla» "
+                             + "en Ajustes del sistema y reabre SFCast.", true)
+                }
             }
             retryingScreen = false
         }

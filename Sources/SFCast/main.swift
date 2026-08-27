@@ -94,6 +94,12 @@ let recTestSeconds: Int? = {
     return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 12
 }()
 
+/// QA DEL VIGÍA DE MAIN (`--bloqueamain N`): congela main a propósito.
+let bloqueaMainSeconds: Int? = {
+    guard let i = cliArgs.firstIndex(of: "--bloqueamain") else { return nil }
+    return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 8
+}()
+
 /// QA DE TOMAS ENCADENADAS (`--tomas N [--dura S] [--pausa S]`): graba N veces
 /// seguidas con pausas entre medias y le pregunta a CADA archivo si arrancó
 /// limpio. Existe porque las dos rondas de rendimiento anteriores probaron UNA
@@ -273,6 +279,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 hud.snapshot(to: "/tmp/sfcast-hud.png")
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 hud.hide()
+                exit(0)
+            }
+        } else if let n = bloqueaMainSeconds {
+            // QA DEL VIGÍA (`--bloqueamain N`): bloquea el hilo principal N
+            // segundos a propósito. Es la única forma de comprobar que MainWatch
+            // habla cuando el resto de los sensores se han quedado mudos — que es
+            // exactamente lo que pasó el 26 ago y no dejó rastro.
+            Task { @MainActor in
+                StudioController.shared.open()
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                Log.info("QA: bloqueando main \(n)s a propósito…")
+                Thread.sleep(forTimeInterval: Double(n))
+                Log.info("QA: main liberado")
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
                 exit(0)
             }
         } else if let n = tomasCount {

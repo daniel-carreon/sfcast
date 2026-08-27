@@ -124,17 +124,21 @@ enum ScreenDoctor {
         p.arguments = ["reset", "ScreenCapture", Bundle.main.bundleIdentifier ?? "so.saasfactory.sfcast"]
         do {
             try p.run()
-            // Con TECHO (26 ago 2026). El comentario de arriba dice "<100 ms" y es
-            // verdad casi siempre; un `waitUntilExit()` sin freno en MainActor
-            // convierte ese "casi" en una app colgada para siempre. Si tccutil se
-            // atasca, se le deja atrás y se dice.
-            let limite = Date().addingTimeInterval(2.0)
-            while p.isRunning, Date() < limite { usleep(20_000) }
-            if p.isRunning {
-                Log.error("Doctor pantalla: tccutil lleva >2 s — sigo sin esperarlo")
-                return
+            // NO SE ESPERA EN MAIN, NI CON TECHO (26 ago 2026, dos vueltas).
+            //
+            // El comentario de arriba decía "<100 ms, el waitUntilExit en main es
+            // aceptable" y es verdad casi siempre; ese "casi" es una app colgada.
+            // El primer arreglo fue un `while p.isRunning` con techo de 2 s — que
+            // sigue siendo bloquear main hasta dos segundos, justo lo que esta
+            // noche se propuso eliminar, y encima por debajo del umbral del vigía,
+            // o sea invisible.
+            //
+            // Nadie usa el código de salida para decidir nada: se lanza y se
+            // reporta desde fuera. Main no espera a nadie.
+            Task.detached {
+                p.waitUntilExit()
+                Log.info("Doctor pantalla: tccutil reset → exit \(p.terminationStatus)")
             }
-            Log.info("Doctor pantalla: tccutil reset → exit \(p.terminationStatus)")
         } catch {
             Log.error("Doctor pantalla: tccutil no corrió: \(error.localizedDescription)")
         }

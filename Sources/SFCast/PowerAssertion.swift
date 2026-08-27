@@ -43,7 +43,7 @@ final class PowerAssertion {
             // Sin actuador no hay sensor: si el candado no se pudo tomar, hay
             // que decirlo, porque el riesgo (perder minutos de toma contra un
             // monitor apagado) sigue vivo y solo Daniel puede compensarlo.
-            Log.error("Estudio: NO pude tomar el candado de energía (\\(r)) — si dejas de tocar el "
+            Log.error("Estudio: NO pude tomar el candado de energía (\(r)) — si dejas de tocar el "
                       + "teclado 5 min, la pantalla puede dormirse a mitad de la toma")
         }
     }

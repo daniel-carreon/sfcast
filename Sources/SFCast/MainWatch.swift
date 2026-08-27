@@ -40,8 +40,14 @@ final class MainWatch: @unchecked Sendable {
     private var armed = false
     private var stallStart: Double?
     private var samplesTaken = 0
-    private(set) var worstStallMs: Double = 0
-    private(set) var stallCount = 0
+    private var _worstStallMs: Double = 0
+    private var _stallCount = 0
+    /// Se leen desde MAIN (el latido en reposo) y se escriben desde la cola del
+    /// vigía: pasan por el lock como todo lo demás. Sin esto era una carrera de
+    /// libro — benigna en la práctica, pero un vigía con una carrera dentro es
+    /// mal ejemplo para lo único que vigila.
+    var worstStallMs: Double { lock.lock(); defer { lock.unlock() }; return _worstStallMs }
+    var stallCount: Int { lock.lock(); defer { lock.unlock() }; return _stallCount }
 
     private let queue = DispatchQueue(label: "so.saasfactory.sfcast.mainwatch", qos: .utility)
     private var timer: DispatchSourceTimer?
@@ -73,9 +79,9 @@ final class MainWatch: @unchecked Sendable {
             timer = nil
             lock.lock(); armed = false; let stalled = stallStart != nil; stallStart = nil; lock.unlock()
             if stalled { Log.error("Estudio: el vigía se apagó CON MAIN BLOQUEADO — la app se cerró colgada") }
-            if stallCount > 0 {
+            if _stallCount > 0 {
                 Log.error(String(format: "Estudio: vigía abajo — %d bloqueo(s) de main, el peor de %.0f ms",
-                                 stallCount, worstStallMs))
+                                 _stallCount, _worstStallMs))
             } else {
                 Log.info("Estudio: vigía de main abajo — 0 bloqueos")
             }
@@ -94,11 +100,18 @@ final class MainWatch: @unchecked Sendable {
         guard armedNow else { return }
 
         if silence >= stallThreshold && !inStall {
-            lock.lock(); stallStart = now - silence; stallCount += 1; lock.unlock()
+            lock.lock(); stallStart = now - silence; _stallCount += 1; lock.unlock()
             Log.error(String(format: "Estudio: MAIN BLOQUEADO — %.1fs sin latido. "
                              + "El preview y el chip de fps están CONGELADOS (no es que la app vaya lenta: no responde).",
                              silence))
-            notify("SFCast", "La app se trabó: main lleva \(Int(silence))s bloqueado.")
+            // EL MENSAJE IMPORTA MÁS QUE LA DETECCIÓN. Con main bloqueado el
+            // render loop SIGUE escribiendo (vive en `renderQueue`, ajeno al
+            // RunLoop): la toma se está salvando aunque la ventana parezca
+            // muerta. Forzar el cierre ahí es lo único que la pierde de verdad,
+            // porque el MP4 se queda sin finalizar. Así que el aviso no dice
+            // "se trabó" a secas: dice qué NO hacer.
+            notify("SFCast se trabó — NO la fuerces a cerrar",
+                   "Sigue grabando por dentro. Espera; si la matas ahora, el video queda sin cerrar.")
             dumpStack(silence: silence)
             return
         }
@@ -108,7 +121,7 @@ final class MainWatch: @unchecked Sendable {
             let began = stallStart ?? now
             stallStart = nil
             let ms = (now - silence - began) * 1000
-            if ms > worstStallMs { worstStallMs = ms }
+            if ms > _worstStallMs { _worstStallMs = ms }
             lock.unlock()
             Log.error(String(format: "Estudio: main VOLVIÓ tras %.0f ms bloqueado (bloqueo #%d de esta sesión)",
                              ms, stallCount))

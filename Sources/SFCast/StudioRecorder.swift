@@ -205,7 +205,6 @@ final class StudioRecorder {
             // Estudio (para el REC ya hay decenas), sin rampa audible.
             engine.programClock.begin()
             screenRestartsAtStart = engine.screenRestarts
-            energia.tomar()
             // Y EL GUARDIÁN DE CADENCIA TAMBIÉN (fix 26 ago 2026). Estaban a una
             // línea de distancia y solo uno se reiniciaba: `programClock.begin()`
             // aquí, `cadence.reset()` allá arriba en `startRenderLoop()`, o sea
@@ -263,6 +262,20 @@ final class StudioRecorder {
         // 08:15. Una toma se juzga por lo que pasa DENTRO de ella.
         engine.governor.reset(target: engine.fps, now: CACurrentMediaTime())
         state = .recording
+        // EL CANDADO DE ENERGÍA SE TOMA AQUÍ Y EN NINGÚN OTRO SITIO — segunda
+        // corrección de la misma línea en una noche, y las dos por revisión.
+        //
+        // Primero vivía dentro de `if config.outputs.program`: una grabación con
+        // el programa apagado se quedaba sin candado. Lo saqué de la rama… y lo
+        // puse ANTES del `guard !activated.isEmpty`, que es peor: si ninguna
+        // salida arranca, `start()` lanza, `state` se queda en `.idle`, y `stop()`
+        // —que empieza con `guard state == .recording`— no hace nada. El candado
+        // quedaba tomado PARA SIEMPRE y la pantalla de Daniel no volvía a dormirse
+        // hasta cerrar la app, sin un solo aviso.
+        //
+        // Aquí, pegado a `state = .recording`, la toma y la suelta son simétricas
+        // por construcción: si este punto se alcanzó, `stop()` va a correr.
+        energia.tomar()
         Log.info("Estudio: grabando \(videoID) → [\(activated.joined(separator: ", "))] "
                  + "calidad=\(config.programQuality.rawValue) libre=\(Self.gb(free))")
         preflightRitmo(engine: engine)

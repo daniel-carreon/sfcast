@@ -66,7 +66,24 @@ enum StudioTomasTest {
             }
             try? await Task.sleep(nanoseconds: UInt64(dura) * 1_000_000_000)
             StudioController.shared.isRecording = false
-            guard let dir = await recorder.stop(engine: engine, config: config) else {
+            // ⚠️ `stop()` devuelve nil TAMBIÉN cuando un guard ya detuvo la toma
+            // solo (cadencia, voz, disco): esos llaman a `stop()` por su cuenta y
+            // dejan `state` en `.idle`, así que el nuestro rebota contra su propio
+            // `guard state == .recording`. La carpeta SÍ existe y la grabación SÍ
+            // está bien — es el arnés el que perdió el control del sujeto.
+            //
+            // Confundir las dos cosas es la lección del 25 jul, textual en este
+            // repo: *"un gate que confunde 'el test perdió el control del sujeto'
+            // con 'el sujeto falló' enseña a ignorar los rojos"*. Así que se busca
+            // la carpeta por el otro camino antes de declarar nada.
+            var dirOpt = await recorder.stop(engine: engine, config: config)
+            if dirOpt == nil, let ultima = recorder.lastDir {
+                Log.info("TOMAS: la toma \(i + 1) la detuvo un guard"
+                         + (recorder.lastAutoStopReason.map { " (\($0))" } ?? "")
+                         + " — sigo con su archivo, que existe")
+                dirOpt = ultima
+            }
+            guard let dir = dirOpt else {
                 Log.error("TOMAS_FAIL la toma \(i + 1) no dejó carpeta")
                 exit(1)
             }

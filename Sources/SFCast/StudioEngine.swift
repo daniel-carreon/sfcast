@@ -43,6 +43,12 @@ final class StudioEngine: NSObject {
     /// compositor estaría RECICLANDO el último frame (la "congelada" del 25 jul).
     private(set) var screenFrozen = false
     private(set) var screenRestarts = 0
+    /// El micrófono lleva más de `deadAfter` sin entregar una muestra.
+    private(set) var micDead = false
+    /// Copia del fps del lienzo legible fuera de MainActor (la configuración de
+    /// la cámara corre en `sessionQueue`).
+    nonisolated(unsafe) private var fpsParaCamara: Int = 30
+    private var micRetryAt: Double = 0
     /// La CÁMARA lleva rato sin entregar imagen nueva. Descubierto el 9 ago en
     /// una prueba de 50 min: la ZV-E10 se apagó sola al minuto 31.6 (las Sony
     /// tienen auto power off) y la grabación siguió 18 minutos componiendo su
@@ -205,6 +211,7 @@ final class StudioEngine: NSObject {
     func start(config: StudioConfig) async {
         guard !isRunning else { return }
         fps = max(10, min(60, config.fps))
+        fpsParaCamara = fps
         canvasOverride = config.canvasMode.size
         if let o = canvasOverride { canvasSize = o }
         systemAudioWanted = config.systemAudioEnabled
@@ -281,6 +288,7 @@ final class StudioEngine: NSObject {
         let newFPS = max(10, min(60, config.fps))
         let fpsChanged = newFPS != fps
         fps = newFPS
+        fpsParaCamara = fps
         canvasOverride = config.canvasMode.size
         let newCanvas = canvasOverride ?? nativeCanvas ?? canvasSize
         let canvasChanged = newCanvas != canvasSize
@@ -323,7 +331,7 @@ final class StudioEngine: NSObject {
     /// Cambio de cámara/micrófono EN CALIENTE (doble clic en Fuentes/Mixer, o
     /// Ajustes → Aplicar): reconcilia los inputs de la sesión con lo elegido en
     /// AppSettings, sin parar la sesión y jamás en main.
-    func applyDeviceSelection(micEnabled: Bool, forceCamera: Bool = false) {
+    func applyDeviceSelection(micEnabled: Bool, forceCamera: Bool = false, forceMic: Bool = false) {
         guard cameraAvailable else { return }   // sin permiso de cámara no hay sesión viva
         let s = AppSettings.load()
         let camID = s.cameraDeviceID
@@ -334,7 +342,7 @@ final class StudioEngine: NSObject {
             let antes = session.inputs.compactMap { ($0 as? AVCaptureDeviceInput)?.device.uniqueID }
             session.beginConfiguration()
             Self.reconcileInputs(session, camID: camID, micID: micID, micEnabled: micOK,
-                                 forceCamera: forceCamera)
+                                 forceCamera: forceCamera, forceMic: forceMic)
             session.commitConfiguration()
             if !session.isRunning { session.startRunning() }
             let devs = session.inputs.compactMap { ($0 as? AVCaptureDeviceInput)?.device }
@@ -342,7 +350,7 @@ final class StudioEngine: NSObject {
             // línea igual cuando no había tocado nada, así que un no-op se leía
             // como un reenganche exitoso — 32 horas seguidas, en un caso.
             let despues = devs.map { $0.uniqueID }
-            let cambio = forceCamera || antes != despues
+            let cambio = forceCamera || forceMic || antes != despues
             Log.info("Estudio: dispositivos en caliente → "
                      + devs.map { "\($0.localizedName) [\($0.hasMediaType(.audio) ? "audio" : "video")]" }
                            .joined(separator: " + ")
@@ -389,6 +397,37 @@ final class StudioEngine: NSObject {
         }
         Log.info("Estudio: RE-PEGANDO la cámara — \(reason)")
         applyDeviceSelection(micEnabled: AppSettings.load().micEnabled, forceCamera: true)
+    }
+
+    /// RE-PEGAR EL MICRÓFONO A LA FUERZA — hermano de `rebindCamera`.
+    ///
+    /// El 26 ago el Shure MV7+ dejó de entregar buffers a media toma y no volvió
+    /// solo: de ahí en adelante el guard de voz auto-detuvo cada grabación a los
+    /// 20 s, correctamente y para siempre. El dispositivo seguía ahí (macOS lo
+    /// listaba como entrada por defecto a 48 kHz); lo que se había caído era el
+    /// input de la sesión. La cámara tiene este remedio desde el 9 ago; el
+    /// micrófono nunca lo tuvo, y es la fuente que decide si una toma sirve.
+    ///
+    /// NO se re-pega con una toma en curso: la sesión es la MISMA que la de la
+    /// cámara, y reconfigurarla a media grabación le daría un tirón a la imagen.
+    /// Con la toma parada —que es cuando de verdad importa, porque si no la
+    /// siguiente también nace muerta— se re-pega sin coste.
+    func rebindMic(reason: String) {
+        guard cameraAvailable else { return }
+        guard !StudioController.shared.recorder.isRecording else {
+            Log.error("Estudio: NO re-pego el micrófono con una toma en curso (\(reason))")
+            return
+        }
+        let s = AppSettings.load()
+        guard s.micEnabled, Permissions.micGranted else { return }
+        // Misma guarda que la cámara: forzar sin comprobar la presencia pegaría
+        // el dispositivo equivocado. Con `micDeviceID` nil vale el del sistema.
+        if let id = s.micDeviceID, Devices.microphone(id: id)?.uniqueID != id {
+            Log.error("Estudio: NO re-pego el micrófono (\(reason)) — el elegido no está enumerado")
+            return
+        }
+        Log.info("Estudio: RE-PEGANDO el micrófono — \(reason)")
+        applyDeviceSelection(micEnabled: true, forceMic: true)
     }
 
     // MARK: - pantalla (SCStream con frames + SCRecordingOutput opcional)
@@ -637,6 +676,65 @@ final class StudioEngine: NSObject {
             // es silencioso y caro: con la ZV-E10 apagada engancha la "OBS
             // Virtual Camera", que entrega un CUADRO FIJO. Se graba una hora
             // creyendo que hay cámara. Aquí se dice, y en voz alta.
+            // A CUÁNTOS FPS ENTREGA LA CÁMARA, dicho al enganchar (26 ago 2026).
+            // El latido decía `cam:25fps` toda la noche y no había forma de saber
+            // si eso lo pedía SFCast o lo mandaba la cámara. No lo pide nadie:
+            // `sessionPreset = .high` acepta el formato activo, y una Cam Link
+            // presenta lo que le llegue por HDMI. O sea que 25 fps es la ZV-E10
+            // en PAL, y se arregla en la cámara (NTSC → 30p), no aquí.
+            //
+            // Un lienzo a 30 con una fuente a 25 significa que uno de cada seis
+            // frames del programa repite cara. No es un bug, pero es una decisión
+            // que Daniel merece tomar sabiendo el número.
+            // LOS FPS DEL LIENZO, PEDIDOS POR EL RANGO MÁS CERCANO (26 ago 2026).
+            //
+            // Nadie se los pedía nunca: `sessionPreset = .high` acepta lo que el
+            // dispositivo traiga puesto, y la Cam Link venía a 25. Con un lienzo a
+            // 30 eso son 5 de cada 30 frames del programa repitiendo cara — el 17%
+            // del movimiento de la burbuja, regalado por no preguntar.
+            //
+            // ⚠️ Y NO SE COMPARA POR IGUALDAD. La primera versión pedía un rango
+            // que CONTUVIERA 30.0 exacto y no encontraba ninguno, aunque el log
+            // imprimía "30-30": ese rango es **29.97** (NTSC, 30000/1001), y
+            // 30.0 no cabe en [29.97, 29.97]. Una comparación de flotantes contra
+            // un número redondo, en un dominio donde los números redondos casi no
+            // existen. Se elige el rango más cercano dentro de una tolerancia y se
+            // usa SU `minFrameDuration`, que es el CMTime exacto del dispositivo.
+            //
+            // Solo se toca la CADENCIA, nunca el formato: cambiar de formato
+            // cambiaría la resolución, y eso no lo decide un watchdog.
+            if let cam = devs.first(where: { $0.hasMediaType(.video) }) {
+                let objetivo = Double(self.fpsParaCamara)
+                let actualAntes = 1.0 / max(CMTimeGetSeconds(cam.activeVideoMinFrameDuration), 1.0 / 1000)
+                let mejor = cam.activeFormat.videoSupportedFrameRateRanges
+                    .filter { abs($0.maxFrameRate - objetivo) <= 1.5 }
+                    .max(by: { $0.maxFrameRate < $1.maxFrameRate })
+                if let r = mejor, abs(actualAntes - r.maxFrameRate) > 0.5 {
+                    do {
+                        try cam.lockForConfiguration()
+                        cam.activeVideoMinFrameDuration = r.minFrameDuration
+                        cam.activeVideoMaxFrameDuration = r.minFrameDuration
+                        cam.unlockForConfiguration()
+                        Log.info(String(format: "Estudio: le PEDI %.2f fps a la camara (venia a %.2f)",
+                                        r.maxFrameRate, actualAntes))
+                    } catch {
+                        Log.error("Estudio: no pude fijar los fps de la camara: \(error.localizedDescription)")
+                    }
+                } else if mejor == nil {
+                    Log.info(String(format: "Estudio: la camara no ofrece nada cerca de %.0f fps — se queda a %.2f",
+                                    objetivo, actualAntes))
+                }
+            }
+            if let cam = devs.first(where: { $0.hasMediaType(.video) }) {
+                let f = cam.activeFormat
+                let rangos = f.videoSupportedFrameRateRanges
+                    .map { String(format: "%.0f-%.0f", $0.minFrameRate, $0.maxFrameRate) }
+                    .joined(separator: ",")
+                let d = CMVideoFormatDescriptionGetDimensions(f.formatDescription)
+                let actual = 1.0 / max(CMTimeGetSeconds(cam.activeVideoMinFrameDuration), 1.0 / 1000)
+                Log.info(String(format: "Estudio: la cámara entrega %dx%d a %.0f fps (rangos del formato: %@)",
+                                d.width, d.height, actual.isFinite ? actual : 0, rangos))
+            }
             let resuelta = devs.first(where: { $0.hasMediaType(.video) })
             if let camID, let resuelta, resuelta.uniqueID != camID {
                 Log.error("Estudio: LA CÁMARA NO ES LA ELEGIDA — quedó «\(resuelta.localizedName)». "
@@ -713,7 +811,8 @@ final class StudioEngine: NSObject {
     nonisolated private static func reconcileInputs(_ session: AVCaptureSession,
                                                     camID: String?, micID: String?,
                                                     micEnabled: Bool,
-                                                    forceCamera: Bool = false) {
+                                                    forceCamera: Bool = false,
+                                                    forceMic: Bool = false) {
         func inputs() -> [AVCaptureDeviceInput] {
             session.inputs.compactMap { $0 as? AVCaptureDeviceInput }
         }
@@ -748,8 +847,19 @@ final class StudioEngine: NSObject {
             session.addInput(input)
         }
         let wantMic = micEnabled ? Devices.microphone(id: micID) : nil
+        // `forceMic` es el hermano de `forceCamera`, y existe por la MISMA razón
+        // (26 ago 2026). Esta condición solo quitaba el input de audio cuando el
+        // ID pedido era DISTINTO del pegado — así que re-pegar el mismo Shure era
+        // un no-op perfecto, exactamente en el único caso donde hace falta:
+        // el micro sigue enumerado, sigue siendo el elegido, y ha dejado de
+        // entregar buffers.
+        //
+        // Medido esa noche: el Shure entregó 39,363 muestras en la toma 1, 8,050
+        // en la toma 2 (murió a media toma) y CERO a partir de ahí. El guard de
+        // voz hizo bien su trabajo y auto-detuvo la toma 3 a los 20 s… y la 4, y
+        // la 5. Nadie volvía a pegar el micro porque nadie podía.
         for i in inputs() where i.device.hasMediaType(.audio) && !i.device.hasMediaType(.video)
-            && i.device.uniqueID != wantMic?.uniqueID {
+            && (forceMic || i.device.uniqueID != wantMic?.uniqueID) {
             session.removeInput(i)
         }
         if let mic = wantMic,
@@ -934,6 +1044,7 @@ final class StudioEngine: NSObject {
             Task { @MainActor in
                 self?.checkStreamHealth()
                 self?.checkCameraHealth()
+                self?.checkMicHealth()
             }
         }
     }
@@ -999,6 +1110,42 @@ final class StudioEngine: NSObject {
                              + "imagen — RE-PEGÁNDOLA")
                     rebindCamera(reason: "watchdog: \(Int(age))s sin imagen")
                 }
+            }
+        }
+    }
+
+    /// EL WATCHDOG DEL MICRÓFONO (26 ago 2026). La cámara tiene el suyo desde el
+    /// 9 ago; el micrófono no tenía ninguno, y es la fuente que decide si una
+    /// toma sirve para algo: una grabación sin imagen se salva con B-roll, una
+    /// sin voz no se salva.
+    ///
+    /// El guard de voz (v3.3) ya avisaba y hasta detenía la toma — pero solo
+    /// SABE, no CURA. Esa noche el Shure murió en la toma 2 y el guard hizo lo
+    /// suyo en la 3, la 4 y la 5, cada vez a los 20 s, para siempre. Un sensor
+    /// sin actuador acaba siendo un sensor que se ignora.
+    private func checkMicHealth() {
+        guard isRunning, AppSettings.load().micEnabled, Permissions.micGranted else { return }
+        let age = levels.micAge()
+        let dead = age > Self.deadAfter
+        if dead != micDead {
+            micDead = dead
+            if dead {
+                Log.error(String(format: "Estudio: MICRÓFONO MUDO — %.1fs sin una muestra", age))
+                onAlert?("El micrófono dejó de entregar audio. Si estás grabando, esta toma va sin voz.", true)
+                if StudioController.shared.recorder.isRecording {
+                    notify("SFCast — EL MICRÓFONO SE CAYÓ", "Llevas grabando SIN VOZ. Revisa el Shure.")
+                }
+            } else {
+                Log.info("Estudio: micrófono vivo de nuevo")
+                onAlert?("El micrófono volvió.", false)
+            }
+            onStatusChange?()
+        }
+        if dead {
+            let now = CACurrentMediaTime()
+            if now > micRetryAt {
+                micRetryAt = now + 20
+                rebindMic(reason: "watchdog: \(Int(age))s sin audio")
             }
         }
     }
@@ -1744,6 +1891,8 @@ final class CadenceKeeper: @unchecked Sendable {
     private var lastEmitted: CMTime = .invalid
     private var repetidos = 0
     private var maxRelleno = 8
+    /// Por encima de esto ya no es un ahogo: es una discontinuidad.
+    private static let huecoDeDiscontinuidad = 1.0
 
     func reset() {
         lock.lock(); lastEmitted = .invalid; repetidos = 0; lock.unlock()
@@ -1776,7 +1925,18 @@ final class CadenceKeeper: @unchecked Sendable {
         // Rellenar desde `lastEmitted` ahí fecha los frames en el pasado y
         // arrastra el arranque del writer con ellos. Se re-ancla y ya: el hueco
         // es información honesta, pero no puede envenenar el reloj.
-        if hueco > paso * Double(maxRelleno + 1), !QAFlags.revivirHuecoDeCabeza {
+        // ⚠️ EL UMBRAL ES 1 SEGUNDO, NO `maxRelleno` (revisión adversarial, misma
+        // noche). La primera versión re-anclaba en cuanto el hueco no cabía en el
+        // relleno máximo — 0.3 s — y eso habría sido un RETROCESO al 9 ago: un
+        // atasco de 750 ms a mitad de toma pasaba de rellenarse con 8 frames a no
+        // rellenarse en absoluto, o sea justo el hueco que `CadenceKeeper` existe
+        // para tapar ("OBS no siempre alcanza: nunca deja huecos").
+        //
+        // Un segundo separa las dos cosas sin ambigüedad: por debajo es la Mac
+        // ahogándose y se rellena; por encima no es un timer que perdió disparos,
+        // es una discontinuidad (otra toma, el motor parado, la app suspendida) y
+        // rellenar desde `lastEmitted` fecharía los frames en el pasado.
+        if hueco > Self.huecoDeDiscontinuidad, !QAFlags.revivirHuecoDeCabeza {
             lastEmitted = target
             return [target]
         }
@@ -2282,6 +2442,13 @@ final class AudioLevelBox: @unchecked Sendable {
         return (now - micAt > Self.freshFor ? 0 : mic,
                 now - systemAt > Self.freshFor ? 0 : system)
     }
+    /// Segundos desde el último buffer de micrófono. `fresh()` da un sí/no con
+    /// un umbral de milésimas, y para un watchdog hace falta la EDAD.
+    func micAge() -> Double {
+        lock.lock(); defer { lock.unlock() }
+        return CACurrentMediaTime() - micAt
+    }
+
     /// Para el heartbeat/diagnóstico: ¿llega audio de verdad?
     func fresh() -> (mic: Bool, system: Bool) {
         lock.lock(); defer { lock.unlock() }

@@ -342,7 +342,29 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                                       descripcion: "⌥Z deshacer última marca") { [weak self] in
             self?.desmarcar()
         }
+        // Y SI NO SE REGISTRARON, QUE SE ENTERE (26 ago 2026). Hasta hoy esto
+        // escribía tres líneas de ERROR al log y seguía como si nada: Daniel
+        // pulsaba ⌥X a mitad del curso, no pasaba nada, y se enteraba al editar
+        // —o sea, cuando ya no hay remedio—. El 26 ago los tres atajos llevaban
+        // TODO EL DÍA sin registrarse (una instancia zombi de SFCast los tenía
+        // tomados) y ni una sola vez se lo dijimos.
+        //
+        // Una vez por corrida, no por toma: avisar en cada REC entrena a ignorar.
+        let faltan = [hotkeyRetoma == nil ? "⌥C" : nil,
+                      hotkeyBueno == nil ? "⌥X" : nil,
+                      hotkeyDeshacer == nil ? "⌥Z" : nil].compactMap { $0 }
+        if !faltan.isEmpty, !atajosAvisados {
+            atajosAvisados = true
+            let cuales = faltan.joined(separator: ", ")
+            Log.error("Estudio: los atajos de marcador \(cuales) NO están activos — otra app los tiene")
+            raiseAlert("Los marcadores \(cuales) no funcionan: otra app tiene esas teclas. "
+                       + "Puedes marcar desde la barra del Estudio.", critical: true, sticky: true)
+            notify("SFCast — marcadores sin teclas", "\(cuales) los tiene otra app. Marca desde la barra.")
+        }
     }
+
+    /// Ya se avisó en esta corrida que los atajos no se registraron.
+    private var atajosAvisados = false
 
     /// Quita la última marca y actualiza los dos contadores.
     func desmarcar() {

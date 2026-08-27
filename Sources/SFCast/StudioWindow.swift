@@ -147,24 +147,44 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
 
     // MARK: - ventana
 
-    /// Pantalla completa nativa (modo rodaje via sfcast://rodaje), SIEMPRE en
-    /// el monitor IZQUIERDO (Daniel, 18 ago: el rodaje va en el izquierdo; el
-    /// derecho queda libre para notas/terminal). El respiro deja que
-    /// makeKeyAndOrderFront asiente si la ventana acaba de nacer.
-    func enterFullScreen() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            guard let w = self?.window,
-                  !w.styleMask.contains(.fullScreen) else { return }
-            if let left = NSScreen.screens.min(by: { $0.frame.minX < $1.frame.minX }),
-               w.screen !== left {
-                let f = left.visibleFrame
-                w.setFrame(NSRect(x: f.minX + 40, y: f.minY + 40,
-                                  width: min(w.frame.width, f.width - 80),
-                                  height: min(w.frame.height, f.height - 80)),
-                           display: true)
-            }
-            w.toggleFullScreen(nil)
+    /// Coloca el Estudio para el modo rodaje (sfcast://rodaje). **SIN pantalla
+    /// completa** (Daniel, 25 ago 2026: "evita que se ponga pantalla completa,
+    /// es molesto que lo haga as default"). F4 trae el Estudio al frente y lo
+    /// pone donde toca; el fullscreen lo decides tú con el botón verde.
+    ///
+    /// "IZQUIERDO" SIGNIFICA MONITOR, NO PANTALLA. El 18 ago había dos BenQ y
+    /// `min(minX)` bastaba. Hoy macOS lista TRES: entre los dos monitores hay
+    /// una pantalla de 1280x720 @ 50Hz, sin nombre, colgada en x = -1280 — o
+    /// sea, la más a la izquierda de todas. El Estudio se iba entero a esa
+    /// pantalla fantasma y desde la silla parecía que F4 "no abría SFCast":
+    /// abría, pero donde nadie mira.
+    ///
+    /// El filtro no adivina cuál es la buena: DESCARTA lo que no es un monitor
+    /// de trabajo (sin nombre en el sistema, o más angosto que 1440 pt). Si el
+    /// filtro se quedara vacío, cae al comportamiento viejo en vez de no hacer
+    /// nada: elegir raro es mejor que dejar la ventana perdida.
+    ///
+    /// SI LA VENTANA YA ESTÁ EN EL MONITOR DE RODAJE, NO SE TOCA: F4 no
+    /// reacomoda lo que tú acomodaste. Y sin fullscreen ya no hace falta el
+    /// respiro de 0.35 s que existía solo para que `toggleFullScreen` no
+    /// llegara antes que `makeKeyAndOrderFront` — la ventana aparece en el
+    /// mismo hop en que se pide.
+    func colocarParaRodaje() {
+        guard let w = window, !w.styleMask.contains(.fullScreen) else { return }
+        let reales = NSScreen.screens.filter {
+            !$0.localizedName.trimmingCharacters(in: .whitespaces).isEmpty
+                && $0.frame.width >= 1440
         }
+        let candidatas = reales.isEmpty ? NSScreen.screens : reales
+        guard let destino = candidatas.min(by: { $0.frame.minX < $1.frame.minX }),
+              w.screen !== destino else { return }
+        let f = destino.visibleFrame
+        let ancho = min(w.frame.width, f.width - 80)
+        let alto = min(w.frame.height, f.height - 80)
+        w.setFrame(NSRect(x: f.minX + (f.width - ancho) / 2,
+                          y: f.minY + (f.height - alto) / 2,
+                          width: ancho, height: alto),
+                   display: true)
     }
 
     func open() {
@@ -1446,6 +1466,25 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
 
     var currentCameraID: String? { AppSettings.load().cameraDeviceID }
     var currentMicID: String? { AppSettings.load().micDeviceID }
+    var currentScreenID: String? { AppSettings.load().screenDisplayID }
+
+    /// Cambia la PANTALLA capturada EN CALIENTE (doble clic sobre la fuente
+    /// Pantalla, hermano del selector de camara). Reengancha el mismo stream
+    /// que ya se remonta solo cuando SCK muere: un camino, no dos.
+    ///
+    /// El corte a mitad de grabacion NO se permite — no por pudor tecnico:
+    /// cambiar de pantalla cambia el lienzo (2560x1440 -> 1920x1080) y el raw
+    /// quedaria partido en dos resoluciones dentro del mismo take.
+    func setScreenDisplay(id: String?) {
+        guard !recorder.isRecording else {
+            raiseAlert("No cambio de pantalla a mitad de una grabación", critical: false)
+            return
+        }
+        var s = AppSettings.load()
+        s.screenDisplayID = id
+        s.save()
+        engine.restartScreenTap(reason: "cambio de pantalla")
+    }
 
     /// Cambia la cámara EN CALIENTE (doble clic sobre la fuente Cámara).
     /// AppSettings es la config compartida con el modo Loom (una sola config).
@@ -2459,6 +2498,7 @@ struct SourcesPanel: View {
     @EnvironmentObject var c: StudioController
     /// Item de cámara con el selector de dispositivo abierto (doble clic).
     @State private var cameraPickerItem: UUID?
+    @State private var screenPickerItem: UUID?
 
     var body: some View {
         PanelBox(title: "Fuentes — \(c.activeScene?.name ?? "")") {
@@ -2615,13 +2655,23 @@ struct SourcesPanel: View {
             .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
-        .help(item.kind == .camera ? "Doble clic: elegir la cámara" : item.kind.label)
-        // DOBLE CLIC sobre la fuente Cámara: selector de dispositivo, cambia
-        // EN CALIENTE (pedido de Daniel 6 ago — estilo OBS, sin abrir Ajustes).
+        .help(item.kind == .camera ? "Doble clic: elegir la cámara"
+              : item.kind == .screen ? "Doble clic: elegir la pantalla"
+              : item.kind.label)
+        // DOBLE CLIC sobre la fuente: selector de dispositivo, cambia EN
+        // CALIENTE (pedido de Daniel 6 ago para la cámara — estilo OBS, sin
+        // abrir Ajustes; 25 ago el mismo gesto para la PANTALLA, que era lo
+        // único que seguía obligando a ir a Ajustes del sistema).
         .simultaneousGesture(TapGesture(count: 2).onEnded {
-            guard item.kind == .camera else { return }
-            c.selectedItemID = item.id
-            cameraPickerItem = item.id
+            switch item.kind {
+            case .camera:
+                c.selectedItemID = item.id
+                cameraPickerItem = item.id
+            case .screen:
+                c.selectedItemID = item.id
+                screenPickerItem = item.id
+            default: break
+            }
         })
         .popover(isPresented: Binding(
             get: { cameraPickerItem == item.id },
@@ -2632,9 +2682,25 @@ struct SourcesPanel: View {
                 cameraPickerItem = nil
             }
         }
+        .popover(isPresented: Binding(
+            get: { screenPickerItem == item.id },
+            set: { if !$0 { screenPickerItem = nil } }), arrowEdge: .trailing) {
+            DevicePickerPopover(title: "Pantalla", entries: Devices.pantallas(),
+                                currentID: c.currentScreenID,
+                                defaultLabel: "La principal del sistema") { id in
+                c.setScreenDisplay(id: id)
+                screenPickerItem = nil
+            }
+        }
         // CLIC DERECHO sobre la fuente: el aro neón del Loom, aquí (pedido de
         // Daniel). Actúa sobre ESTA fila por id — el clic derecho no selecciona.
         .contextMenu {
+            if item.kind == .screen {
+                Button("Cambiar pantalla…") {
+                    c.selectedItemID = item.id
+                    screenPickerItem = item.id
+                }
+            }
             if item.kind == .camera {
                 Button("Cambiar cámara…") {
                     c.selectedItemID = item.id
@@ -2843,6 +2909,9 @@ struct DevicePickerPopover: View {
     let title: String
     let entries: [Devices.Entry]
     let currentID: String?
+    /// Que dice la fila de "sin elección explícita". Para cámara/mic es el
+    /// default del sistema; para pantallas, la principal. Mismo picker.
+    var defaultLabel: String = "Default del sistema"
     let pick: (String?) -> Void
 
     var body: some View {
@@ -2851,7 +2920,7 @@ struct DevicePickerPopover: View {
                 .font(.system(size: 9.5, weight: .semibold)).tracking(1.1)
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 3)
-            row(name: "Default del sistema", id: nil)
+            row(name: defaultLabel, id: nil)
             ForEach(entries) { e in row(name: e.name, id: e.id) }
         }
         .padding(10)

@@ -216,12 +216,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               let url = URL(string: s), url.scheme == "sfcast" else { return }
         switch url.host {
         case "rodaje", "studio":
-            // El Estudio al frente y a pantalla completa, con EL SET a la
-            // vista: el modo rodaje completo en una sola pantalla.
+            // El Estudio al frente, en el monitor de rodaje. NO a pantalla
+            // completa: eso lo decide Daniel, no la tecla.
+            //
+            // SIN FORZAR NADA DEL LAYOUT (Daniel, 25 ago): antes esto abria
+            // `showSetPanel = true` a la brava, y como ese @Published PERSISTE
+            // en su didSet, la tecla no solo cambiaba la vista de esta sesion
+            // — le pisaba la preferencia guardada. F4 debe devolverle el
+            // Estudio TAL COMO LO DEJO (escena activa, paneles, anchos); los
+            // ajustes de camara ya los guarda la camara misma.
             Task { @MainActor in
                 StudioController.shared.open()
-                StudioController.shared.showSetPanel = true
-                StudioController.shared.enterFullScreen()
+                StudioController.shared.colocarParaRodaje()
             }
         default:
             Log.info("URL sfcast:// sin verbo conocido: \(s)")

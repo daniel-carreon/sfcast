@@ -397,8 +397,16 @@ final class StudioEngine: NSObject {
         let content = try await Deadline.run(seconds: 12, name: "SCShareableContent") {
             try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         }
+        // LA PANTALLA LA ELIGE DANIEL (25 ago 2026, doble clic en la fuente
+        // Pantalla). Antes esto era `CGMainDisplayID()` a secas: con tres
+        // pantallas conectadas, grabar la que NO es la principal exigia ir a
+        // Ajustes del sistema a mover cual es la principal. La cascada deja el
+        // comportamiento viejo intacto cuando no hay eleccion guardada, y
+        // sobrevive a desconectar el monitor elegido (cae a la principal).
         let mainID = CGMainDisplayID()
-        guard let display = content.displays.first(where: { $0.displayID == mainID })
+        let elegida = AppSettings.load().screenDisplayID.flatMap { UInt32($0) }
+        guard let display = content.displays.first(where: { $0.displayID == elegida })
+                ?? content.displays.first(where: { $0.displayID == mainID })
                 ?? content.displays.first else {
             throw NSError(domain: "SFCast", code: 1, userInfo: [NSLocalizedDescriptionKey:
                 "Sin permiso de pantalla efectivo (aprueba «Grabación de pantalla» y reabre)."])

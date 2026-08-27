@@ -8,6 +8,7 @@ struct AppSettings: Codable {
     var bubbleGlow = "ambar"        // ambar | morado | nada
     var cameraDeviceID: String? = nil   // uniqueID; nil = default del sistema
     var micDeviceID: String? = nil      // uniqueID; nil = default del sistema
+    var screenDisplayID: String? = nil  // CGDirectDisplayID en texto; nil = la principal
     var cameraEnabled = true            // burbuja de cámara (toggle del micropanel)
     var micEnabled = true
     var systemAudioEnabled = true
@@ -67,6 +68,7 @@ struct AppSettings: Codable {
         bubbleGlow = try c.decodeIfPresent(String.self, forKey: .bubbleGlow) ?? bubbleGlow
         cameraDeviceID = try c.decodeIfPresent(String.self, forKey: .cameraDeviceID)
         micDeviceID = try c.decodeIfPresent(String.self, forKey: .micDeviceID)
+        screenDisplayID = try c.decodeIfPresent(String.self, forKey: .screenDisplayID)
         cameraEnabled = try c.decodeIfPresent(Bool.self, forKey: .cameraEnabled) ?? cameraEnabled
         micEnabled = try c.decodeIfPresent(Bool.self, forKey: .micEnabled) ?? micEnabled
         systemAudioEnabled = try c.decodeIfPresent(Bool.self, forKey: .systemAudioEnabled) ?? systemAudioEnabled

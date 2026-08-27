@@ -879,12 +879,29 @@ final class StudioRecorder {
                 if let unicos = unicosFPS {
                     let pctU = unicos / objetivo
                     let repPct = real > 0 ? Double(repetidos) / (real * duration) * 100 : 0
-                    Log.info(String(format: "Estudio: MOVIMIENTO REAL %.2f fps de contenido único "
-                                    + "(%.0f%% de lo pedido · %.0f%% de los frames eran repetición)",
+                    // ⚠️ ESTE NÚMERO NO MIRA PÍXELES, Y HAY QUE DECIRLO (26 ago 2026).
+                    //
+                    // `uniqueContentFps` cuenta los frames que el compositor
+                    // produjo menos los que rellenó `CadenceKeeper`. Eso es una
+                    // medida honesta de LA APP, pero no del contenido: si la
+                    // pantalla está quieta y la cámara apagada, el compositor
+                    // compone 30 frames idénticos por segundo y este contador
+                    // dice 100% tan feliz. Medido esa noche: 96% aquí contra 48%
+                    // real con `mpdecimate` sobre el mismo archivo.
+                    //
+                    // El repo ya lo sabía y no estaba escrito donde se lee: el
+                    // sensor está cableado a la salida de su propio actuador. El
+                    // veredicto sobre PÍXELES lo da `scripts/qa-unique-fps.sh`.
+                    // Así que el log lo etiqueta por lo que es y dice dónde está
+                    // el juez de verdad; un número que promete más de lo que mide
+                    // es la forma más cara de tener razón.
+                    Log.info(String(format: "Estudio: FRAMES NUEVOS %.2f fps compuestos sin relleno "
+                                    + "(%.0f%% de lo pedido · %.0f%% eran repetición). OJO: cuenta frames, "
+                                    + "no píxeles — para el movimiento real corre scripts/qa-unique-fps.sh",
                                     unicos, pctU * 100, repPct))
                     if pctU < 0.9 {
-                        Log.error(String(format: "Estudio: EL MATERIAL SE MUEVE A %.0f%% — el archivo dice "
-                                         + "%.1f fps pero solo %.1f son contenido nuevo", pctU * 100,
+                        Log.error(String(format: "Estudio: SOLO %.0f%% DE FRAMES NUEVOS — el archivo dice "
+                                         + "%.1f fps y solo %.1f se compusieron de cero", pctU * 100,
                                          real, unicos))
                         onAlert?(String(format: "⚠️ El archivo dice %.0f fps pero se MUEVE a %.1f: %.0f%% de "
                                         + "los frames son repetidos. Cierra y reabre SFCast antes de la "

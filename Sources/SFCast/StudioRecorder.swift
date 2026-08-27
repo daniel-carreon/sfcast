@@ -28,6 +28,12 @@ final class StudioRecorder {
     private var screenRawFiles: [String] = []
     private var health: Task<Void, Never>?
     private var lowDiskWarned = false
+    /// Reenganches de pantalla que YA existían al empezar esta toma. Sin esto el
+    /// aviso reportaba el acumulado del motor: las 15 grabaciones del 26 ago
+    /// dijeron "hubo 7 reenganche(s) EN ESTA SESIÓN" cuando los 7 habían pasado
+    /// a las 06:15 y 07:02 de la mañana. Un contador que no se resetea es un
+    /// sensor que miente, y un sensor que miente se deja de leer.
+    private var screenRestartsAtStart = 0
     /// Lo que Daniel marcó en vivo y los tramos con imagen congelada. Los dos
     /// viajan al manifest: son el cable entre lo que pasó AL GRABAR y lo que el
     /// editor necesita saber DESPUÉS (v3.2).
@@ -196,6 +202,33 @@ final class StudioRecorder {
             // con las muestras que el motor lleva midiendo desde que se abrió el
             // Estudio (para el REC ya hay decenas), sin rampa audible.
             engine.programClock.begin()
+            screenRestartsAtStart = engine.screenRestarts
+            // Y EL GUARDIÁN DE CADENCIA TAMBIÉN (fix 26 ago 2026). Estaban a una
+            // línea de distancia y solo uno se reiniciaba: `programClock.begin()`
+            // aquí, `cadence.reset()` allá arriba en `startRenderLoop()`, o sea
+            // UNA VEZ POR MOTOR, no por toma.
+            //
+            // Lo que costaba: `lastEmitted` sobrevivía a la toma anterior, así que
+            // el primer tick de la nueva creía que llevaba N segundos sin emitir y
+            // devolvía frames de relleno fechados en la toma PASADA. El primero de
+            // ellos fijaba `firstVideoPTS`, y el writer abría la sesión ahí — SEGUNDOS
+            // EN EL PASADO. Resultado medido en las 9 tomas del 26 ago: **cada
+            // grabación empezaba con un hueco exactamente igual de largo que la
+            // pausa desde la anterior** (1.07 s, 1.20 s, 2.07 s, 6.77 s, 9.47 s…),
+            // y la primera toma de cada sesión salía perfecta porque no había
+            // toma anterior que la envenenara.
+            //
+            // De ahí venían las alarmas de la noche: "PEOR TRAMO 19.9 fps" y "EL
+            // MATERIAL SE MUEVE A 57%" no mentían — medían el hueco.
+            // `--sincadencereset` REVIVE el bug a propósito. Un fix que no se
+            // puede volver a romper no se puede volver a probar, y este repo ya
+            // aprendió que "un mecanismo que nunca se disparó no es un fix, es
+            // una intención" (regla del 25 jul, de donde salió --killstream).
+            if !QAFlags.revivirHuecoDeCabeza {
+                engine.cadence.reset()
+            } else {
+                Log.error("QA: --bug26ago — revivo el hueco de cabeza del 26 ago a propósito")
+            }
             engine.resetCompositorWindow()
             let s = ProgramSink(url: sessionDir.appendingPathComponent("seg-001.mp4"),
                                 width: Int(engine.canvasSize.width),
@@ -852,6 +885,30 @@ final class StudioRecorder {
                 // 10 fps con congelamientos de 750 ms. El promedio de una
                 // grabación larga es justo el estadístico que oculta un colapso
                 // corto: hay que mirar el PEOR tramo.
+                // EL HUECO DE CABEZA (sensor nuevo, 26 ago 2026). Mide los
+                // segundos entre el instante en que el writer abrió la sesión y
+                // el primer frame que de verdad se escribió. Debe ser ~0: si no,
+                // el archivo EMPIEZA CONGELADO y todo lo que se calcule sobre su
+                // duración (fps reales, movimiento, peor tramo) sale deprimido
+                // por un hueco que no es material, es contabilidad.
+                //
+                // Nace con su alarma, como manda el invariante: un sensor sin
+                // actuador no es un sensor.
+                if st.headVoidSec > 0.5 {
+                    Log.error(String(format: "Estudio: HUECO DE CABEZA de %.2f s — el archivo abre su "
+                                     + "línea de tiempo %.2f s antes del primer frame. Todo lo que se "
+                                     + "mida sobre la duración sale castigado por ese hueco.",
+                                     st.headVoidSec, st.headVoidSec))
+                    onAlert?(String(format: "La toma abrió con %.1f s de vacío al principio. Revísala "
+                                    + "antes de subirla.", st.headVoidSec), true)
+                } else if st.videoFrames > 0 {
+                    Log.info(String(format: "Estudio: arranque limpio — hueco de cabeza %.0f ms",
+                                    st.headVoidSec * 1000))
+                }
+                if st.preSessionDrops > 0 {
+                    Log.error("Estudio: \(st.preSessionDrops) frame(s) llegaron ANTES del arranque de "
+                              + "sesión y se tiraron (antes esto no lo contaba nadie)")
+                }
                 let peor = st.worstWindow(20)
                 if let peor, peor.fps < objetivo * 0.9 {
                     let m = peor.startSec / 60, s = peor.startSec % 60
@@ -918,8 +975,10 @@ final class StudioRecorder {
         let totalMbps = duration > 1 ? Double(total) * 8 / duration / 1_000_000 : 0
         Log.info(String(format: "Estudio: PESO %.1f min → %.0f MB total (%.2f Mbps) — %@",
                         duration / 60, Double(total) / 1_000_000, totalMbps, parts.joined(separator: " · ")))
-        if engine.screenRestarts > 0 {
-            Log.error("Estudio: hubo \(engine.screenRestarts) reenganche(s) de pantalla en esta sesión")
+        let reenganchesDeEstaToma = engine.screenRestarts - screenRestartsAtStart
+        if reenganchesDeEstaToma > 0 {
+            Log.error("Estudio: hubo \(reenganchesDeEstaToma) reenganche(s) de pantalla en esta toma "
+                      + "(\(engine.screenRestarts) desde que abrió el Estudio)")
         }
         Log.info("Estudio: sesión \(id) guardada en \(dir.path)")
         lastDir = dir
@@ -940,6 +999,12 @@ final class ProgramSink: @unchecked Sendable {
         var droppedFrames = 0
         var micSamples = 0
         var systemSamples = 0
+        /// Frames tirados por llegar ANTES del arranque de sesión. Ver appendVideo.
+        var preSessionDrops = 0
+        /// Segundos de NADA al principio del archivo: del instante en que el
+        /// writer abrió la sesión al primer frame que de verdad se escribió.
+        /// Debe ser ~0. Cuando no lo es, el archivo empieza congelado.
+        var headVoidSec: Double = 0
         /// Frames escritos por segundo de grabación. Es lo que permite hablar
         /// de TRAMOS en vez de promedios: el 9 ago el archivo promedió 92% del
         /// objetivo (por eso no saltó ninguna alarma) mientras seis minutos
@@ -1108,7 +1173,10 @@ final class ProgramSink: @unchecked Sendable {
                             CMTimeGetSeconds(start)))
         }
         // Un frame anterior al arranque de sesión rompería el orden del writer.
-        if CMTimeCompare(hostTime, sessionStartTime) < 0 { return }
+        // SE CUENTA (26 ago 2026): esto era un `return` mudo en el camino
+        // caliente, y un frame que se va sin contarse es un frame que desaparece
+        // del mundo — la misma lección del 9 ago, en el otro extremo del pipe.
+        if CMTimeCompare(hostTime, sessionStartTime) < 0 { stats.preSessionDrops += 1; return }
         guard videoInput.isReadyForMoreMediaData else {
             stats.droppedFrames += 1
             if stats.droppedFrames % 120 == 1 {
@@ -1117,6 +1185,9 @@ final class ProgramSink: @unchecked Sendable {
             return
         }
         if adaptor.append(pb, withPresentationTime: hostTime) {
+            if stats.videoFrames == 0 {
+                stats.headVoidSec = CMTimeGetSeconds(CMTimeSubtract(hostTime, sessionStartTime))
+            }
             stats.videoFrames += 1
             let sec = Int(CMTimeGetSeconds(CMTimeSubtract(hostTime, sessionStartTime)))
             if sec >= 0, sec < 60 * 60 * 6 {
@@ -1177,7 +1248,23 @@ final class ProgramSink: @unchecked Sendable {
         }
         if startDeadline.isValid, CMTimeCompare(now, startDeadline) >= 0 {
             Log.info("ProgramSink: sin audio en \(audioWaitLimit)s — arranco solo con video")
-            return firstVideoPTS
+            // ⚠️ AQUÍ SE ARRANCA EN `now`, NO EN `firstVideoPTS` (fix 26 ago 2026).
+            //
+            // `firstVideoPTS` es el primer frame que se VIO, y todos los frames
+            // entre él y este instante YA SE DESCARTARON esperando al audio: no
+            // existen en ningún lado. Anclar la sesión ahí no los recupera —
+            // solo abre la línea de tiempo del archivo en un punto donde no hay
+            // nada, y el resultado es un video que EMPIEZA CONGELADO.
+            //
+            // En el caso benigno eso costaba los 0.6 s de la espera, sistemático
+            // y en silencio. En el maligno —cuando `firstVideoPTS` venía de un
+            // frame de relleno fechado en la TOMA ANTERIOR— costaba tantos
+            // segundos como hubiera durado la pausa: medido el 26 ago, 1.07 s,
+            // 1.20 s, 2.07 s, 6.77 s, 9.47 s.
+            //
+            // Si renunciamos al audio, la sesión empieza en el frame que estamos
+            // a punto de escribir. No se pierde nada y no se inventa un hueco.
+            return QAFlags.revivirHuecoDeCabeza ? firstVideoPTS : now
         }
         return nil
     }

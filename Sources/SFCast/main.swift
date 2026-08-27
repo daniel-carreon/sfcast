@@ -94,6 +94,23 @@ let recTestSeconds: Int? = {
     return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 12
 }()
 
+/// QA DE TOMAS ENCADENADAS (`--tomas N [--dura S] [--pausa S]`): graba N veces
+/// seguidas con pausas entre medias y le pregunta a CADA archivo si arrancó
+/// limpio. Existe porque las dos rondas de rendimiento anteriores probaron UNA
+/// toma, y el bug del 26 ago solo aparecía de la segunda en adelante.
+let tomasCount: Int? = {
+    guard let i = cliArgs.firstIndex(of: "--tomas") else { return nil }
+    return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 6
+}()
+let tomasDura: Int = {
+    guard let i = cliArgs.firstIndex(of: "--dura"), i + 1 < cliArgs.count else { return 8 }
+    return Int(cliArgs[i + 1]) ?? 8
+}()
+let tomasPausa: Int = {
+    guard let i = cliArgs.firstIndex(of: "--pausa"), i + 1 < cliArgs.count else { return 0 }
+    return Int(cliArgs[i + 1]) ?? 0
+}()
+
 /// QA DE SINCRONÍA (`--synctest N`): mide la latencia real de cámara, pantalla
 /// y mic contra el reloj del host. Es el número que decide cuánto compensa el
 /// `ProgramClock` — y el que no se pudo sacar del archivo por correlación.
@@ -257,6 +274,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 hud.hide()
                 exit(0)
+            }
+        } else if let n = tomasCount {
+            Task { @MainActor in
+                await StudioController.shared.runTomasTest(tomas: n, dura: tomasDura, pausa: tomasPausa)
             }
         } else if let seconds = recTestSeconds {
             Task { @MainActor in await StudioController.shared.runRecTest(seconds: seconds) }

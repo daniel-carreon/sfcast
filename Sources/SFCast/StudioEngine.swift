@@ -1718,6 +1718,16 @@ final class CadenceKeeper: @unchecked Sendable {
             lastEmitted = target
             return [target]
         }
+        // RED DE SEGURIDAD (26 ago 2026): un hueco que ni siquiera cabe en el
+        // relleno máximo no es un timer que perdió disparos — es una
+        // DISCONTINUIDAD (otra toma, el motor que se detuvo, la app suspendida).
+        // Rellenar desde `lastEmitted` ahí fecha los frames en el pasado y
+        // arrastra el arranque del writer con ellos. Se re-ancla y ya: el hueco
+        // es información honesta, pero no puede envenenar el reloj.
+        if hueco > paso * Double(maxRelleno + 1), !QAFlags.revivirHuecoDeCabeza {
+            lastEmitted = target
+            return [target]
+        }
         let faltan = min(Int((hueco / paso).rounded()) - 1, maxRelleno)
         guard faltan > 0 else { lastEmitted = target; return [target] }
         var out: [CMTime] = []

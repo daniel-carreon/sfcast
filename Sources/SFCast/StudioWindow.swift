@@ -518,6 +518,16 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                                 config: config, scene: activeScene)
     }
 
+    /// QA de TOMAS ENCADENADAS (`--tomas N`): el arnés que faltaba. Ver
+    /// StudioTomasTest para el porqué.
+    func runTomasTest(tomas: Int, dura: Int, pausa: Int) async {
+        testMode = true
+        open()
+        try? await Task.sleep(nanoseconds: 4_000_000_000)
+        await StudioTomasTest.run(tomas: tomas, dura: dura, pausaBase: pausa, engine: engine,
+                                  recorder: recorder, config: config, scene: activeScene)
+    }
+
     /// QA de SINCRONÍA (`--synctest N`): abre el motor, deja que las fuentes
     /// entreguen frames, y reporta la latencia MEDIDA de cada una. No graba.
     func runSyncTest(seconds: Int) async {
@@ -1178,9 +1188,14 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     private func startMeters() {
         meterTimer?.invalidate()
         lastFlow = nil               // re-baseline del sensor de fps al reabrir
+        MainWatch.shared.start(reason: "Estudio abierto")
         meterTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                // LATIDO DE MAIN (26 ago 2026). Lo primero del tick, antes de
+                // cualquier trabajo: si main se bloquea, esto deja de estamparse
+                // y el vigía —que vive FUERA de main— lo declara. Ver MainWatch.
+                MainWatch.shared.beat()
                 let l = self.engine.levels.get()
                 // Vúmetro real: ataque INSTANTÁNEO, caída suave (el valor crudo
                 // a 15Hz brincaba feo — feedback Daniel v2.3). DIRECTO al layer:
@@ -1207,6 +1222,13 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
                     self.syncMirror()
                 }
                 if self.tick % 45 == 0 { self.engine.retryScreenIfNeeded() }   // ~3s
+                // EL PUNTO CIEGO (26 ago 2026): el latido ❤︎ del recorder solo
+                // existe MIENTRAS SE GRABA. Esa noche el preview se cayó ANTES
+                // de dar REC y el log no tuvo nada que contar — tres minutos y
+                // medio mudos. Ahora el Estudio late también en reposo, y late
+                // con los MISMOS números que el chip que Daniel está mirando,
+                // para que "el chip decía 0" deje de ser un recuerdo y sea un dato.
+                if self.tick % 225 == 0 { self.logPreviewBeat() }               // ~15s
                 if self.tick % 150 == 0 {                                       // ~10s
                     let free = StudioRecorder.freeBytes()
                     let note = free < StudioRecorder.minFreeBytesToStart
@@ -1250,9 +1272,31 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     }
 
 
+    /// Latido del Estudio EN REPOSO (sin grabar). Deliberadamente reporta los
+    /// mismos `camFPS`/`prevFPS` que pinta el chip: el objetivo no es una
+    /// segunda medición, es dejar ESCRITO lo que el humano vio en pantalla.
+    private func logPreviewBeat() {
+        guard engine.isRunning, !isRecording else { return }
+        let cs = engine.compositorStats()
+        let flow = engine.flowCounts()
+        Log.info(String(format: "Estudio ◇ reposo — cam:%dfps prev:%dfps(-%d) %@comp:%.1fms sinBuf:%d "
+                        + "pantalla:%@ stream:%.1fs-mudo ram:%@ main:%@",
+                        max(meters.camFPS, 0), max(meters.prevFPS, 0), flow.previewDropped,
+                        meters.renderStarving ? "COMPOSITOR-NO-ALCANZA " : "",
+                        cs.composeMsP50, cs.bufferFailures,
+                        engine.screenFrozen ? "CONGELADA" : (screenOK ? "ok" : "SIN-SENAL"),
+                        engine.screenHealth.silence(),
+                        StudioRecorder.gb(StudioRecorder.availableRAM()),
+                        MainWatch.shared.stallCount == 0
+                            ? "ok"
+                            : String(format: "%d bloqueo(s), peor %.0fms",
+                                     MainWatch.shared.stallCount, MainWatch.shared.worstStallMs)))
+    }
+
     private func stopMeters() {
         meterTimer?.invalidate()
         meterTimer = nil
+        MainWatch.shared.stop()
     }
 
     // MARK: - escenas (CRUD + switch en vivo)

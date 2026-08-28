@@ -79,7 +79,9 @@ async function readBody(req) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-const fixesPath = path.join(projectDir, 'fixes.json');
+// En modo --gallery NO hay proyecto abierto: path.join(null, …) reventaba en el arranque y el
+// catálogo era inalcanzable, aunque el propio mensaje de error lo recomendara. (27 ago 2026)
+const fixesPath = projectDir ? path.join(projectDir, 'fixes.json') : null;
 // /api/transcript: cache por PROMESA (mismo patrón que wavePromise — sin race entre requests).
 // Solo el éxito con corte final queda cacheado para siempre; found:false o cut:'raw' se
 // recomputan en el siguiente request (el transcript/EDL pueden aparecer DESPUÉS de abrir la sala).
@@ -115,7 +117,7 @@ async function computeTranscript() {
 }
 
 // ── waveform del base: peaks min/max a 50/s, computado UNA vez con ffmpeg y cacheado en el proyecto
-const wavePath = path.join(projectDir, 'waveform.json');
+const wavePath = projectDir ? path.join(projectDir, 'waveform.json') : null;
 let wavePromise = null;
 // firma del base: si cambia (re-corte, otro fps, zoom nuevo), el waveform cacheado MIENTE
 // (bug 25 jul: el base se reemplazó 3 veces con el mismo nombre y la sala siguió pintando la onda
@@ -362,7 +364,8 @@ try {
   throw e;
 }
 
-process.stdout.write(`sfreview: ${timeline.name || path.basename(projectDir)}\n`);
-process.stdout.write(`  proyecto: ${projectDir}\n`);
+process.stdout.write(projectDir
+  ? `sfreview: ${timeline.name || path.basename(projectDir)}\n  proyecto: ${projectDir}\n`
+  : 'sfreview: Galería de Lanzamientos (sin proyecto abierto)\n');
 process.stdout.write(`  sala:     http://127.0.0.1:${srv.port}\n`);
-process.stdout.write(`  fixes:    ${fixesPath}\n`);
+if (fixesPath) process.stdout.write(`  fixes:    ${fixesPath}\n`);

@@ -7,7 +7,9 @@ const MIN_ITEM_DUR = 0.1;
 export function newState() {
   // items = ediciones por índice del timeline base · adds = piezas NUEVAS (nacen al partir un
   // asset con S), clonan el media de un item base (`from`) con su propio placement.
-  return { splits: [], trims: [], markers: [], items: {}, adds: [], audioLinked: true };
+  // comments = FEEDBACK DE DANIEL (tecla C). Canal distinto de markers: markers son la fábrica
+  // explicándole a Daniel; comments son Daniel dictándole a la fábrica. Nunca se mezclan.
+  return { splits: [], trims: [], markers: [], comments: [], items: {}, adds: [], audioLinked: true };
 }
 
 export function cloneState(s) {
@@ -356,6 +358,8 @@ export function toFixes(state, videoSrc, extra = {}) {
     exported_at: new Date().toISOString(),
     trims: mergeRanges(state.trims).map((r) => ({ start: round3(r.start), end: round3(r.end) })),
     markers: state.markers.map((m) => ({ t: round3(m.t), nota: m.nota })),
+    // feedback de Daniel (tecla C). Aditivo: print_master / sfstudio-apply lo ignoran.
+    comments: (state.comments || []).map((c) => ({ t: round3(c.t), texto: c.texto, creado: c.creado })),
     splits: [...state.splits],
     // audio pegado al video por default (un solo mp4); false = Daniel lo separó (clic derecho) →
     // señal para la fábrica de tratar el audio como pista independiente. Solo se emite si es false.
@@ -370,6 +374,12 @@ export function fromFixes(fixes) {
   const s = newState();
   if (Array.isArray(fixes?.trims)) s.trims = mergeRanges(fixes.trims.map((r) => ({ start: +r.start, end: +r.end })));
   if (Array.isArray(fixes?.markers)) s.markers = fixes.markers.map((m) => ({ t: +m.t, nota: String(m.nota ?? '') }));
+  if (Array.isArray(fixes?.comments)) {
+    s.comments = fixes.comments
+      .filter((c) => Number.isFinite(+c?.t))
+      .map((c) => ({ t: +c.t, texto: String(c.texto ?? ''), creado: c.creado || null }))
+      .sort((a, b) => a.t - b.t);
+  }
   if (Array.isArray(fixes?.splits)) s.splits = fixes.splits.map(Number).sort((a, b) => a - b);
   s.audioLinked = fixes?.audio_linked !== false; // default true salvo que se haya separado explícito
   if (Array.isArray(fixes?.item_edits)) {

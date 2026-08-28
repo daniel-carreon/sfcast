@@ -10,12 +10,33 @@
 <body>
 <header id="topbar">
   <div id="brand"><span class="sf">SF</span>STUDIO <span id="projname"></span></div>
-  <div id="speeds" role="group" aria-label="velocidad"></div>
-  <button id="exportBtn" title="Exportar fixes.json (⌘E)">Exportar fixes</button>
+  <div id="speeds" title="Velocidad de reproducción · 0.75× a 3×, de 0.25 en 0.25 · &lt; y &gt; también la mueven">
+    <span class="spdEnd">0.75</span>
+    <span class="spdWrap"><input id="speedRange" class="spdRange" type="range" min="0.75" max="3" step="0.25" value="1"
+           list="spdTicks" aria-label="velocidad de reproducción"><span class="spdNotches" aria-hidden="true"></span></span>
+    <datalist id="spdTicks">
+      <option value="0.75"></option><option value="1"></option><option value="1.25"></option>
+      <option value="1.5"></option><option value="1.75"></option><option value="2"></option>
+      <option value="2.25"></option><option value="2.5"></option>
+      <option value="2.75"></option><option value="3"></option>
+    </datalist>
+    <span class="spdEnd">3</span>
+    <output id="speedOut" for="speedRange">1×</output>
+  </div>
+  <span id="saveDot" style="font-size:11px;opacity:.35;margin-right:8px;transition:opacity .3s" title="Tus recortes se guardan solos en fixes.json">● guardado</span>
+  <button id="exportBtn" title="Exportar fixes.json (⌘E) — avisa a la fábrica que ya terminaste">Exportar fixes</button>
   <button id="gearBtn" title="Atajos y ajustes"></button>
 </header>
 
 <main id="main">
+  <!-- IZQUIERDA = LA VOZ DE DANIEL (feedback, tecla C) · DERECHA = la de la fábrica (marcadores) -->
+  <aside id="comments">
+    <h2>Comentarios <span id="cCount">0</span></h2>
+    <p id="cHint">Pulsa <kbd>C</kbd> mientras ves el video: guarda el timestamp y tu nota.</p>
+    <ol id="commentList"></ol>
+    <button id="cCopy" title="Copiar todo el feedback como texto (para pegárselo a Levy)">Copiar feedback</button>
+  </aside>
+  <div id="dragComments" title="arrastra para redimensionar el panel"></div>
   <div id="stageWrap">
     <div id="stage">
       <video id="base" playsinline preload="auto"></video>
@@ -23,13 +44,17 @@
     </div>
     <!-- controles de pantalla completa: viven DENTRO del elemento fullscreen para ser visibles -->
     <div id="fsHelp" hidden>
-      <b>Espacio</b> play · <b>←/→</b> 1 frame (⇧×10) · <b>&lt; &gt;</b> velocidad · <b>↑/↓</b> bloque · <b>Q/E</b> selección · <b>S/A/D</b> corte · <b>M</b> marcador · <b>F</b> o <b>Esc</b> salir
+      <b>Espacio</b> play · <b>←/→</b> 1 frame (⇧×10) · <b>&lt; &gt;</b> velocidad · <b>↑/↓</b> bloque · <b>Q/E</b> selección · <b>S/A/D</b> corte · <b>M</b> marcador · <b>C</b> comentario · <b>F</b> o <b>Esc</b> salir
     </div>
     <div id="fsBar" hidden>
       <button id="fsPlay" class="fsBtn" title="play / pausa (Espacio)"></button>
       <span id="fsTime" class="fsTime">0:00 / 0:00</span>
       <div id="fsSeek" title="arrastra para moverte por el video"><div id="fsSeekFill"></div><div id="fsSeekKnob"></div></div>
-      <div id="fsSpeeds" role="group" aria-label="velocidad"></div>
+      <div id="fsSpeeds" title="Velocidad · 0.75× a 3×">
+        <span class="spdWrap"><input id="fsSpeedRange" class="spdRange" type="range" min="0.75" max="3" step="0.25" value="1"
+               list="spdTicks" aria-label="velocidad de reproducción"><span class="spdNotches" aria-hidden="true"></span></span>
+        <output id="fsSpeedOut" for="fsSpeedRange">1×</output>
+      </div>
       <button id="fsKeys" class="fsBtn" title="atajos"></button>
     </div>
   </div>
@@ -82,7 +107,7 @@
     <section>
       <h4>Reproducción</h4>
       <div class="hpRow"><span class="hpKeys"><kbd>Espacio</kbd></span><span class="hpDesc">play / pausa</span></div>
-      <div class="hpRow"><span class="hpKeys"><kbd>&lt;</kbd><kbd>&gt;</kbd></span><span class="hpDesc">velocidad (1 · 1.25 · 1.5 · 2×)</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>&lt;</kbd><kbd>&gt;</kbd></span><span class="hpDesc">velocidad — barra de <b>0.75× a 3×</b>, de 0.25 en 0.25 (tono normal siempre)</span></div>
       <div class="hpRow"><span class="hpKeys"><kbd>←</kbd><kbd>→</kbd></span><span class="hpDesc">1 frame (<kbd>⇧</kbd> ×10)</span></div>
     </section>
     <section>
@@ -107,11 +132,11 @@
       <h4>Modos y general</h4>
       <div class="hpRow"><span class="hpKeys">imán · 🔗</span><span class="hpDesc">snap al arrastrar · vinculación (recorte se lleva los assets adentro)</span></div>
       <div class="hpRow"><span class="hpKeys"><kbd>⌘Z</kbd><kbd>⌘⇧Z</kbd></span><span class="hpDesc">deshacer / rehacer</span></div>
-      <div class="hpRow"><span class="hpKeys"><kbd>M</kbd></span><span class="hpDesc">marcador con nota</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>M</kbd></span><span class="hpDesc">marcador con nota (oro, derecha — notas de la fábrica)</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>C</kbd></span><span class="hpDesc"><b>comentario / feedback tuyo</b> (morado, izquierda) — guarda el timestamp y viaja en <code>fixes.json</code></span></div>
       <div class="hpRow"><span class="hpKeys"><kbd>F</kbd></span><span class="hpDesc">pantalla completa</span></div>
       <div class="hpRow"><span class="hpKeys"><kbd>⌘E</kbd></span><span class="hpDesc">exportar fixes.json</span></div>
       <div class="hpRow"><span class="hpKeys"><kbd>⌘Y</kbd></span><span class="hpDesc">panel de publicación</span></div>
-      <div class="hpRow"><span class="hpKeys"><kbd>⌘⌥G</kbd></span><span class="hpDesc">galería de lanzamientos (todos los videos)</span></div>
     </section>
   </div>
 </div>
@@ -152,6 +177,13 @@
       <section class="ppCol" data-col="launch">
         <div class="ppScroll" id="ppLaunchCol">
           <h3 class="ppH">Miniaturas · A/B</h3><div id="ppThumbs"></div>
+          <div id="ppLight" hidden>
+            <button id="ppLightClose" title="cerrar (Esc)" aria-label="cerrar">✕</button>
+            <button id="ppLightPrev" title="anterior (←)" aria-label="anterior">‹</button>
+            <img id="ppLightImg" alt="miniatura a tamaño real">
+            <button id="ppLightNext" title="siguiente (→)" aria-label="siguiente">›</button>
+            <div id="ppLightCap"></div>
+          </div>
           <h3 class="ppH">Menciones → tarjetas</h3><div id="ppMentions"></div>
           <h3 class="ppH">Horario</h3><div id="ppSchedule"></div>
           <h3 class="ppH">Gate</h3><div id="ppGate"></div>
@@ -163,7 +195,6 @@
   <footer id="ppFoot">espejo AI-first: aquí se <b>mira</b> el lanzamiento; las etapas las corre el agente (las decisiones se toman conversando) · <b>Y</b> cierra · click en un <b>timestamp</b> = seek · <b>⇧click</b> = seek y ver el video</footer>
 </div>
 
-<!-- ⌘⌥G — la GALERÍA DE LANZAMIENTOS: el catálogo de todos los videos del pipeline -->
 <div id="galleryPanel" hidden>
   <header id="galHead">
     <span id="galBrand"><span class="sf">SF</span>GALERÍA</span>

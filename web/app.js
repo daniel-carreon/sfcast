@@ -11,11 +11,21 @@ import {
   keptSegments, outDuration, rawToOut, outToRaw,
 } from './model.js';
 import { initGallery, toggleGallery, galleryKey } from './gallery.js';
-import { ICON_COPY, paintCopy, flashCopied } from './icons.js';
+import { paintCopy, flashCopied } from './icons.js';  // ICON_COPY ya vive local (li ~1737)
 
 const $ = (id) => document.getElementById(id);
+let gallery = null;      // API de la galería (⌘⌥G); se inicializa en boot()
+let galleryOnly = false; // modo `sfreview --gallery`: catálogo sin sala detrás
 const base = $('base');
-const SPEEDS = [1, 1.25, 1.5, 2];
+// Velocidad: barra continua de 0.75× a 3× en saltos de 0.25 (Daniel, 10 ago 2026; tope subido
+// de 2.5 a 3 el mismo día, revisando el video largo: «permíteme hasta un x3»).
+// 0.25 es exacto en binario ⇒ 0.75 + n*0.25 no driftea; aun así todo pasa por snapSpeed().
+const SPD_MIN = 0.75, SPD_MAX = 3, SPD_STEP = 0.25;
+const SPEEDS = Array.from({ length: Math.round((SPD_MAX - SPD_MIN) / SPD_STEP) + 1 },
+                          (_, i) => +(SPD_MIN + i * SPD_STEP).toFixed(2));
+const snapSpeed = (s) => Math.min(SPD_MAX, Math.max(SPD_MIN,
+  +(Math.round((+s - SPD_MIN) / SPD_STEP) * SPD_STEP + SPD_MIN).toFixed(2)));
+const fmtSpeed = (s) => s + '×';
 
 // ---------- iconos de la barra: Lucide (lucide.dev, ISC), SVG inline · cero dependencias ----------
 const LU = (paths) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
@@ -55,7 +65,6 @@ document.addEventListener('pointerdown', (e) => {
 });
 
 let project = null;
-let gallery = null;      // API de la galería (⌘⌥G); se inicializa en boot()
 let state = newState();
 const undoStack = [];
 const redoStack = [];
@@ -99,34 +108,11 @@ function setSingleSel(key) {
 }
 
 // ---------- carga ----------
-// Dos modos: SALA (un proyecto abierto, todo el timeline) y GALERÍA SOLA (`sfreview --gallery`,
-// sin proyecto: el catálogo a pantalla completa). ⌘⌥G abre la galería en los dos.
-let galleryOnly = false;
-// Una pestaña abierta desde antes de un deploy sigue corriendo el JS viejo: la app parece haber
-// PERDIDO features (el 27 jul "desaparecieron" el rail y las fases — era esto, no un bug de código).
-// El server sella web/ por mtime; aquí se compara cada 4s y la pestaña se pone al día sola.
-async function watchVersion() {
-  // la línea base se toma YA, no en el primer tick: si el deploy cae en esos segundos, un
-  // arranque perezoso adoptaría el sello nuevo como base y jamás detectaría el cambio
-  let seen = await fetch('/api/version').then((r) => r.json()).then((j) => j.stamp).catch(() => null);
-  setInterval(async () => {
-    try {
-      const { stamp } = await (await fetch('/api/version')).json();
-      if (seen === null) { seen = stamp; return; }
-      if (stamp === seen) return;
-      // con texto sin guardar NUNCA se recarga solo: se avisa y decide Daniel
-      if (gallery?.isDirty?.()) { toast('hay una versión nueva del panel · guarda y recarga (⌘R)'); seen = stamp; return; }
-      location.reload();
-    } catch { /* server caído: la pestaña sigue viva con lo que tiene */ }
-  }, 4000);
-}
-
 async function boot() {
   project = await (await fetch('/api/project')).json();
   $('projname').textContent = project.name || '';
   document.title = `SFStudio — ${project.name || 'Sala de Revisión'}`;
   gallery = initGallery({ toast, escapeHtml, fmt });
-  watchVersion();
 
   if (project.gallery_only) {
     galleryOnly = true;
@@ -151,13 +137,23 @@ async function boot() {
     }
   } catch { /* sin sesión previa */ }
 
+  booted = true;   // desde aquí, cada cambio se autoguarda
   buildSpeedButtons();
   initResizers();
   layoutStage();
   fitTimeline();
   renderTimeline();
   renderMarkers();
+  renderComments();
   loop();
+
+  // ⭐ restaurar la superficie donde Daniel se quedó (10 ago): si cerró en el dossier, ⌘R lo
+  // devuelve al dossier. `togglePublishPanel` lo persiste; aquí solo se re-abre si tocaba.
+  if (localStorage.getItem('sf.pp.open') === '1' && $('publishPanel').hidden) togglePublishPanel();
+  $('ppLightClose').onclick = closeThumbLight;
+  $('ppLightPrev').onclick = () => stepThumbLight(-1);
+  $('ppLightNext').onclick = () => stepThumbLight(1);
+  $('ppLight').onclick = (e) => { if (e.target.id === 'ppLight') closeThumbLight(); };
 
   // waveform: llega async (el server lo computa/cachea con ffmpeg); dibuja cuando esté
   fetch('/api/waveform').then((r) => r.json()).then((w) => {
@@ -230,7 +226,7 @@ function layoutStage() {
   stage.style.width = `${Math.floor(w)}px`;
   stage.style.height = `${Math.floor(h)}px`;
 }
-window.addEventListener('resize', () => { if (project && !galleryOnly) { layoutStage(); fitTimeline(false); renderTimeline(); } });
+window.addEventListener('resize', () => { if (project) { layoutStage(); fitTimeline(false); renderTimeline(); } });
 
 // ---------- overlays (mount/unmount por ventana de tiempo: cada webm-alpha cuesta 2 decoders) ----------
 const WINDOW = 3;
@@ -372,6 +368,16 @@ function renderTimeline() {
     p.className = 'mpin';
     p.style.left = `${XT(mk.t)}px`;
     p.title = mk.nota;
+    p.dataset.idx = i;
+    lane.appendChild(p);
+  });
+
+  // pins de COMENTARIOS de Daniel (morado, triángulo — distintos del marcador oro)
+  (state.comments || []).forEach((c, i) => {
+    const p = document.createElement('div');
+    p.className = 'cpin' + (i === commentFocus ? ' on' : '');
+    p.style.left = `${XT(c.t)}px`;
+    p.title = `💬 ${c.texto}`;
     p.dataset.idx = i;
     lane.appendChild(p);
   });
@@ -537,7 +543,84 @@ function renderMarkers() {
   });
 }
 
-function refresh() { renderTimeline(); renderMarkers(); }
+// ---------- COMENTARIOS de Daniel (tecla C) ----------
+// Canal Daniel → fábrica, en PALABRAS. Vive en fixes.json como `comments[]` (aditivo: ni
+// print_master ni sfstudio-apply lo miran). Lo lee Levy cuando Daniel dice "analiza el feedback".
+let commentFocus = -1;
+function highlightComment(i) {
+  commentFocus = i;
+  renderComments();
+  renderTimeline();
+  const li = $('commentList').children[i];
+  if (li) li.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+function renderComments() {
+  const ol = $('commentList');
+  const list = state.comments || [];
+  ol.innerHTML = '';
+  $('cCount').textContent = list.length;
+  $('cCount').classList.toggle('zero', list.length === 0);
+  $('cHint').hidden = list.length > 0;
+  $('cCopy').disabled = list.length === 0;
+  list.forEach((c, i) => {
+    const li = document.createElement('li');
+    if (i === commentFocus) li.classList.add('on');
+    const del = document.createElement('button');
+    del.className = 'cdel'; del.textContent = '✕'; del.title = 'borrar comentario';
+    del.addEventListener('click', (e) => {
+      e.stopPropagation(); pushUndo(); state.comments.splice(i, 1);
+      if (commentFocus >= i) commentFocus = -1;
+      refresh();
+    });
+    // el tiempo habla el idioma de la vista activa (out en corte, raw en vista de huecos)
+    const t = document.createElement('div'); t.className = 'ct'; t.textContent = '💬 ' + fmt(tlOf(c.t));
+    const n = document.createElement('div'); n.className = 'ctexto'; n.textContent = c.texto || '(sin texto)';
+    li.append(del, t, n);
+    li.addEventListener('click', () => { base.currentTime = c.t; highlightComment(i); });
+    li.addEventListener('dblclick', (e) => { e.stopPropagation(); openNotePopover(c.t, 'comment', i); });
+    li.title = 'click = ir ahí · doble-click = editar';
+    ol.appendChild(li);
+  });
+}
+function commentsAsText() {
+  const list = state.comments || [];
+  const head = `# Feedback de Daniel — ${project.name} (${list.length} comentario(s))\n`;
+  return head + list.map((c) => `- [${fmt(tlOf(c.t))}] ${c.texto}`).join('\n') + '\n';
+}
+
+function refresh() { renderTimeline(); renderMarkers(); renderComments(); autosave(); }
+
+// ---------- AUTOSAVE (25 jul 2026) ----------
+// Antes, el estado de la sala SOLO llegaba al backend con ⌘E. Todo lo que Daniel recortaba antes de
+// exportar vivía en la memoria del navegador: una recarga, o que la fábrica regenerara el proyecto,
+// se lo comía — y el agente no tenía forma de SABER que había trabajo suyo en curso.
+// Ahora cada cambio se persiste solo (debounce 1.2s) a fixes.json con `autosaved:true`.
+// ⌘E sigue existiendo: marca el export EXPLÍCITO (`exported:true`) = "ya terminé, imprime".
+let booted = false, saveTimer = null, lastSaved = '';
+function autosave() {
+  if (!booted) return;                      // no pisar el fixes.json al restaurar la sesión
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    try {
+      const fx = toFixes(state, project.base.src, { project: project.name, duration: project.duration });
+      fx.autosaved = true;
+      const body = JSON.stringify(fx);
+      if (body === lastSaved) return;       // sin cambios reales
+      const r = await fetch('/api/fixes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      if (r.ok) { lastSaved = body; setSaveDot('ok'); }
+      else setSaveDot('err');
+    } catch { setSaveDot('err'); }
+  }, 1200);
+}
+function setSaveDot(st) {
+  const el = document.getElementById('saveDot');
+  if (!el) return;
+  el.textContent = st === 'ok' ? '● guardado' : '● sin guardar';
+  el.style.color = st === 'ok' ? '#6ee7a8' : '#ff8080';
+  el.style.opacity = '1';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.style.opacity = '.35'; }, 2200);
+}
 
 // ---------- undo / redo ----------
 function pushUndo() {
@@ -1164,6 +1247,11 @@ for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2'
       if (mk) base.currentTime = mk.t;
       return;
     }
+    if (e.target.classList.contains('cpin')) {
+      const c = (state.comments || [])[+e.target.dataset.idx];
+      if (c) { base.currentTime = c.t; highlightComment(+e.target.dataset.idx); }
+      return;
+    }
     const clip = e.target.closest('.clipItem');
     if (clip) {
       const k = clip.dataset.key;
@@ -1221,29 +1309,79 @@ function togglePlay() {
   else base.pause();
 }
 
+// ---------- AUTO-SCROLL AL PLAYHEAD (25 jul 2026, pedido de Daniel: "como CapCut") ----------
+// Al PAUSAR, si la línea del tiempo quedó fuera del viewport (el video siguió corriendo mientras
+// el timeline no se movió), el timeline se reacomoda solo para que veas dónde estás parado.
+// Con margen: si el playhead está cómodo dentro de la vista, NO se mueve nada (nada de saltos
+// gratuitos). Al reproducir NO scrollea (eso sería el "follow" continuo, que marea al editar).
+function scrollToPlayhead(force = false) {
+  const sc = $('timelineScroll');
+  if (!sc) return;
+  const x = XT(base.currentTime || 0);       // posición del playhead en px del timeline
+  const view = sc.clientWidth;
+  const left = sc.scrollLeft, right = left + view;
+  const margin = Math.min(120, view * 0.12); // zona de confort en los bordes
+  const fuera = x < left + margin || x > right - margin;
+  if (!fuera && !force) return;
+  const target = Math.max(0, Math.min(sc.scrollWidth - view, x - view * 0.4)); // playhead al 40%
+  sc.scrollTo({ left: target, behavior: 'smooth' });
+}
+base.addEventListener('pause', () => scrollToPlayhead());
+base.addEventListener('seeked', () => scrollToPlayhead());   // saltar con ↑/↓, click en costura, etc.
+
+
 function buildSpeedButtons() {
-  const box = $('speeds');
-  for (const s of SPEEDS) {
-    const b = document.createElement('button');
-    b.textContent = s + 'x';
-    b.dataset.speed = s;
-    if (s === 1) b.classList.add('active');
-    b.addEventListener('click', () => setSpeed(s));
-    box.appendChild(b);
+  // la barra vive en el HTML; aquí solo se cablea (y su gemela de pantalla completa)
+  for (const id of ['speedRange', 'fsSpeedRange']) {
+    const r = $(id);
+    if (!r) continue;
+    r.addEventListener('input', (e) => { e.stopPropagation(); setSpeed(+r.value); });
+    // que la barra no se robe el teclado global (Espacio/flechas son del timeline)
+    r.addEventListener('keydown', (e) => e.preventDefault());
+    r.addEventListener('mouseup', () => r.blur());
+    r.addEventListener('touchend', () => r.blur());
+    // muescas: una por paso, alineadas al CENTRO del thumb (por eso el inset de medio thumb)
+    const notches = r.parentElement.querySelector('.spdNotches');
+    if (notches) {
+      notches.innerHTML = '';
+      const half = 6.5;                                  // mitad del thumb (13px) en px
+      notches.style.left = half + 'px';
+      notches.style.right = half + 'px';
+      SPEEDS.forEach((s, i) => {
+        const n = document.createElement('span');
+        n.className = 'spdNotch';
+        n.dataset.speed = s;
+        n.style.left = (i / (SPEEDS.length - 1) * 100) + '%';
+        notches.appendChild(n);
+      });
+    }
   }
+  setSpeed(speed);
 }
 function setSpeed(s) {
-  speed = s;
-  base.preservesPitch = true;
-  base.playbackRate = s;
-  for (const m of mounted.values()) if (m.el.tagName === 'VIDEO') m.el.playbackRate = s;
-  $('speedBadge').textContent = s + 'x';
-  for (const b of $('speeds').children) b.classList.toggle('active', +b.dataset.speed === s);
-  for (const b of $('fsSpeeds').children) b.classList.toggle('active', +b.dataset.speed === s);
+  speed = snapSpeed(s);
+  base.preservesPitch = true;               // tono normal a cualquier velocidad (nativo)
+  base.playbackRate = speed;
+  for (const m of mounted.values()) if (m.el.tagName === 'VIDEO') {
+    m.el.preservesPitch = true;
+    m.el.playbackRate = speed;
+  }
+  $('speedBadge').textContent = fmtSpeed(speed);
+  const pct = ((speed - SPD_MIN) / (SPD_MAX - SPD_MIN) * 100).toFixed(1) + '%';
+  for (const [rid, oid] of [['speedRange', 'speedOut'], ['fsSpeedRange', 'fsSpeedOut']]) {
+    const r = $(rid), o = $(oid);
+    if (r) {
+      if (+r.value !== speed) r.value = speed;
+      r.style.setProperty('--pct', pct);     // relleno dorado a la izquierda del thumb
+      r.title = `Velocidad ${fmtSpeed(speed)} · 0.75× a 3×, de 0.25 en 0.25 · < y > también la mueven`;
+      const nb = r.parentElement && r.parentElement.querySelector('.spdNotches');
+      if (nb) for (const n of nb.children) n.classList.toggle('on', +n.dataset.speed <= speed);
+    }
+    if (o) o.textContent = fmtSpeed(speed);
+  }
 }
 function cycleSpeed(dir) {
-  const i = SPEEDS.indexOf(speed);
-  setSpeed(SPEEDS[Math.max(0, Math.min(SPEEDS.length - 1, i + dir))]);
+  setSpeed(speed + dir * SPD_STEP);         // snapSpeed ya clampea a [0.75, 3]
 }
 
 function setZoom(px, anchorT = null, anchorScreenX = null) {
@@ -1310,16 +1448,10 @@ function toggleFullscreen() {
 // ---------- barra de controles en pantalla completa (tipo reproductor, auto-oculta) ----------
 $('fsPlay').innerHTML = IC.play;
 $('fsKeys').innerHTML = IC.keyboard;
-(function buildFsSpeeds() {
-  const box = $('fsSpeeds');
-  for (const s of SPEEDS) {
-    const b = document.createElement('button');
-    b.className = 'fsSpeed'; b.textContent = s + 'x'; b.dataset.speed = s;
-    if (s === speed) b.classList.add('active');
-    b.addEventListener('click', (e) => { e.stopPropagation(); setSpeed(s); fsShowBar(); });
-    box.appendChild(b);
-  }
-})();
+// la barra de velocidad de pantalla completa se cablea en buildSpeedButtons(); aquí solo
+// se evita que tocarla oculte la barra del reproductor
+$('fsSpeeds').addEventListener('input', (e) => { e.stopPropagation(); fsShowBar(); });
+$('fsSpeeds').addEventListener('click', (e) => e.stopPropagation());
 $('fsPlay').addEventListener('click', (e) => { e.stopPropagation(); togglePlay(); fsShowBar(); });
 $('fsKeys').addEventListener('click', (e) => { e.stopPropagation(); $('fsHelp').hidden = !$('fsHelp').hidden; fsShowBar(); });
 
@@ -1444,6 +1576,19 @@ function initResizers() {
   const bh = parseFloat(localStorage.getItem('sf.baseH'));
   if (Number.isFinite(bh)) root.style.setProperty('--baseH', Math.min(100, Math.max(40, bh)) + 'px');
 
+  const cw = parseFloat(localStorage.getItem('sf.commentsW'));
+  if (Number.isFinite(cw)) $('comments').style.width = Math.min(480, Math.max(180, cw)) + 'px';
+  makeDrag($('dragComments'), {
+    start: (e) => ({ x0: e.clientX, w0: $('comments').getBoundingClientRect().width }),
+    move: (x, _y, c) => {
+      $('comments').style.width = Math.min(480, Math.max(180, c.w0 + (x - c.x0))) + 'px';
+      layoutStage();
+    },
+    end: () => {
+      localStorage.setItem('sf.commentsW', parseFloat($('comments').style.width));
+      fitTimeline(false); renderTimeline();
+    },
+  });
   makeDrag($('dragSidebar'), {
     start: (e) => ({ x0: e.clientX, w0: $('sidebar').getBoundingClientRect().width }),
     move: (x, _y, c) => {
@@ -1471,24 +1616,46 @@ function initResizers() {
   });
 }
 
-// ---------- marcadores ----------
-function openMarkerPopover(t) {
-  base.pause();
+// ---------- notas al playhead: MARCADOR (M, oro, fábrica) y COMENTARIO (C, morado, Daniel) ----------
+function openMarkerPopover(t) { openNotePopover(t, 'marker'); }
+function openNotePopover(t, kind = 'marker', editIdx = -1) {
+  base.pause();                                  // que el video no se escape mientras escribe
+  const isC = kind === 'comment';
   const pop = $('popover');
   const input = $('popInput');
   pop.hidden = false;
+  pop.classList.toggle('isComment', isC);
   const x = Math.min(window.innerWidth - 320, Math.max(8, XT(t) - $('timelineScroll').scrollLeft));
   pop.style.left = `${x}px`;
   pop.style.bottom = '210px';
-  input.value = '';
+  input.placeholder = isC
+    ? (editIdx >= 0 ? 'editar comentario…' : `comentario @ ${fmt(tlOf(t))} — ¿qué le falta aquí?`)
+    : 'nota del marcador…';
+  input.value = isC && editIdx >= 0 ? (state.comments[editIdx]?.texto || '') : '';
   input.focus();
+  input.select();
   const done = (save) => {
     pop.hidden = true;
+    pop.classList.remove('isComment');
     input.onkeydown = null;
     input.blur(); // sin esto el foco queda en el input oculto y el teclado global se ignora
-    if (save) {
-      pushUndo();
-      state.markers.push({ t: Math.round(t * 1000) / 1000, nota: input.value.trim() });
+    if (!save) return;
+    const texto = input.value.trim();
+    pushUndo();
+    if (isC) {
+      if (editIdx >= 0) {
+        if (!texto) state.comments.splice(editIdx, 1);
+        else state.comments[editIdx].texto = texto;
+      } else {
+        if (!texto) { undoStack.pop(); return; }   // comentario vacío = no es feedback, no se guarda
+        state.comments.push({ t: Math.round(t * 1000) / 1000, texto, creado: new Date().toISOString() });
+        state.comments.sort((a, b) => a.t - b.t);
+        commentFocus = state.comments.findIndex((c) => c.texto === texto && Math.abs(c.t - t) < 0.002);
+      }
+      refresh();
+      toast(editIdx >= 0 ? 'comentario actualizado' : `💬 comentario @ ${fmt(tlOf(t))}`);
+    } else {
+      state.markers.push({ t: Math.round(t * 1000) / 1000, nota: texto });
       state.markers.sort((a, b) => a.t - b.t);
       refresh();
       toast(`marcador @ ${fmt(t)}`);
@@ -1504,6 +1671,8 @@ function openMarkerPopover(t) {
 // ---------- export ----------
 async function exportFixes() {
   const fixes = toFixes(state, project.base.src, { project: project.name, duration: project.duration });
+  fixes.exported = true;   // ⌘E = "ya terminé de recortar, la fábrica puede imprimir"
+  fixes.autosaved = false;
   let savedPath = '(no guardado en disco)';
   try {
     const r = await fetch('/api/fixes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fixes) });
@@ -1515,6 +1684,11 @@ async function exportFixes() {
   $('modal').hidden = false;
 }
 $('exportBtn').addEventListener('click', exportFixes);
+$('cCopy').addEventListener('click', async () => {
+  const txt = commentsAsText();
+  try { await navigator.clipboard.writeText(txt); toast(`${(state.comments || []).length} comentario(s) copiados`); }
+  catch { toast('no pude copiar — el feedback vive igual en fixes.json'); }
+});
 $('modalClose').addEventListener('click', () => { $('modal').hidden = true; });
 $('modal').addEventListener('pointerdown', (e) => { if (e.target === $('modal')) $('modal').hidden = true; });
 
@@ -1560,14 +1734,20 @@ applyPpView();
 
 // --- copiar: el dossier es espejo, pero lo que muestra se LLEVA (a YouTube, a Skool, a donde sea)
 // Iconos: Lucide (lucide.dev, ISC) — SVG inline oficial de `copy` y `check`; cero dependencias.
-for (const b of document.querySelectorAll('.ppCopy')) paintCopy(b);
+const ICON_COPY = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
+const ICON_CHECK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+for (const b of document.querySelectorAll('.ppCopy')) b.innerHTML = ICON_COPY;
 
 async function ppCopy(text, what, btn = null) {
   if (!text) { toast(`nada que copiar aún en ${what}`); return; }
   try {
     await navigator.clipboard.writeText(text);
     toast(`${what} copiado ✓`);
-    if (btn) flashCopied(btn);
+    if (btn) {
+      btn.innerHTML = ICON_CHECK;
+      btn.classList.add('ok');
+      setTimeout(() => { btn.innerHTML = ICON_COPY; btn.classList.remove('ok'); }, 1400);
+    }
   } catch { toast('no pude copiar (permiso del navegador)'); }
 }
 $('copyTranscript').addEventListener('click', (e) =>
@@ -1593,9 +1773,13 @@ function togglePublishPanel() {
     ppTimer = setInterval(refreshPublish, 2000); // el agente escribe, el dossier refleja
   } else {
     panel.hidden = true;
+    closeThumbLight();
     clearInterval(ppTimer);
     ppTimer = null;
   }
+  // ⭐ el estado sobrevive al recargar (pedido de Daniel, 10 ago): si estaba en el dossier,
+  // ⌘R lo devuelve al dossier; si estaba en la sala, a la sala. Recargar no es "volver al inicio".
+  localStorage.setItem('sf.pp.open', panel.hidden ? '0' : '1');
 }
 async function refreshPublish() {
   try {
@@ -1673,13 +1857,34 @@ function renderThumbs(j) {
     box.innerHTML = '<div class="ppEmptyBlock">sin candidatas aún.<br>Pídele a Levy 2-3 miniaturas (skill <b>youtube-thumbnails</b>) → van a <code>&lt;proyecto&gt;/thumbs/</code> y aparecen aquí para el A/B de YouTube.</div>';
     return;
   }
-  for (const f of j.files) {
+  ppThumbFiles = j.files.slice();
+  j.files.forEach((f, i) => {
     const d = document.createElement('figure');
     d.className = 'ppThumb';
-    d.innerHTML = `<img src="/thumbs/${encodeURIComponent(f)}" alt="${escapeHtml(f)}" loading="lazy"><figcaption>${escapeHtml(f)}</figcaption>`;
+    // ⤢ por miniatura (pedido de Daniel, 10 ago): comparar dos thumbs a 320px no se puede;
+    // la decisión de cuál se ve mejor exige verla al tamaño en que la ve el espectador.
+    d.innerHTML = `<div class="ppThumbWrap">`
+      + `<img src="/thumbs/${encodeURIComponent(f)}" alt="${escapeHtml(f)}" loading="lazy">`
+      + `<button class="ppExpand" title="ver a tamaño real (⤢ · ← → navega · Esc cierra)" aria-label="expandir">⤢</button>`
+      + `</div><figcaption>${escapeHtml(f)}</figcaption>`;
+    d.querySelector('.ppExpand').onclick = (e) => { e.stopPropagation(); openThumbLight(i); };
+    d.querySelector('img').onclick = () => openThumbLight(i);
     box.appendChild(d);
-  }
+  });
 }
+
+// ---------- lightbox de miniaturas: tamaño real, navegable ----------
+let ppThumbFiles = [], ppLightIdx = -1;
+function openThumbLight(i) {
+  if (!ppThumbFiles.length) return;
+  ppLightIdx = (i + ppThumbFiles.length) % ppThumbFiles.length;
+  const f = ppThumbFiles[ppLightIdx];
+  $('ppLightImg').src = `/thumbs/${encodeURIComponent(f)}`;
+  $('ppLightCap').textContent = `${f}  ·  ${ppLightIdx + 1}/${ppThumbFiles.length}`;
+  $('ppLight').hidden = false;
+}
+function closeThumbLight() { $('ppLight').hidden = true; ppLightIdx = -1; }
+function stepThumbLight(d) { if (ppLightIdx >= 0) openThumbLight(ppLightIdx + d); }
 
 // --- el resto del dossier (se repinta con cada poll; el transcript NO se toca)
 function renderPublish(j) {
@@ -1724,13 +1929,13 @@ function renderPublish(j) {
     tbox.appendChild(el);
   });
 
-  // descripción completa, con el link de atribución resaltado; estado del link junto al header
+  // descripción completa, con el /go/ resaltado; estado del link junto al header
   const desc = md.description || '';
   $('ppDesc').innerHTML = desc
-    ? escapeHtml(desc).replace(/(https?:\/\/\S*saasfactory\.so\/(?:go\/[a-z0-9-]+|[a-z0-9-]{6}))(?![a-z0-9-])/g, '<span class="ppGo">$1</span>')
+    ? escapeHtml(desc).replace(/(https?:\/\/\S*\/go\/[a-z0-9-]+)/g, '<span class="ppGo">$1</span>')
     : '<div class="ppEmptyBlock">sin descripción aún.</div>';
   const link = pub.data?.link;
-  $('ppLinkState').textContent = link ? (link.verified ? `link verificado ✓ ${link.status} + cookies` : `link SIN verificar (${link.status})`) : '';
+  $('ppLinkState').textContent = link ? (link.verified ? `/go/ verificado ✓ ${link.status} + cookies` : `/go/ SIN verificar (${link.status})`) : '';
   $('ppLinkState').className = 'ppHmeta ' + (link?.verified ? 'ok' : link ? 'bad' : '');
 
   // keywords + post
@@ -1789,17 +1994,22 @@ function toast(msg) {
 // S/A/D operan sobre el COMPONENTE SELECCIONADO; sin selección, el default es la línea base.
 window.addEventListener('keydown', (e) => {
   if (!project) return;
-  // ⌘⌥G = GALERÍA. Se compara e.code y NO e.key: en macOS ⌥+g produce "©" y un switch por letra
-  // nunca dispararía. No pisa nada (⌘Y panel · ⌘E export · ⌘Z undo · S/A/D/Q/E/F/M sueltas).
+  // ⌘⌥G = GALERÍA. Se compara e.code y NO e.key: en macOS ⌥+g produce "©" y un switch por
+  // letra nunca dispararía. Va ANTES del early-return de modificadores — ese return era
+  // exactamente por qué ⌘⌥G no hacía nada en este binario (27 ago 2026).
   if ((e.metaKey || e.ctrlKey) && e.altKey && e.code === 'KeyG') {
     e.preventDefault();
-    if (gallery) toggleGallery();  // antes de boot() los listeners no están cableados
+    if (gallery) toggleGallery();
     return;
   }
   // galería abierta = espejo a pantalla completa: ella decide, nada llega al timeline de atrás
   if (gallery?.isOpen()) { galleryKey(e); return; }
   if (galleryOnly) return; // sin sala que operar en este modo
-  if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+  // un INPUT de texto con foco se queda TODO el teclado (nota de marcador, etc.). La barra de
+  // velocidad NO: es un range, nunca recibe texto, y dejarla tragarse el teclado global es
+  // exactamente el gotcha del "input flotante sin blur()" que ya se pagó una vez.
+  const ae = document.activeElement;
+  if (ae && ae.tagName === 'INPUT' && ae.type !== 'range') return;
   const t = base.currentTime || 0;
   const frame = 1 / (project.fps || 30);
   const k = e.key.toLowerCase();
@@ -1807,6 +2017,12 @@ window.addEventListener('keydown', (e) => {
   // dossier (⌘Y) / modal de export (⌘E) abiertos = ESPEJO a pantalla completa: bloquear TODAS
   // las teclas del timeline (incl. ⌘Z) menos las que los cierran, para no mutar el proyecto detrás
   if (!$('modal').hidden) { if (k === 'escape') $('modal').hidden = true; return; }
+  if (!$('ppLight').hidden) {            // lightbox abierto: se queda con Esc y las flechas
+    if (k === 'escape') { e.preventDefault(); closeThumbLight(); }
+    else if (k === 'arrowleft') { e.preventDefault(); stepThumbLight(-1); }
+    else if (k === 'arrowright') { e.preventDefault(); stepThumbLight(1); }
+    return;
+  }
   if (!$('publishPanel').hidden) { if (k === 'escape' || k === 'y') { e.preventDefault(); togglePublishPanel(); } return; }
   // el panel de atajos NO bloquea teclas (es referencia); solo Esc lo cierra
   if (!$('helpPanel').hidden && k === 'escape') { toggleHelpPanel(false); return; }
@@ -1860,6 +2076,7 @@ window.addEventListener('keydown', (e) => {
       }
       break;
     case 'm': openMarkerPopover(t); break;
+    case 'c': e.preventDefault(); openNotePopover(t, 'comment'); break;   // feedback de Daniel
     case 'q': selectSide(-1); break; // seleccionar TODO a la izquierda del cursor
     case 'e': selectSide(1); break;  // seleccionar TODO a la derecha del cursor
     case 'f': toggleFullscreen(); break;

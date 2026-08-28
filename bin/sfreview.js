@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 // sfreview <project-dir> [--port 3010] [--roots a,b] — la Sala de Revisión.
-// sfreview --gallery [--port 3010]                  — solo la GALERÍA (sin proyecto abierto).
+// sfreview --gallery [--port 3010]                     — solo la GALERÍA (sin proyecto abierto).
 //
 // Sirve la app (web/) + los media del proyecto (con HTTP Range) + API de fixes.json + la API de
-// la Galería de Lanzamientos (⌘⌥G): escanea las raíces de proyectos y sirve/edita su publish.json.
+// la Galería de Lanzamientos (⌘⌥G). La Galería se portó DESDE sfstudio (main) el 27 ago 2026:
+// este binario ya tenía los tres controles de Daniel (tecla C, velocidad 3x, cortes arrastrables)
+// y le faltaba el catálogo. El port es ADITIVO — main nunca se toca, y así hay UN SOLO binario.
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promises as fsp } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { startStatic, serveFile, insideRoot } from '../lib/static-server.js';
-import { STAGES, STAGE_COMMANDS } from '../lib/publish.js';
+import { STAGES, STAGE_COMMANDS, parseTranscript, segmentTranscript, applyEdl } from '../lib/publish.js';
 import {
   defaultRoots, scanRoots, resolveId, readCard, readDossier, applyGalleryPatch,
   computeTranscriptFor, listThumbs,
@@ -40,9 +42,9 @@ for (let i = 0; i < args.length; i++) {
 if (!projectDir && !galleryOnly) usage();
 roots = roots || defaultRoots();
 
+const tlPath = projectDir ? path.join(projectDir, 'timeline.json') : null;
 let timeline = null;
 if (projectDir) {
-  const tlPath = path.join(projectDir, 'timeline.json');
   try {
     timeline = JSON.parse(await fsp.readFile(tlPath, 'utf8'));
   } catch (e) {
@@ -50,6 +52,20 @@ if (projectDir) {
       '  (si solo querías el catálogo de lanzamientos: sfreview --gallery)\n');
     process.exit(1);
   }
+}
+
+// ── Galería: se escanea en CADA request. Son decenas de carpetas: el escaneo cuesta microsegundos
+// y un cache aquí solo produce "no aparece mi proyecto nuevo".
+async function galleryEntry(id) {
+  const r = resolveId(roots, id);
+  if (!r) return null;
+  try { await fsp.access(path.join(r.dir, 'publish.json')); } catch { return null; }
+  return { id, dir: r.dir, name: r.name, root: roots[r.rootIdx] };
+}
+
+function json(res, code, obj) {
+  res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(obj));
 }
 
 async function readBody(req) {
@@ -63,21 +79,55 @@ async function readBody(req) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-function json(res, code, obj) {
-  res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-  res.end(JSON.stringify(obj));
-}
-
-const fixesPath = projectDir ? path.join(projectDir, 'fixes.json') : null;
+const fixesPath = path.join(projectDir, 'fixes.json');
 // /api/transcript: cache por PROMESA (mismo patrón que wavePromise — sin race entre requests).
 // Solo el éxito con corte final queda cacheado para siempre; found:false o cut:'raw' se
 // recomputan en el siguiente request (el transcript/EDL pueden aparecer DESPUÉS de abrir la sala).
 let transcriptPromise = null;
 let thumbsDir = null; // /api/thumbs fija el dir real; /thumbs/ sirve desde ahí
+async function computeTranscript() {
+  for (const dir of [projectDir, path.dirname(projectDir)]) {
+    for (const sub of ['edit/transcripts', 'transcripts', 'edit']) {
+      try {
+        const d = path.join(dir, sub);
+        for (const f of (await fsp.readdir(d)).filter((x) => x.endsWith('.json'))) {
+          try {
+            let tr = parseTranscript(await fsp.readFile(path.join(d, f), 'utf8'));
+            if (tr.words.length <= 10) continue;
+            let cut = 'raw';
+            for (const edlName of ['edl_breathed.json', 'edl.json']) {
+              try {
+                const edl = JSON.parse(await fsp.readFile(path.join(dir, 'edit', edlName), 'utf8'));
+                if (Array.isArray(edl.ranges) && edl.ranges.length) {
+                  tr = { ...applyEdl(tr.words, edl.ranges), text: '' };
+                  cut = 'final';
+                  break;
+                }
+              } catch { /* sin edl */ }
+            }
+            return { found: true, file: f, cut, words: tr.words.length, duration: tr.duration, segments: segmentTranscript(tr.words) };
+          } catch { /* no es transcript */ }
+        }
+      } catch { /* dir no existe */ }
+    }
+  }
+  return { found: false, segments: [] };
+}
 
 // ── waveform del base: peaks min/max a 50/s, computado UNA vez con ffmpeg y cacheado en el proyecto
-const wavePath = projectDir ? path.join(projectDir, 'waveform.json') : null;
+const wavePath = path.join(projectDir, 'waveform.json');
 let wavePromise = null;
+// firma del base: si cambia (re-corte, otro fps, zoom nuevo), el waveform cacheado MIENTE
+// (bug 25 jul: el base se reemplazó 3 veces con el mismo nombre y la sala siguió pintando la onda
+//  del PRIMERO → Daniel veía silencio donde había voz). La firma invalida el caché sola.
+async function baseSignature() {
+  const basePath = path.join(projectDir, timeline.base.src);
+  try {
+    const st = await fsp.stat(basePath);
+    return `${st.size}:${Math.round(st.mtimeMs)}`;
+  } catch { return 'no-base'; }
+}
+
 async function computeWaveform() {
   const basePath = path.join(projectDir, timeline.base.src);
   const RATE = 50, SR = 4000, BUCKET = Math.round(SR / RATE);
@@ -109,18 +159,9 @@ async function computeWaveform() {
       peaks.push(Math.round(mn / 327.68), Math.round(mx / 327.68)); // normalizado a -100..100
     }
   }
-  const data = { rate: RATE, peaks };
+  const data = { rate: RATE, peaks, sig: await baseSignature(), base: timeline.base.src };
   await fsp.writeFile(wavePath, JSON.stringify(data));
   return data;
-}
-
-// ── Galería: el catálogo de lanzamientos. Escanea en CADA request (son decenas de carpetas: el
-// escaneo cuesta microsegundos y un cache aquí solo genera "no aparece mi proyecto nuevo").
-async function galleryEntry(id) {
-  const r = resolveId(roots, id);
-  if (!r) return null;
-  try { await fsp.access(path.join(r.dir, 'publish.json')); } catch { return null; }
-  return { id, dir: r.dir, name: r.name, root: roots[r.rootIdx] };
 }
 
 let srv;
@@ -128,9 +169,14 @@ try {
   srv = await startStatic(WEB, {
   port,
   routes: {
-    // Sello de build de web/: la pestaña lo consulta y se recarga sola cuando cambia.
-    // Sin esto, una pestaña abierta desde antes de un deploy sigue corriendo el JS viejo y
-    // parece que la app perdió features (pasó el 27 jul: el rail y las fases "desaparecieron").
+    '/api/project': async (req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      if (!projectDir) return res.end(JSON.stringify({ gallery_only: true, name: 'Galería de Lanzamientos' }));
+      const fresh = JSON.parse(await fsp.readFile(tlPath, 'utf8'));
+      res.end(JSON.stringify({ ...fresh, projectDir }));
+    },
+    // Sello de build de web/: la pestaña se recarga sola cuando cambia. Sin esto, una pestaña
+    // abierta desde antes de un deploy sigue corriendo el JS viejo y parece que la app perdió cosas.
     '/api/version': async (req, res) => {
       let stamp = 0;
       for (const f of await fsp.readdir(WEB)) {
@@ -138,22 +184,19 @@ try {
         const st = await fsp.stat(path.join(WEB, f));
         stamp = Math.max(stamp, Math.floor(st.mtimeMs));
       }
-      json(res, 200, { stamp });
-    },
-    '/api/project': async (req, res) => {
-      if (!projectDir) return json(res, 200, { gallery_only: true, name: 'Galería de Lanzamientos' });
-      const fresh = JSON.parse(await fsp.readFile(path.join(projectDir, 'timeline.json'), 'utf8'));
-      json(res, 200, { ...fresh, projectDir });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ stamp }));
     },
     '/api/fixes': async (req, res) => {
-      if (!projectDir) return json(res, 200, {});
       if (req.method === 'POST') {
         try {
           const body = JSON.parse(await readBody(req));
           await fsp.writeFile(fixesPath, JSON.stringify(body, null, 1));
-          json(res, 200, { ok: true, path: fixesPath });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, path: fixesPath }));
         } catch (e) {
-          json(res, 400, { ok: false, error: e.message });
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
         }
         return;
       }
@@ -163,40 +206,42 @@ try {
         res.end(txt);
       } catch {
         // 200 con {} (no 404): sin sesión previa no es un error y la consola debe quedar limpia
-        json(res, 200, {});
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end('{}');
       }
     },
     // dossier ⌘Y: transcript segmentado con timestamps (word-level de la sala o del proyecto
     // raíz — edit/transcripts es el canónico — remapeado al corte final si hay EDL)
     '/api/transcript': async (req, res) => {
-      if (!projectDir) return json(res, 200, { found: false, segments: [] });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       try {
-        transcriptPromise = transcriptPromise ||
-          computeTranscriptFor([projectDir, path.dirname(projectDir)]);
+        transcriptPromise = transcriptPromise || computeTranscript();
         const data = await transcriptPromise;
         // solo el estado terminal (corte final encontrado) queda cacheado; lo demás puede mejorar
         // (el transcript o el EDL pueden aparecer DESPUÉS de abrir la sala) → recomputar
         if (!(data.found && data.cut === 'final')) transcriptPromise = null;
-        json(res, 200, data);
+        res.end(JSON.stringify(data));
       } catch (e) {
         transcriptPromise = null;
-        json(res, 200, { found: false, segments: [], error: e.message });
+        res.end(JSON.stringify({ found: false, segments: [], error: e.message }));
       }
     },
     // dossier ⌘Y: miniaturas candidatas para A/B (viven en <proyecto raíz>/thumbs/)
     '/api/thumbs': async (req, res) => {
-      if (!projectDir) return json(res, 200, { found: false, files: [] });
-      for (const dir of [projectDir, path.dirname(projectDir)]) {
-        const { dir: sub, files } = await listThumbs(dir);
-        if (files.length) {
-          thumbsDir = path.join(dir, sub);
-          return json(res, 200, { found: true, files });
-        }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      for (const dir of [path.join(projectDir, 'thumbs'), path.join(path.dirname(projectDir), 'thumbs')]) {
+        try {
+          const files = (await fsp.readdir(dir)).filter((f) => /\.(png|jpe?g|webp)$/i.test(f)).sort();
+          if (files.length) {
+            thumbsDir = dir;
+            res.end(JSON.stringify({ found: true, files }));
+            return;
+          }
+        } catch { /* sin thumbs aún */ }
       }
-      json(res, 200, { found: false, files: [] });
+      res.end(JSON.stringify({ found: false, files: [] }));
     },
     '/thumbs': async (req, res) => {
-      if (!projectDir) { res.writeHead(404); res.end('404'); return; }
       const rel = decodeURIComponent(req.url.replace(/^\/thumbs\/?/, '').split('?')[0]);
       const dir = thumbsDir || path.join(path.dirname(projectDir), 'thumbs');
       const fp = path.normalize(path.join(dir, rel));
@@ -209,40 +254,48 @@ try {
     // panel ⌘Y (SFPublish): la sala solo LEE publish.json — lo escriben los comandos sfpublish.
     // El proyecto de la sala suele ser <proyecto>/sfreview_project → publish.json vive en el padre.
     '/api/publish': async (req, res) => {
-      if (!projectDir) return json(res, 200, { found: false, stages: STAGES, commands: STAGE_COMMANDS });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       for (const dir of [projectDir, path.dirname(projectDir)]) {
         try {
           const p = path.join(dir, 'publish.json');
           const pub = JSON.parse(await fsp.readFile(p, 'utf8'));
-          return json(res, 200, { found: true, publish: pub, path: p, project: dir, stages: STAGES, commands: STAGE_COMMANDS });
+          res.end(JSON.stringify({ found: true, publish: pub, path: p, project: dir, stages: STAGES, commands: STAGE_COMMANDS }));
+          return;
         } catch { /* siguiente candidato */ }
       }
-      json(res, 200, { found: false, project: path.dirname(projectDir), stages: STAGES, commands: STAGE_COMMANDS });
+      res.end(JSON.stringify({ found: false, project: path.dirname(projectDir), stages: STAGES, commands: STAGE_COMMANDS }));
     },
     '/api/waveform': async (req, res) => {
-      if (!projectDir) return json(res, 200, { rate: 50, peaks: [] });
       try {
         const txt = await fsp.readFile(wavePath, 'utf8');
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-        res.end(txt);
-        return;
+        const cached = JSON.parse(txt);
+        // GUARD: el caché solo vale si corresponde AL BASE ACTUAL (ver baseSignature)
+        if (cached.sig && cached.sig === (await baseSignature())) {
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+          res.end(txt);
+          return;
+        }
+        process.stdout.write('  waveform: el base cambió → recomputando\n');
+        wavePromise = null;
+        await fsp.unlink(wavePath).catch(() => {});
       } catch { /* aún no computado */ }
       try {
         wavePromise = wavePromise || computeWaveform();
-        json(res, 200, await wavePromise);
+        const data = await wavePromise;
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(data));
       } catch (e) {
         wavePromise = null; // permitir reintento
-        json(res, 500, { error: e.message });
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
       }
     },
-
     // ── GALERÍA DE LANZAMIENTOS (⌘⌥G) ──────────────────────────────────────────────
     // /api/gallery            → la rejilla (una tarjeta por proyecto con publish.json)
     // /api/gallery/item?id=   → GET la ficha completa · POST el patch (post/portada/título)
     // /gallery/thumb?id=&f=   → la imagen de un proyecto cualquiera (sandbox: solo bajo las raíces)
     '/api/gallery': async (req, res) => {
       const u = new URL(req.url, 'http://x');
-      // sub-ruta /api/gallery/item (el router hace match por prefijo)
       if (u.pathname === '/api/gallery/item') {
         const entry = await galleryEntry(u.searchParams.get('id'));
         if (!entry) return json(res, 404, { error: 'proyecto no encontrado en las raíces de la galería' });
@@ -256,11 +309,8 @@ try {
             return json(res, 400, { ok: false, error: e.message });
           }
         }
-        try {
-          return json(res, 200, await readDossier(entry));
-        } catch (e) {
-          return json(res, 500, { error: e.message });
-        }
+        try { return json(res, 200, await readDossier(entry)); }
+        catch (e) { return json(res, 500, { error: e.message }); }
       }
       if (u.pathname !== '/api/gallery') { res.writeHead(404); res.end('404'); return; }
       try {
@@ -271,7 +321,6 @@ try {
           try { items.push(await readCard(e, now)); }
           catch (err) { items.push({ id: e.id, name: e.name, dir: e.dir, error: err.message }); }
         }
-        // más recientes primero; los que nunca se tocaron, al final por nombre
         items.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || '') || a.name.localeCompare(b.name));
         json(res, 200, { roots, count: items.length, items, open: projectDir || null });
       } catch (e) {
@@ -313,13 +362,7 @@ try {
   throw e;
 }
 
-if (projectDir) {
-  process.stdout.write(`sfreview: ${timeline.name || path.basename(projectDir)}\n`);
-  process.stdout.write(`  proyecto: ${projectDir}\n`);
-  process.stdout.write(`  sala:     http://127.0.0.1:${srv.port}\n`);
-  process.stdout.write(`  fixes:    ${fixesPath}\n`);
-} else {
-  process.stdout.write('sfreview: Galería de Lanzamientos (sin proyecto abierto)\n');
-  process.stdout.write(`  galería:  http://127.0.0.1:${srv.port}\n`);
-}
-process.stdout.write(`  raíces:   ${roots.join('  ·  ')}   (⌘⌥G)\n`);
+process.stdout.write(`sfreview: ${timeline.name || path.basename(projectDir)}\n`);
+process.stdout.write(`  proyecto: ${projectDir}\n`);
+process.stdout.write(`  sala:     http://127.0.0.1:${srv.port}\n`);
+process.stdout.write(`  fixes:    ${fixesPath}\n`);

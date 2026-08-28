@@ -25,12 +25,34 @@ body {
 #brand { font-weight: 800; letter-spacing: .12em; font-size: 14px; }
 #brand .sf { color: var(--sf); }
 #projname { color: var(--dim); font-weight: 500; letter-spacing: 0; margin-left: 10px; font-size: 12px; }
-#speeds { margin-left: auto; display: flex; gap: 4px; }
-#speeds button {
-  background: transparent; color: var(--dim); border: 1px solid var(--line);
-  border-radius: 6px; padding: 4px 10px; cursor: pointer; font-weight: 700; font-size: 12px;
+/* velocidad: barra continua 0.75×–3× de 0.25 en 0.25 (sustituye los 4 botones, 10 ago 2026) */
+#speeds { margin-left: auto; display: flex; align-items: center; gap: 9px; }
+#speeds .spdEnd { color: var(--dim); font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+#speeds #speedRange { width: 168px; }
+#speedOut {
+  min-width: 46px; text-align: right; color: var(--sf);
+  font-weight: 800; font-size: 12px; font-variant-numeric: tabular-nums;
 }
-#speeds button.active { color: #0a0a0c; background: var(--sf); border-color: var(--sf); }
+.spdRange {
+  -webkit-appearance: none; appearance: none;
+  height: 4px; border-radius: 3px; cursor: pointer; outline: none;
+  background: linear-gradient(90deg, var(--sf) 0 var(--pct, 14.3%), var(--line) var(--pct, 14.3%) 100%);
+}
+.spdRange::-webkit-slider-runnable-track { height: 4px; border-radius: 3px; background: transparent; }
+.spdRange::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 13px; height: 13px; margin-top: -4.5px; border-radius: 50%;
+  background: var(--sf); border: 2px solid #0a0a0c;
+  box-shadow: 0 0 0 1px var(--sf), 0 0 9px rgba(255, 145, 1, .45);
+  transition: transform .1s ease;
+}
+.spdRange:hover::-webkit-slider-thumb, .spdRange:active::-webkit-slider-thumb { transform: scale(1.18); }
+.spdRange::-webkit-calendar-picker-indicator { display: none; }  /* Chrome pinta las ticks del datalist como texto */
+/* muescas propias: WebKit no pinta las del <datalist>, y sin ellas no se VE que salta de 0.25 en 0.25 */
+.spdWrap { position: relative; display: inline-flex; align-items: center; }
+.spdNotches { position: absolute; left: 0; right: 0; top: 50%; margin-top: 5px; height: 4px; pointer-events: none; }
+.spdNotch { position: absolute; top: 0; width: 1px; height: 4px; background: #3a3a46; transform: translateX(-0.5px); }
+.spdNotch.on { background: var(--sf); opacity: .55; }
 #exportBtn {
   background: var(--purple); color: #fff; border: 0; border-radius: 6px;
   padding: 6px 14px; font-weight: 700; cursor: pointer; font-size: 12px;
@@ -38,6 +60,61 @@ body {
 #exportBtn:hover { filter: brightness(1.15); }
 
 #main { flex: 1; display: flex; min-height: 0; }
+
+/* ── COMENTARIOS (tecla C): la voz de DANIEL, a la izquierda. Los marcadores (oro, derecha) son
+   la voz de la fábrica. Dos canales, dos colores, dos lados — nunca se mezclan. ── */
+#comments {
+  width: 268px; flex: 0 0 auto; min-width: 0; overflow-y: auto;
+  background: var(--panel); border-right: 1px solid var(--line);
+  padding: 12px 12px 10px; display: flex; flex-direction: column; gap: 8px;
+}
+#comments h2 {
+  font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim);
+  font-weight: 800; display: flex; align-items: center; gap: 7px;
+}
+#cCount {
+  background: var(--purple); color: #fff; border-radius: 999px; padding: 1px 7px;
+  font-size: 10px; letter-spacing: 0; font-variant-numeric: tabular-nums;
+}
+#cCount.zero { background: var(--line); color: var(--dim); }
+#cHint { color: var(--dim); font-size: 11px; line-height: 1.5; }
+#cHint kbd {
+  background: #17171e; border: 1px solid var(--line); border-radius: 4px;
+  padding: 0 5px; font: inherit; font-weight: 800; color: var(--purple);
+}
+#commentList { list-style: none; display: flex; flex-direction: column; gap: 6px; flex: 1; }
+#commentList li {
+  position: relative; border-left: 2px solid var(--purple); border-radius: 0 7px 7px 0;
+  background: #141019; padding: 7px 26px 7px 9px; cursor: pointer; transition: background .12s;
+}
+#commentList li:hover { background: #1b1424; }
+#commentList li.on { background: #221733; box-shadow: inset 0 0 0 1px rgba(140,39,241,.45); }
+#commentList .ct {
+  color: var(--purple); font-weight: 800; font-size: 11px;
+  font-variant-numeric: tabular-nums; margin-bottom: 2px;
+}
+#commentList .ctexto { color: var(--text); font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+#commentList .cdel {
+  position: absolute; top: 5px; right: 5px; background: transparent; border: 0;
+  color: var(--dim); cursor: pointer; font-size: 11px; line-height: 1; padding: 2px 4px; border-radius: 4px;
+}
+#commentList .cdel:hover { color: var(--danger); background: rgba(255,77,77,.1); }
+#cCopy {
+  background: transparent; color: var(--purple); border: 1px solid rgba(140,39,241,.45);
+  border-radius: 6px; padding: 6px 10px; font-weight: 700; font-size: 11px; cursor: pointer;
+}
+#cCopy:hover { background: rgba(140,39,241,.14); }
+#cCopy:disabled { opacity: .35; cursor: default; }
+#dragComments { flex: 0 0 5px; cursor: col-resize; background: transparent; }
+#dragComments:hover { background: var(--line); }
+/* pin de comentario en el timeline: morado, para distinguirlo del marcador (oro) */
+.cpin {
+  position: absolute; top: 2px; width: 0; height: 0; cursor: pointer;
+  border-left: 5px solid transparent; border-right: 5px solid transparent;
+  border-top: 9px solid var(--purple); transform: translateX(-5px);
+  filter: drop-shadow(0 0 5px rgba(140,39,241,.65));
+}
+.cpin:hover, .cpin.on { border-top-color: #b46bff; filter: drop-shadow(0 0 8px rgba(140,39,241,.95)); }
 #stageWrap { flex: 1; display: flex; align-items: center; justify-content: center; background: #000; min-width: 0; }
 /* F = video a pantalla completa REAL: el escenario llena toda la pantalla (edge-to-edge) */
 #stageWrap:fullscreen { width: 100vw; height: 100vh; background: #000; }
@@ -63,10 +140,12 @@ body {
 #fsSeek:hover { height: 8px; }
 #fsSeekFill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--sf); border-radius: 3px; }
 #fsSeekKnob { position: absolute; top: 50%; left: 0; width: 13px; height: 13px; border-radius: 50%; background: #fff; transform: translate(-50%, -50%); box-shadow: 0 0 5px rgba(0,0,0,.6); }
-#fsSpeeds { display: flex; gap: 3px; flex: 0 0 auto; }
-.fsSpeed { background: rgba(255,255,255,.08); color: #d6d6de; border: 1px solid rgba(255,255,255,.16); border-radius: 6px; padding: 6px 9px; font-size: 11px; font-weight: 700; cursor: pointer; }
-.fsSpeed:hover { background: rgba(255,255,255,.18); }
-.fsSpeed.active { background: var(--sf); color: #111; border-color: var(--sf); }
+#fsSpeeds { display: flex; align-items: center; gap: 9px; flex: 0 0 auto; }
+#fsSpeeds #fsSpeedRange { width: 132px; }
+#fsSpeedOut {
+  min-width: 44px; text-align: right; color: var(--sf);
+  font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums;
+}
 #fsHelp {
   position: absolute; left: 50%; bottom: 92px; transform: translateX(-50%); z-index: 31;
   max-width: min(760px, 90vw); text-align: center;
@@ -303,6 +382,12 @@ kbd {
   width: 300px; background: #17171d; color: var(--text); border: 1px solid var(--sf);
   border-radius: 6px; padding: 8px 10px; font-size: 13px; outline: none;
 }
+/* el popover de COMENTARIO se viste de morado: el color dice de quién es la nota antes de leerla */
+#popover.isComment #popInput {
+  width: 380px; border-color: var(--purple); background: #17111f;
+  box-shadow: 0 0 0 3px rgba(140,39,241,.16), 0 10px 30px rgba(0,0,0,.55);
+}
+#popover.isComment #popInput::placeholder { color: #9a7ac4; }
 
 #modal { position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 200; display: flex; align-items: center; justify-content: center; }
 #modalCard {
@@ -439,7 +524,27 @@ kbd {
 /* miniaturas A/B */
 #ppThumbs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .ppThumb { margin: 0; }
-.ppThumb img { width: 100%; border-radius: 7px; border: 1px solid var(--line); display: block; }
+.ppThumb img { width: 100%; border-radius: 7px; border: 1px solid var(--line); display: block; cursor: zoom-in; }
+.ppThumbWrap { position: relative; }
+/* ⤢ por miniatura: comparar dos thumbs a 320px no se puede — la decisión exige tamaño real */
+.ppExpand { position: absolute; top: 6px; right: 6px; width: 26px; height: 26px; border-radius: 6px;
+  border: 1px solid rgba(255,255,255,.18); background: rgba(12,12,16,.72); color: #e8e8ef;
+  font-size: 13px; line-height: 1; cursor: pointer; opacity: 0; transition: opacity .15s, background .15s; }
+.ppThumbWrap:hover .ppExpand, .ppExpand:focus-visible { opacity: 1; }
+.ppExpand:hover { background: rgba(255,145,1,.9); color: #101014; border-color: transparent; }
+#ppLight { position: fixed; inset: 0; z-index: 60; background: rgba(6,6,9,.94);
+  display: flex; align-items: center; justify-content: center; }
+#ppLight[hidden] { display: none; }
+#ppLightImg { max-width: 92vw; max-height: 86vh; border-radius: 10px;
+  box-shadow: 0 24px 70px rgba(0,0,0,.7); }
+#ppLightCap { position: absolute; bottom: 18px; left: 0; right: 0; text-align: center;
+  color: #9a9aa6; font-size: 12px; user-select: text; }
+#ppLightClose, #ppLightPrev, #ppLightNext { position: absolute; background: rgba(20,20,26,.8);
+  color: #e8e8ef; border: 1px solid rgba(255,255,255,.14); border-radius: 8px; cursor: pointer; }
+#ppLightClose { top: 18px; right: 20px; width: 34px; height: 34px; font-size: 15px; }
+#ppLightPrev, #ppLightNext { top: 50%; transform: translateY(-50%); width: 40px; height: 62px; font-size: 26px; }
+#ppLightPrev { left: 20px; } #ppLightNext { right: 20px; }
+#ppLightClose:hover, #ppLightPrev:hover, #ppLightNext:hover { background: rgba(255,145,1,.9); color: #101014; }
 .ppThumb figcaption { color: #55555f; font-size: 10px; margin-top: 3px; text-align: center; user-select: text; }
 
 /* menciones */
@@ -838,3 +943,4 @@ body.galleryOnly #galClose { display: none; } /* sin sala detrás no hay a dónd
 }
 .galPostRender pre code { background: none; padding: 0; }
 .galPostRender img { max-width: 100%; border-radius: 7px; margin: 8px 0; display: block; }
+

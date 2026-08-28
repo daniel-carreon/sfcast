@@ -1304,9 +1304,33 @@ $('track0').addEventListener('dblclick', (e) => {
 });
 
 $('playBtn').addEventListener('click', togglePlay);
+// ⛔ EL PLAY SE PRE-POSICIONA FUERA DEL TRIM (27 ago 2026, reporte de Daniel: "le pongo play a
+// esta madre y se queda en pausa"). Con un trim que empieza en 0 —el caso normal: el raw trae
+// unos segundos de nada antes de la primera palabra— darle play desde t=0 hacía esto:
+//   play() → rVFC salta a la primera frontera → SEEK → `waiting` (buffering) → imagen congelada.
+// Se ve idéntico a "el botón no hizo nada", así que lo natural es volver a picarle; y el segundo
+// toque encuentra `paused === false` y PAUSA. Neto: dos plays y el video quieto.
+// Arreglo: si el playhead cae dentro de un trim, se mueve ANTES de reproducir y se espera al
+// `seeked`. El play arranca sobre material ya buffereado y no hay salto visible.
+let arrancando = false;   // hay un pre-seek en vuelo: el play todavía no se ve
 function togglePlay() {
-  if (base.paused) base.play().catch(() => {});
-  else base.pause();
+  // Un segundo toque MIENTRAS el salto está en vuelo es la misma intención ("quiero reproducir"),
+  // no la contraria. Sin este guardia, ese toque encuentra el estado a medias y pausa — que es
+  // justo el fallo que Daniel reportó, solo que en una ventana más corta.
+  if (arrancando) return;
+  if (!base.paused) { base.pause(); return; }
+  const tgt = skipTarget(state.trims, base.currentTime);
+  if (tgt !== null && tgt < project.duration - 0.05) {
+    arrancando = true;
+    base.currentTime = Math.min(tgt, project.duration - 0.04);
+    base.addEventListener('seeked', () => {
+      base.play().catch(() => {}).finally(() => { arrancando = false; });
+    }, { once: true });
+    // red de seguridad: si el `seeked` no llega (archivo raro, red muerta), no dejar el botón muerto
+    setTimeout(() => { arrancando = false; }, 1500);
+    return;
+  }
+  base.play().catch(() => {});
 }
 
 // ---------- AUTO-SCROLL AL PLAYHEAD (25 jul 2026, pedido de Daniel: "como CapCut") ----------

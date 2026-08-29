@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import sys
 
-BOS = "/Users/danielcarreon/Developer/business-os"
+BOS = os.path.expanduser("~/Developer/business-os")
 V4CM_CANDIDATES = [
     f"{BOS}/agent-server/workspace/generated/video-final-4/edit/design/cardmp4",
     f"{BOS}/claudeclaw/workspace/generated/video-final-4/edit/design/cardmp4",

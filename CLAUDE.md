@@ -8,6 +8,12 @@
 **Repo independiente.** No es submódulo de `business-os` y no debe volver a serlo.
 Hermano de `sflow-next`, `sfpoint`, `sfterm` en `~/Developer/software/`.
 
+**`sala/` es SFStudio, fusionado aquí con su historia de git completa (29 ago 2026).**
+Grabar (este repo) y revisar/publicar (`sala/`, ex `~/Developer/software/sfstudio`) viven
+ahora en un solo repo — Node/Playwright, independiente del target Swift, `npm install`
+dentro de `sala/` antes de usarlo. Detalle: `sala/CLAUDE.md`. El repo `sfstudio` original
+queda intacto y sin tocar hasta que Daniel decida su destino (archivar o retirar).
+
 ## Panel Cámara (22 ago 2026)
 
 Quinto panel del Estudio, junto a Escenas / Fuentes / Mixer / Salidas: **ISO,
@@ -54,6 +60,7 @@ Cambiar de identidad tira los permisos de Pantalla, Cámara y Micrófono.
 | **Por qué** cada decisión es como es (v1.1 → v1.6) | `DECISIONS.md` |
 | Spec de origen | `business-os/.claude/specs/sfcast-loom-soberano-2026-07-14-spec.md` |
 | Memoria del proyecto | `business-os/.claude/memory/project/sfcast-loom-soberano-2026-07-14.md` |
+| Revisar (Sala), recortar, publicar a YouTube | `sala/CLAUDE.md` (ex SFStudio) — flujo completo también en `README.md` §4c |
 
 ## Stack
 

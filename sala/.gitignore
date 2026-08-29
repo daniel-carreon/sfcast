@@ -1,0 +1,6 @@
+node_modules/
+parity/*.mp4
+parity/*.webm
+parity/*.mov
+demo/out/
+*.log

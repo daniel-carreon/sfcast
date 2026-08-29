@@ -7,6 +7,10 @@
 >
 > Repo: `~/Developer/software/sfcast` (independiente, sin remote).
 > Por qué cada decisión es como es: **`DECISIONS.md`** (v1.1 → v4.0).
+>
+> **Grabar y revisar viven en el mismo repo.** `sala/` es SFStudio — la Sala de
+> Revisión y el pipeline de publicación — fusionado aquí completo, con su historia
+> de git, el 29 ago 2026. Flujo end-to-end: §4c.
 
 ---
 
@@ -208,6 +212,46 @@ corrida de `--mirrortest`: fuga neta 0.0007 sobre 1.0).
 `./scripts/build-app.sh` → compartir `dist/SFCast.app` (arrastrar a /Applications).
 El tercero aprueba cámara/mic/pantalla en su primer uso; si no quiere el VPS,
 apaga "subir" en el micropanel (`autoUpload=false`) o usa solo el Estudio.
+
+---
+
+## 4c. La Sala de Revisión (`sala/`, ex SFStudio) — grabar → revisar → entregar
+
+> `sala/` es SFStudio fusionado en este repo con su historia de git completa (29 ago
+> 2026): antes hermano en `~/Developer/software/sfstudio`, hoy módulo local. Sigue
+> siendo Node/Playwright, independiente del target Swift de arriba — `cd sala && npm
+> install` antes de usarlo. Detalle técnico completo: `sala/CLAUDE.md`.
+
+El camino de un video, de la toma a lo que Daniel valida:
+
+```
+SFCast graba (§4 / §4b)                sala/ revisa                        se entrega
+raw + manifest.json          →      sfreview :3010 (Sala)        →      la SALA abierta
+(pantalla + cámara separadas          trims S/A/D · ⌘Z ·                con edit/v<N>.mp4,
+si Modo Estudio "Dos Caras")          velocidad 3x · tecla C               JAMÁS "MASTER.mp4"
+                                       comentar · fixes.json
+```
+
+- **Abrir la sala:** siempre por el launcher de la skill de edición, nunca a mano —
+  `python3 abrir_sala.py <proyecto>` (`business-os/.claude/skills/edicion-de-video/
+  scripts/abrir_sala.py`). El launcher verifica el binario y aborta si no trae los
+  tres controles de Daniel (cortes arrastrables, 3x, tecla C) o si la base se llama
+  `MASTER*`.
+- **Un solo binario:** `sala/bin/sfreview.js`. La bifurcación `sfstudio-mini` murió
+  el 27 ago 2026 (unificación quirúrgica de la sala de mini + la Galería de main,
+  68/68 tests en verde).
+- **El entregable es la sala, nunca el mp4** (firma de Daniel, 27 ago 2026): sube
+  `edit/v<N>.mp4` **dentro de la sala abierta** cuando él firma una ronda — el
+  número sube con su firma, no con cada re-render.
+- **Publicación (etapa 2, `sfpublish`)** vive en `sala/bin/sfpublish.js`: metadata,
+  menciones, checklist, programación, post de comunidad, subida a YouTube — todo por
+  la Data API, nunca por navegador.
+
+**Ruta canónica del binario tras la fusión:** cambió de
+`~/Developer/software/sfstudio/bin/sfreview.js` a
+`~/Developer/software/sfcast/sala/bin/sfreview.js`. `abrir_sala.py` todavía apunta a
+la ruta vieja — el diff para actualizarlo vive en el reporte de esta unificación,
+pendiente de aplicar en `business-os` (fuera del alcance de este worktree).
 
 ---
 

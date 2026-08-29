@@ -6,7 +6,33 @@
 > **$0/mes** (Loom Business cobra $18-24 por usuario al mes).
 >
 > Repo: `~/Developer/software/sfcast` (independiente, sin remote).
-> Por qué cada decisión es como es: **`DECISIONS.md`** (v1.1 → v1.6).
+> Por qué cada decisión es como es: **`DECISIONS.md`** (v1.1 → v4.0).
+
+---
+
+## Novedades v3.8 / v4.0 (28 ago 2026)
+
+- **«Dos Caras» (v4.0):** escena estándar que graba pantalla y cámara como dos
+  archivos separados y alineables (`screen.mp4` + `camera.mov` + programa
+  proxy). Arreglado un bug donde las tres salidas activas a la vez codificaban
+  la pantalla dos veces y la cámara caía de 25 a 12-15 fps; ahora la
+  resolución de captura ya no está atada al lienzo del programa. El offset
+  entre pistas se mide por **audio** (`AlineadorDeAudio.swift`, el mismo
+  micrófono en los dos archivos), no por reloj — los cuatro caminos de
+  AVFoundation medidos fallaban entre 3 y 52 frames. `scripts/refinar-offset.py`
+  da la cifra final en los términos de ffmpeg (que es quien compone).
+- **Guard de voz corregido:** el guard leía las muestras del writer de la
+  salida «Programa», que es `nil` (y por tanto 0 para siempre) si esa salida
+  está apagada — detenía grabaciones buenas con voz real entrando. Ahora lee
+  el sensor real del micrófono (el mismo dato del vúmetro), y hay un guard
+  aparte para «Programa» que avisa sin detener.
+- **UNA cámara (v3.8):** las tres tarjetas de cámara duplicadas del Estudio se
+  consolidan en `SetCameraCard`, la primera del cajón derecho, con «Avanzado»
+  colapsable para lo que casi nunca se toca.
+- El panel web de El Set ya no se recarga solo a mitad de una toma
+  (`MarcaDeRodaje.swift` aplaza la recarga hasta el corte).
+
+Detalle completo y mediciones: `DECISIONS.md` §v4.0, guard de voz, §v3.8/v3.8.1/v3.8.2.
 
 ---
 

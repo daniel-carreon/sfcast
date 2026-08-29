@@ -8,11 +8,26 @@
 **Repo independiente.** No es submódulo de `business-os` y no debe volver a serlo.
 Hermano de `sflow-next`, `sfpoint`, `sfterm` en `~/Developer/software/`.
 
-## Panel Cámara (22 ago 2026)
+## La Cámara — UNA tarjeta, la primera de El Set (28 ago 2026)
 
-Quinto panel del Estudio, junto a Escenas / Fuentes / Mixer / Salidas: **ISO,
-obturación, apertura y balance de blancos de la ZV-E10 sin salir de aquí**.
-Durante una toma, cambiar de ventana para corregir el ISO no es una opción.
+**ISO, obturación, apertura y balance de blancos de la ZV-E10 sin salir de
+aquí.** Durante una toma, cambiar de ventana para corregir el ISO no es una
+opción.
+
+Vive en `SetCameraCard` (CameraPanel.swift): **la primera tarjeta del cajón
+derecho**, encima del panel web. Llegó a estar en TRES sitios a la vez —columna
+del panel inferior, cajón propio y la tarjeta del enchufe al fondo de El Set— y
+Daniel los contó: *"la cámara es lo principal, ponla la primerita hasta arriba a
+la derecha en el set"*. Ahora:
+
+- **Sin abrir nada:** ISO (lo único que toca a mano), «Exponer a la cara», lo que
+  el ojo mide (cara/quemado, gratis: sale del frame que ya entra), los avisos que
+  cuestan una toma y el interruptor de la corriente (Shelly).
+- **«Avanzado»** (se recuerda, `studio.camAvanzado`): todo lo demás — los cinco
+  grupos, las huérfanas y los códigos sin traducir.
+- El panel inferior quedó en 4 columnas: Escenas / Fuentes / Mixer / Salidas.
+- En el panel web embebido (`?embed=sfcast`) se quitan sus dos tarjetas de cámara
+  («Cómo se ve» y el enchufe): en iPhone/escritorio siguen ahí.
 
 Habla con la cámara **llamando al CLI `sfcam`** (repo `sfcam`, control por PTP
 sobre libgphoto2). El motor NO se duplica aquí: tiene su propia batería de 25
@@ -24,6 +39,18 @@ ZV-E10 corta su live view mientras atiende el USB. Por eso el panel **no
 consulta solo** — lee al abrirse, al escribir, y cuando se pulsa ↻. Si aparece
 la tentación de poner un temporizador ahí, ya se probó: es exactamente lo que
 hacía parpadear la grabación.
+
+## El Set no se recarga EN CÁMARA (28 ago 2026)
+
+El panel web se recarga solo cuando su HTML cambia en disco (`/version`, cada
+4 s) — sin eso se queda pintando una versión vieja durante horas. Pero está
+DENTRO del encuadre: esa tarde, grabando, una edición del HTML lo recargó a
+mitad de toma y una tarjeta desapareció en el video.
+
+`MarcaDeRodaje.swift` deja `~/.sfcast/grabando` mientras hay grabación viva (los
+dos caminos: Estudio y Loom); `panel_server.py` lo reporta en `/version` y la
+página **aplaza** la recarga hasta el corte. No se pierde el cambio: entra en
+cuanto se para.
 
 ## Puerta para agentes
 
@@ -155,6 +182,30 @@ lienzo para que a tamaño completo no se lea como banda. Sensor de oclusión
 (`OcclusionProbe`) → aro punteado ámbar. Decisiones y el bug que encontró el QA
 (esconder el panel estrangulaba la sesión de cámara: 60 → 0 fps):
 `DECISIONS.md` §v2.9.
+
+## «Dos Caras» — pantalla y cámara como dos archivos (v4.0, 28 ago 2026)
+
+La escena estándar de grabación: se elige y ya está todo puesto. Carga su propia
+**receta** (`StudioScene.receta`) — las tres salidas + lienzo 1080 — y al salir
+DEVUELVE la config de Daniel. Escribe `preset: "dos-caras"` en el manifest, que es
+la señal para la edición de que esa sesión trae capas separadas y alineables.
+
+- **El lienzo va a 1080 a propósito y NO es una rebaja de calidad.** `screen.mp4`
+  conserva 2560×1440 porque la captura ya no está atada al lienzo (`captureSize`);
+  lo único que baja es el PROGRAMA, que aquí es el proxy. Con el lienzo en 1440 se
+  codifica la pantalla dos veces a tamaño completo y **la cámara cae de 25 a 12-15
+  fps** (medido, A/B de 4 condiciones — `DECISIONS.md` §v4.0).
+- **El offset entre pistas se mide por AUDIO, no por reloj** (`AlineadorDeAudio`):
+  el mismo micrófono está en los dos archivos. Los cuatro caminos de reloj de
+  AVFoundation fallan entre 3 y 52 frames.
+- ⚠️ **El número final lo da ffmpeg, no la app.** En un `.mov` con edit list el
+  desfase depende del decodificador: AVFoundation y ffmpeg difieren 44 ms
+  constantes (el priming de AAC). Para componer:
+  `python3 scripts/refinar-offset.py ~/Movies/SFCast/<id>`.
+- ⛔ **El decoder de `StudioConfig` es A MANO**: un `var` nuevo que no se agregue a
+  su `init(from:)` se escribe en disco y se lee como `nil`, en silencio.
+- ⛔ **El QA no roba el foco**: `open -g` no basta si la app hace `NSApp.activate`.
+  En `testMode` la ventana se queda atrás.
 
 ## Invariantes que NO se tocan
 

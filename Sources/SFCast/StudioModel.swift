@@ -152,10 +152,20 @@ struct StudioScene: Codable, Identifiable, Equatable {
     var id = UUID()
     var name: String
     var items: [SceneItem]
+    /// LA RECETA DE GRABACIÓN DE ESTA ESCENA (28 ago 2026).
+    ///
+    /// Hasta hoy una escena era SOLO geometría y "qué archivos se graban" vivía
+    /// en la config global: prender las capas exigía acordarse de tres casillas
+    /// cada vez. Pedido de Daniel, textual: *"¿es posible crear una escena
+    /// especial para esto? de modo que no peleamos con el resto de config, sino
+    /// que directo accedo a esta y me despreocupo"*. Con esto, elegir la escena
+    /// ES elegir cómo se graba. `nil` = escena normal, no toca nada.
+    var receta: RecetaDeGrabacion?
 
-    init(name: String, items: [SceneItem]) {
+    init(name: String, items: [SceneItem], receta: RecetaDeGrabacion? = nil) {
         self.name = name
         self.items = items
+        self.receta = receta
     }
 
     init(from decoder: Decoder) throws {
@@ -163,6 +173,38 @@ struct StudioScene: Codable, Identifiable, Equatable {
         id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Escena"
         items = try c.decodeIfPresent([SceneItem].self, forKey: .items) ?? []
+        receta = try c.decodeIfPresent(RecetaDeGrabacion.self, forKey: .receta)
+    }
+}
+
+/// Lo que una escena impone sobre la grabación mientras está activa. Se APLICA
+/// al entrar y se DESHACE al salir: una escena con receta no puede dejarle a
+/// Daniel una config distinta de la suya cuando vuelve a sus escenas normales.
+struct RecetaDeGrabacion: Codable, Equatable {
+    var outputs = StudioOutputs()
+    var canvasMode = StudioCanvasMode.p1080
+    /// Etiqueta que viaja al manifest: le dice a la edición "esta sesión trae
+    /// capas separadas y son confiables".
+    var preset: String = ""
+
+    /// EL ESTÁNDAR «DOS CARAS», con sus números medidos el 28 ago 2026.
+    ///
+    /// El lienzo va a 1080 **a propósito, y no es una rebaja de calidad**: con
+    /// las tres salidas activas y el lienzo en 1440 se codifica la pantalla DOS
+    /// VECES a tamaño completo, y eso tumbaba la cámara de 25.00 a 12-15 fps
+    /// (medido, A/B con 4 condiciones). Como la captura ya NO está atada al
+    /// lienzo (ver `StudioEngine.captureSize`), `screen.mp4` conserva sus
+    /// 2560×1440 completos y lo único que baja es el PROGRAMA, que aquí es el
+    /// proxy de revisión: el máster de verdad se compone después desde las
+    /// capas, a resolución completa.
+    static var dosCaras: RecetaDeGrabacion {
+        var r = RecetaDeGrabacion()
+        r.outputs.rawScreen = true
+        r.outputs.rawCamera = true
+        r.outputs.program = true
+        r.canvasMode = .p1080
+        r.preset = "dos-caras"
+        return r
     }
 }
 
@@ -324,6 +366,19 @@ struct StudioConfig: Codable {
     /// la exportación. Reversible con un clic en Ajustes → Video.
     var canvasFixApplied = false
 
+    // MARK: - «Dos Caras» (28 ago 2026)
+
+    /// La config de Daniel, guardada mientras una escena CON RECETA está activa.
+    /// Se persiste a propósito: si la app se cierra dentro de «Dos Caras», al
+    /// volver se le devuelve SU config, no la de la receta.
+    var baseOutputs: StudioOutputs?
+    var baseCanvasMode: StudioCanvasMode?
+    /// Migración única: se van «Completa» y «Lado a lado» (firmadas por Daniel
+    /// el 28 ago: *"nunca las uso… si quiero solo quito el ojito de mi cámara"*)
+    /// y entra «Dos Caras». Un generador solo es dueño de lo que él firmó: las
+    /// escenas que Daniel ajustó a mano NO se tocan.
+    var dosCarasFixApplied = false
+
     static let file = AppSettings.dir.appendingPathComponent("scenes.json")
 
     init(scenes: [StudioScene], activeSceneID: UUID?) {
@@ -345,6 +400,15 @@ struct StudioConfig: Codable {
         weightFixApplied = try c.decodeIfPresent(Bool.self, forKey: .weightFixApplied) ?? false
         canvasFixApplied = try c.decodeIfPresent(Bool.self, forKey: .canvasFixApplied) ?? false
         mirrorEnabled = try c.decodeIfPresent(Bool.self, forKey: .mirrorEnabled) ?? false
+        // ⛔ ESTE DECODER ES A MANO: un campo nuevo que no se añada aquí SE
+        // ESCRIBE EN DISCO Y SE IGNORA AL LEER, en silencio. Pasó el 28 ago con
+        // los tres de abajo: el punto de retorno de la receta se guardaba y
+        // nunca se leía (el lienzo 1440 de Daniel no volvía), y la migración
+        // se re-ejecutaba en cada arranque — solo la salvó ser idempotente.
+        // Si agregas un `var` arriba, agrégalo TAMBIÉN aquí.
+        baseOutputs = try c.decodeIfPresent(StudioOutputs.self, forKey: .baseOutputs)
+        baseCanvasMode = try c.decodeIfPresent(StudioCanvasMode.self, forKey: .baseCanvasMode)
+        dosCarasFixApplied = try c.decodeIfPresent(Bool.self, forKey: .dosCarasFixApplied) ?? false
     }
 
     /// true si `load()` acaba de aplicar la migración de peso (la UI lo avisa
@@ -354,6 +418,7 @@ struct StudioConfig: Codable {
     /// grabaciones sin decírselo sería exactamente el "degradar en silencio"
     /// que causó todos los bugs anteriores del Estudio.
     static private(set) var canvasFixJustApplied = false
+    static private(set) var dosCarasFixJustApplied = false
 
     static func load() -> StudioConfig {
         if let data = try? Data(contentsOf: file),
@@ -384,6 +449,47 @@ struct StudioConfig: Codable {
                 }
                 cfg.save()
             }
+            // RESTAURAR LA CONFIG DE DANIEL si la app se cerró dentro de una
+            // escena con receta. El controller vuelve a aplicarla si la escena
+            // activa la tiene; lo que NUNCA puede pasar es que una receta se
+            // quede pegada como si fuera su configuración.
+            if let base = cfg.baseOutputs {
+                cfg.outputs = base
+                if let c = cfg.baseCanvasMode { cfg.canvasMode = c }
+                cfg.baseOutputs = nil
+                cfg.baseCanvasMode = nil
+                Log.info("Estudio: config de Daniel restaurada tras una sesión con receta.")
+                cfg.save()
+            }
+            // MIGRACIÓN «DOS CARAS» (28 ago 2026) — firmada por Daniel.
+            //
+            // Se van las DOS que él nombró y entra la nueva. Nada más se toca:
+            // sus escenas llevan rects que ajustó a mano en el canvas y esos
+            // números son suyos (regla del generador que no arrasa la superficie
+            // compartida). Idempotente por la bandera Y por nombre, y tolerante
+            // a que ya las hubiera borrado él.
+            if !cfg.dosCarasFixApplied {
+                cfg.dosCarasFixApplied = true
+                let antes = cfg.scenes.count
+                let activaEra = cfg.activeSceneID
+                cfg.scenes.removeAll { escenasRetiradas.contains($0.name) }
+                let quitadas = antes - cfg.scenes.count
+                if !cfg.scenes.contains(where: { $0.name == nombreDosCaras }) {
+                    // Clona la burbuja que Daniel ya usa: así el programa de
+                    // «Dos Caras» es el mismo que el de su escena de siempre.
+                    let modelo = cfg.scenes.first(where: { $0.name == "Burbuja derecha" })?.items
+                    cfg.scenes.insert(dosCarasScene(items: modelo), at: 0)
+                }
+                if cfg.scenes.isEmpty { cfg = defaultConfig() }
+                if activaEra == nil || !cfg.scenes.contains(where: { $0.id == activaEra }) {
+                    cfg.activeSceneID = cfg.scenes.first?.id
+                }
+                Self.dosCarasFixJustApplied = quitadas > 0
+                Log.info("Estudio: migración «Dos Caras» — \(quitadas) escena(s) retirada(s), "
+                         + "escena nueva con su receta de grabación. Escenas: "
+                         + cfg.scenes.map(\.name).joined(separator: " · "))
+                cfg.save()
+            }
             return cfg
         }
         let cfg = defaultConfig()
@@ -404,9 +510,6 @@ struct StudioConfig: Codable {
     /// gemela del modo Loom POR COMPOSICIÓN (pantalla + burbuja circular, sin
     /// burn-in: la cámara sigue siendo pista separada y editable).
     static func defaultConfig() -> StudioConfig {
-        let completa = StudioScene(name: "Completa", items: [
-            SceneItem(kind: .screen),
-        ])
         // Burbuja abajo-izquierda, proporción de la burbuja M del Loom.
         let loom = StudioScene(name: "Loom", items: [
             SceneItem(kind: .screen),
@@ -417,15 +520,30 @@ struct StudioConfig: Codable {
         let camSolo = StudioScene(name: "Mi cámara solo", items: [
             SceneItem(kind: .camera),
         ])
-        let ladoALado = StudioScene(name: "Lado a lado", items: [
-            SceneItem(kind: .screen, rect: CGRect(x: 0, y: 0, width: 0.62, height: 1), fit: .fit),
-            SceneItem(kind: .camera, rect: CGRect(x: 0.62, y: 0.15, width: 0.38, height: 0.7)),
-        ])
-        var cfg = StudioConfig(scenes: [completa, loom, camSolo, ladoALado],
+        var cfg = StudioConfig(scenes: [dosCarasScene(items: nil), loom, camSolo],
                                activeSceneID: nil)
         cfg.activeSceneID = loom.id
+        cfg.dosCarasFixApplied = true
         return cfg
     }
+
+    /// La escena «Dos Caras». Si se le pasan los items de la burbuja que Daniel
+    /// YA usa, los clona: así el programa que sale de aquí es el mismo que el
+    /// de su escena de siempre, y la feature no tiene downside ni en el peor caso.
+    static func dosCarasScene(items: [SceneItem]?) -> StudioScene {
+        let geo = items ?? [
+            SceneItem(kind: .screen),
+            SceneItem(kind: .camera,
+                      rect: CGRect(x: 0.7966, y: 0.0086, width: 0.2235, height: 0.3199),
+                      fit: .fill, circleMask: true),
+        ]
+        return StudioScene(name: nombreDosCaras,
+                           items: geo.map { var i = $0; i.id = UUID(); return i },
+                           receta: .dosCaras)
+    }
+    static let nombreDosCaras = "Dos Caras"
+    /// Las dos que Daniel firmó quitar el 28 ago 2026.
+    static let escenasRetiradas = ["Completa", "Lado a lado"]
 }
 
 // MARK: - Manifest de sesión (el contrato con la edición agéntica / SFStudio)
@@ -440,6 +558,54 @@ struct StudioManifest: Codable {
         var durationSeconds: Double?
         var width: Int?
         var height: Int?
+
+        // MARK: - LA VERDAD DE ESTA PISTA (v3, 28 ago 2026)
+        //
+        // Sin estos cuatro campos, componer las capas en post es adivinar. El
+        // método que estaba documentado —derivar el desfase de que todos los
+        // archivos terminan juntos— se midió el 28 ago y falla: daba 2.23 s
+        // donde el real era 1.63 (18 frames a 30 fps), porque la cámara cierra
+        // ANTES que el programa.
+
+        /// Cuándo empezó ESTE archivo respecto al t=0 de la sesión (el primer
+        /// frame del programa), en segundos. MEDIDO sobre el reloj host que
+        /// comparten SCK y AVCapture — jamás derivado del cierre.
+        /// Para alinear: `tProgramaEnSegundos = tDeEsteArchivo + startOffsetSeconds`.
+        var startOffsetSeconds: Double?
+        /// Frames que de verdad quedaron en el archivo ÷ su duración. El número
+        /// real, no el configurado.
+        var effectiveFps: Double?
+        /// Cadencia que la FUENTE entregaba (del intervalo modal entre frames).
+        /// Separado de `effectiveFps` a propósito: la diferencia entre "la
+        /// fuente manda menos" y "nosotros tiramos" costó medio día y cuatro
+        /// hipótesis falsas el 27 ago. Con los dos números, no se vuelve a pagar.
+        var sourceFps: Double?
+        /// true = los intervalos entre frames NO son constantes. El raw de
+        /// pantalla lo es SIEMPRE (SCK no manda frames si nada cambia) y quien
+        /// componga contra él tiene que normalizarlo antes.
+        var variableFrameRate: Bool?
+        /// Qué fracción de los intervalos cae en la cadencia modal. Bajo 0.95
+        /// significa frames perdidos: es el sensor que faltaba el 28 ago, cuando
+        /// la cámara escribía 19 fps de una fuente que mandaba 25 limpios.
+        var cadenceHealth: Double?
+        /// Cómo se obtuvo `startOffsetSeconds`: `audio` (correlación del mismo
+        /// micrófono en las dos pistas — el bueno), `reloj` (reconstruido del
+        /// host clock, ±3 frames) u `origen` (esta pista ES el t=0). Va escrito
+        /// porque un número sin su procedencia invita a confiar en él más de lo
+        /// que aguanta.
+        var startOffsetMethod: String?
+        /// CUÁNTO PUEDE ESTAR MAL este offset, en segundos. No es humildad
+        /// decorativa: para un `.mov` con edit list, "el desfase" depende del
+        /// DECODIFICADOR que lo lea. Medido el 28 ago, AVFoundation (que honra
+        /// la edit list) y ffmpeg difieren en un valor CONSTANTE de 44 ms —
+        /// 2112 muestras a 48 kHz, exactamente el retardo de codificación de
+        /// AAC, que cada uno compensa a su manera.
+        ///
+        /// Por eso el número de aquí acerca a ~1.5 frames y NO pretende ser el
+        /// final. Quien componga con ffmpeg debe refinarlo en los términos de su
+        /// propio decodificador: `scripts/refinar-offset.py` lo hace en un
+        /// segundo, y esa es la cifra que se usa para alinear de verdad.
+        var startOffsetUncertaintySeconds: Double?
     }
     struct SceneSwitch: Codable {
         var t: Double           // segundos desde el inicio de la grabación
@@ -502,7 +668,7 @@ struct StudioManifest: Codable {
         var targetFps: Int      // a cuánto se le pidió
     }
 
-    var schemaVersion = 2
+    var schemaVersion = 3
     var id: String
     var kind = "studio"
     var startedAt: String
@@ -527,6 +693,10 @@ struct StudioManifest: Codable {
     /// audio empieza a ciegas: el Shure de Daniel cambia de formato entre
     /// arranques y el sistema tiene cuatro entradas candidatas.
     var micDevice: String?
+    /// Receta con la que se grabó, si la escena activa traía una ("dos-caras").
+    /// Es la señal para la edición de que esta sesión trae CAPAS separadas y
+    /// alineables, en vez de un solo programa horneado.
+    var preset: String?
     /// Muestras de micrófono escritas. **Si es 0, la grabación NO TIENE VOZ** —
     /// y el editor tiene que saberlo antes de invertir una hora en cortarla.
     var micSamples: Int = 0

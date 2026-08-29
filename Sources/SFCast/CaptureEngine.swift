@@ -230,7 +230,16 @@ final class OnceFlag: @unchecked Sendable {
 final class SegmentDelegate: NSObject, SCRecordingOutputDelegate, @unchecked Sendable {
     @objc dynamic private(set) var finished = false
 
-    func recordingOutputDidStartRecording(_ output: SCRecordingOutput) {}
+    /// Instante host en que el writer abrió el archivo de verdad. Hermano del
+    /// de `CamFileDelegate`, y por el mismo motivo: el offset de una pista se
+    /// mide cuando EMPIEZA A ESCRIBIR, no cuando se le pide que empiece.
+    private let startLock = NSLock()
+    private var _startedHost: Double?
+    var startedHost: Double? { startLock.lock(); defer { startLock.unlock() }; return _startedHost }
+
+    func recordingOutputDidStartRecording(_ output: SCRecordingOutput) {
+        startLock.lock(); _startedHost = CACurrentMediaTime(); startLock.unlock()
+    }
 
     func recordingOutput(_ output: SCRecordingOutput, didFailWithError error: Error) {
         Log.error("SCRecordingOutput falló: \(error.localizedDescription)")

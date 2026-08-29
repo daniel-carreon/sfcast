@@ -265,6 +265,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusBar.setup()
+        // Una marca de rodaje huérfana (sesión anterior muerta a lo bruto) dejaría
+        // a El Set sin recargarse nunca. Al arrancar no se está grabando: se limpia.
+        MarcaDeRodaje.limpiarAlArrancar()
         Log.info("SFCast arriba (demo=\(demo.map(String.init) ?? "no") selftest=\(selftest.map(String.init) ?? "no"))")
         if cliArgs.contains("--glowtest") {
             Task { @MainActor in await StudioController.shared.runGlowTest() }

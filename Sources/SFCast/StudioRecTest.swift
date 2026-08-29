@@ -36,6 +36,24 @@ enum StudioRecTest {
             Log.error("RECTEST_FAIL sin fuentes (ni pantalla ni cámara)")
             exit(3)
         }
+        // ⛔⛔ `--noprogram` — EL CASO QUE COSTÓ CINCO TOMAS (28 ago 2026).
+        //
+        //     Daniel apagó la salida «Programa» y grabó. Las cinco tomas murieron a los ~20 s
+        //     con "no entraba tu voz", hablando, con el vúmetro marcando nivel. El guard de voz
+        //     leía `sink.micSamples` — un contador del writer del programa — así que con esa
+        //     salida apagada valía 0 para siempre y el auto-stop era inevitable.
+        //
+        //     ⭐ ESTE GATE ES EL INVERSO DE `--mutemic`: allá el éxito es que el guard CORTE;
+        //        aquí el éxito es que NO corte. Sin él, el arreglo no tiene quien lo defienda:
+        //        `--mutemic` corta el audio en el propio delegate, o sea que mata el vúmetro Y el
+        //        contador a la vez, y por eso nunca pudo ejercer este caso — vúmetro vivo con el
+        //        contador en cero. Era un hueco de cobertura, no mala suerte.
+        var config = config
+        if CommandLine.arguments.contains("--noprogram") {
+            config.outputs.program = false
+            Log.info("RECTEST --noprogram: salida «Programa» APAGADA a propósito. "
+                     + "La toma DEBE llegar entera; si un guard la detiene, es FALLO.")
+        }
         do {
             try recorder.start(engine: engine, config: config, activeScene: scene)
             // Mismo camino que el botón: los atajos viven solo durante la toma,
@@ -102,6 +120,15 @@ enum StudioRecTest {
             // detuvo la toma él solo antes de que el test lo pidiera. Un gate
             // que confunde "el sujeto se protegió" con "el sujeto falló" enseña
             // a ignorar los rojos.
+            // ⛔ PRIMERO, ANTES DE CUALQUIER "un guard la detuvo = éxito": con --noprogram
+            //    que un guard la detenga es EXACTAMENTE el bug. Un gate que trata la detención
+            //    como éxito por defecto convertiría este fallo en verde.
+            if CommandLine.arguments.contains("--noprogram") {
+                Log.error("RECTEST_FAIL --noprogram: un guard DETUVO la toma "
+                          + "(\(recorder.lastAutoStopReason ?? "sin razón registrada")). "
+                          + "Con «Programa» apagado la grabación tiene que llegar entera.")
+                exit(1)
+            }
             if CommandLine.arguments.contains("--mutemic") {
                 Log.info("RECTEST ✓ EL GUARD DE VOZ DETUVO LA GRABACIÓN SOLO — "
                          + "eso es exactamente lo que tenía que pasar")
@@ -129,6 +156,43 @@ enum StudioRecTest {
         }
 
         // ── verificación contra el ARCHIVO, no contra la intención ──
+
+        // ⛔⛔ `--noprogram`: aquí NO hay `seg-001.mp4` (esa es la configuración bajo prueba),
+        //     así que se verifica lo que sí tiene que existir: las capas crudas, con la toma
+        //     COMPLETA. La pregunta del gate es una sola: ¿llegó a su duración, o algún guard
+        //     la mató como el 28 de agosto?
+        if CommandLine.arguments.contains("--noprogram") {
+            let cam = dir.appendingPathComponent("camera.mov")
+            let scr = dir.appendingPathComponent("screen.mp4")
+            var fallosNP: [String] = []
+            if FileManager.default.fileExists(atPath: dir.appendingPathComponent("seg-001.mp4").path) {
+                fallosNP.append("SE-ESCRIBIÓ-PROGRAMA-CON-LA-SALIDA-APAGADA")
+            }
+            var maxDur = 0.0
+            for u in [cam, scr] where FileManager.default.fileExists(atPath: u.path) {
+                let d = CMTimeGetSeconds((try? await AVURLAsset(url: u).load(.duration)) ?? .zero)
+                Log.info(String(format: "RECTEST --noprogram: %@ dur=%.2fs", u.lastPathComponent, d))
+                maxDur = max(maxDur, d)
+            }
+            if maxDur == 0 { fallosNP.append("SIN-CAPAS-CRUDAS") }
+            // el auto-stop del bug cortaba a los ~20 s: cualquier toma que se quede MUY corta
+            // respecto a lo pedido es el mismo fallo con otro disfraz.
+            if maxDur < Double(seconds) * 0.8 {
+                fallosNP.append(String(format: "TOMA-CORTADA(%.1fs de %ds pedidos)", maxDur, seconds))
+            }
+            if let razon = recorder.lastAutoStopReason {
+                fallosNP.append("UN-GUARD-LA-DETUVO(\(razon))")
+            }
+            if fallosNP.isEmpty {
+                Log.info(String(format: "RECTEST ✓ --noprogram: la toma llegó entera (%.1fs de %ds) "
+                                + "con «Programa» apagado y NINGÚN guard la detuvo", maxDur, seconds))
+                Log.info("RECTEST_OK \(dir.lastPathComponent) (sin programa)")
+                exit(0)
+            }
+            Log.error("RECTEST_FAIL --noprogram: \(fallosNP.joined(separator: " · "))")
+            exit(1)
+        }
+
         let url = dir.appendingPathComponent("seg-001.mp4")
         guard FileManager.default.fileExists(atPath: url.path) else {
             Log.error("RECTEST_FAIL no se escribió seg-001.mp4")

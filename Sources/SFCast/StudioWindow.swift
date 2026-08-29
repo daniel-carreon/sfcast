@@ -62,19 +62,21 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     }() {
         didSet { UserDefaults.standard.set(Double(setPanelWidth), forKey: "studio.setPanelWidth") }
     }
-    /// EL CAJÓN DE LA CÁMARA (22 ago 2026): sfcam deja de ser una app aparte y
-    /// pasa a ser una feature del set. Vive AL LADO de la imagen a propósito —
-    /// cambiar la exposición sin ver el resultado es adivinar.
-    @Published var showCameraPanel = UserDefaults.standard.bool(forKey: "studio.cameraPanelOpen") {
-        didSet { UserDefaults.standard.set(showCameraPanel, forKey: "studio.cameraPanelOpen") }
+    /// LA CÁMARA VIVE EN EL SET, ARRIBA DEL TODO (28 ago 2026).
+    ///
+    /// Estaba en TRES sitios a la vez —la columna del panel inferior, un cajón
+    /// propio a la derecha y la tarjeta del enchufe al fondo de El Set— y Daniel
+    /// los contó uno por uno: *"la cámara es lo principal, ponla la primerita
+    /// hasta arriba a la derecha en el set"*. Ahora es UNA tarjeta, la primera
+    /// del cajón, con lo único que él toca de verdad (ISO) a la vista y todo lo
+    /// demás detrás de «Avanzado». Este flag es ese toggle, y se recuerda.
+    @Published var camAvanzado = UserDefaults.standard.bool(forKey: "studio.camAvanzado") {
+        didSet { UserDefaults.standard.set(camAvanzado, forKey: "studio.camAvanzado") }
     }
-    @Published var cameraPanelWidth: CGFloat = {
-        let w = UserDefaults.standard.double(forKey: "studio.cameraPanelWidth")
-        return (280...520).contains(w) ? CGFloat(w) : 320
-    }() {
-        didSet { UserDefaults.standard.set(Double(cameraPanelWidth), forKey: "studio.cameraPanelWidth") }
+    @Published var isRecording = false {
+        // Mientras rueda, El Set no se repinta solo. Ver MarcaDeRodaje.
+        didSet { MarcaDeRodaje.set(isRecording || RecordingController.shared.state != .idle) }
     }
-    @Published var isRecording = false
 
     // Vúmetro SIN @Published — v2.8. Publicar los niveles a 15 Hz invalidaba
     // la jerarquía SwiftUI COMPLETA (todos los paneles observan este objeto):
@@ -129,6 +131,10 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     /// faltaba el 25 jul: la pantalla se congeló y la app no dijo nada.
     @Published var alert: String?
     @Published var alertCritical = false
+    /// DE QUÉ es la alarma que está pintada ("pantalla", "camara", "microfono").
+    /// Sin esto una alarma crítica —pegajosa a propósito— sobrevive a su causa:
+    /// ver `StudioEngine.onAlertResolved`.
+    private var alertCause: String?
     @Published var freeDiskNote: String?
 
     var testMode = false          // --studiotest: ventana capturable
@@ -196,9 +202,24 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         LauncherPanelController.shared.hide(keepPreview: false)
         RecordingController.shared.bubble.hide()
         if window == nil { buildWindow() }
-        NSApp.setActivationPolicy(.regular)
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        // EL QA NO ROBA EL FOCO (28 ago 2026). `open -g` evita que LaunchServices
+        // traiga la app al frente, pero NO sirve de nada si la app se trae a sí
+        // misma con `NSApp.activate`: las corridas de QA de esta misma sesión se
+        // le aparecieron encima a Daniel mientras trabajaba, que es exactamente
+        // lo que la regla prohíbe. En testMode la ventana se crea y RENDERIZA
+        // igual (medir el camino real es innegociable), pero se queda atrás y
+        // sin foco.
+        if testMode {
+            window?.orderBack(nil)
+        } else {
+            NSApp.setActivationPolicy(.regular)
+            window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        // La receta de la escena activa se aplica ANTES de arrancar el motor:
+        // si Daniel dejó «Dos Caras» seleccionada, tiene que grabar con capas
+        // aunque venga de un arranque en frío (load() restauró su config base).
+        aplicarRecetaAlAbrir()
         if !engine.isRunning {
             engine.onStatusChange = { [weak self] in self?.pullEngineStatus() }
             engine.onPreviewSurface = { [weak self] surface in
@@ -221,8 +242,11 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
             // sin depender de que SFCam.app esté abierta. Lee el último frame ya
             // entregado — NO se mete en el delegate de captura.
             OjoDelEstudio.arrancar { [weak self] in self?.engine.frames.get(.camera) }
-            engine.onAlert = { [weak self] msg, critical in
-                self?.raiseAlert(msg, critical: critical)
+            engine.onAlert = { [weak self] msg, critical, causa in
+                self?.raiseAlert(msg, critical: critical, causa: causa)
+            }
+            engine.onAlertResolved = { [weak self] causa in
+                self?.resolveAlert(causa)
             }
             recorder.onAlert = { [weak self] msg, critical in
                 self?.raiseAlert(msg, critical: critical)
@@ -1200,7 +1224,7 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
 
     /// Sube una alarma a la UI. Las críticas se quedan hasta que la situación
     /// se cure; las buenas se borran solas.
-    func raiseAlert(_ message: String, critical: Bool, sticky: Bool? = nil) {
+    func raiseAlert(_ message: String, critical: Bool, sticky: Bool? = nil, causa: String? = nil) {
         // ⛔ LO NO-CRÍTICO NO SE PINTA (27 ago 2026). Regla de Daniel: *"que dejen
         // de salir estas mierdas... si es tan urgente lo sabré"*. Y tiene razón:
         // este panel vive a un palmo de su cara mientras habla a cámara, y un
@@ -1218,12 +1242,29 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         }
         alert = message
         alertCritical = critical
+        alertCause = causa
         if !(sticky ?? critical) {
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 4_000_000_000)
                 if self.alert == message { self.alert = nil }
             }
         }
+    }
+
+    /// Daniel cerró el aviso a mano. La causa se olvida: si vuelve a pasar,
+    /// vuelve a avisar (si no, el segundo aviso idéntico se comería solo).
+    func dismissAlert() {
+        alert = nil
+        alertCause = nil
+    }
+
+    /// La causa se arregló: se apaga SU alarma (y solo la suya — si mientras
+    /// tanto entró otra más grave, esa se queda).
+    func resolveAlert(_ causa: String) {
+        guard alertCause == causa else { return }
+        Log.info("Estudio: alarma «\(causa)» curada — quito el aviso")
+        alert = nil
+        alertCause = nil
     }
 
     private var tick = 0
@@ -1350,7 +1391,71 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         selectedItemID = nil
         pushActiveScene()
         if let s = activeScene { recorder.sceneSwitched(s) }   // timeline → manifest
+        aplicarRecetaDeEscena()
         config.save()
+    }
+
+    /// LA RECETA DE LA ESCENA (28 ago 2026). Entrar a «Dos Caras» deja las tres
+    /// salidas puestas sin que Daniel toque una casilla; salir le devuelve SU
+    /// configuración. La restauración es tan importante como la aplicación: una
+    /// escena especial que se lleve por delante los ajustes del dueño deja de
+    /// ser una comodidad y pasa a ser una trampa.
+    ///
+    /// Nunca corre GRABANDO: cambiar el lienzo a mitad de una toma reconfigura
+    /// la captura, y el switch de escena en vivo es una función legítima que no
+    /// puede arrastrar ese costo.
+    /// Igual que `aplicarRecetaDeEscena` pero sin tocar el motor (todavía no
+    /// arrancó): solo deja `config` en el estado que la escena activa pide.
+    func aplicarRecetaAlAbrir() {
+        guard !recorder.isRecording, let r = activeScene?.receta else { return }
+        // ⛔ EL PUNTO DE RETORNO SE CAPTURA **DESPUÉS** DEL GUARD, JAMÁS ANTES.
+        //
+        // Al revés se envenena solo: si la config ya venía igual que la receta
+        // (segundo arranque seguido con la escena puesta), el guard salía sin
+        // cambiar nada pero el punto de retorno ya se había guardado… con los
+        // valores de LA PROPIA RECETA. A partir de ahí "restaurar" devolvía la
+        // receta y el lienzo 1440 de Daniel quedaba perdido para siempre.
+        // Cazado el 28 ago comparando una grabación de «Burbuja derecha» que
+        // salió a 1080 cuando debía salir a 1440.
+        guard config.outputs != r.outputs || config.canvasMode != r.canvasMode else { return }
+        if config.baseOutputs == nil {
+            config.baseOutputs = config.outputs
+            config.baseCanvasMode = config.canvasMode
+        }
+        config.outputs = r.outputs
+        config.canvasMode = r.canvasMode
+        config.save()
+        Log.info("Estudio: receta de «\(activeScene?.name ?? "?")» aplicada al abrir.")
+    }
+
+    func aplicarRecetaDeEscena() {
+        guard !recorder.isRecording else { return }
+        let antesOut = config.outputs
+        let antesCanvas = config.canvasMode
+        if let r = activeScene?.receta {
+            // El punto de retorno solo se toma si de verdad vamos a cambiar
+            // algo — ver el porqué en `aplicarRecetaAlAbrir`.
+            if config.baseOutputs == nil,
+               config.outputs != r.outputs || config.canvasMode != r.canvasMode {
+                config.baseOutputs = config.outputs
+                config.baseCanvasMode = config.canvasMode
+            }
+            config.outputs = r.outputs
+            config.canvasMode = r.canvasMode
+        } else if let base = config.baseOutputs {
+            config.outputs = base
+            if let c = config.baseCanvasMode { config.canvasMode = c }
+            config.baseOutputs = nil
+            config.baseCanvasMode = nil
+        }
+        guard config.outputs != antesOut || config.canvasMode != antesCanvas else { return }
+        Log.info("Estudio: receta de «\(activeScene?.name ?? "?")» → "
+                 + "salidas=[raw:\(config.outputs.rawScreen) cam:\(config.outputs.rawCamera) "
+                 + "prog:\(config.outputs.program)] lienzo=\(config.canvasMode.rawValue)")
+        Task {
+            await engine.applyLive(config: config)
+            pullEngineStatus()
+        }
     }
 
     func addScene() {
@@ -2211,18 +2316,13 @@ struct StudioRootView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(StudioSkin.panelBorder))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                // SIMETRÍA estilo Streamlabs: 5 columnas de ancho IGUAL, sin huecos.
+                // SIMETRÍA estilo Streamlabs: 4 columnas de ancho IGUAL, sin huecos.
+                // La cámara ya no es una de ellas (28 ago): se fue entera a la
+                // tarjeta de arriba de El Set. Aquí abajo queda el rodaje.
                 HStack(spacing: 10) {
                     ScenesPanel().frame(maxWidth: .infinity)
                     SourcesPanel().frame(maxWidth: .infinity)
                     MixerPanel().frame(maxWidth: .infinity)
-                    // La columna de cámara SOLO cuando el cajón está cerrado.
-                    // Con el cajón abierto era lo mismo dos veces en pantalla
-                    // (Daniel lo cazó al verlo). Cerrando el cajón no se pierde:
-                    // la columna vuelve con lo esencial.
-                    if !c.showCameraPanel {
-                        CameraPanel().frame(maxWidth: .infinity)
-                    }
                     OutputsPanel().frame(maxWidth: .infinity)
                 }
                 .frame(height: 235)
@@ -2231,19 +2331,20 @@ struct StudioRootView: View {
             // luces/Pixoo sin salir del Estudio, incluso grabando. En su ancho
             // el panel cae solo en su layout de teléfono (una columna), y el
             // resizer recuerda la última posición.
-            if c.showCameraPanel {
-                CameraResizeHandle()
-                CameraDrawer()
-                    .frame(width: c.cameraPanelWidth)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(StudioSkin.panelBorder))
-            }
             if c.showSetPanel {
                 SetResizeHandle()
-                SetPanelDrawer()
-                    .frame(width: c.setPanelWidth)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(StudioSkin.panelBorder))
+                VStack(spacing: 10) {
+                    // LA CÁMARA, PRIMERO. Nativa a propósito: reusa el motor que
+                    // ya sabe abrir por el espejo de disco sin tocar el USB, medir
+                    // la cara con el frame que YA está entrando y no fingir que un
+                    // dato viejo es fresco. El panel web de abajo sigue siendo la
+                    // única implementación de las luces.
+                    SetCameraCard()
+                    SetPanelDrawer()
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(StudioSkin.panelBorder))
+                }
+                .frame(width: c.setPanelWidth)
             }
         }
         .padding(12)
@@ -2294,7 +2395,7 @@ struct StudioRootView: View {
             Text(msg).font(.system(size: 12, weight: .medium))
             Spacer()
             Button {
-                c.alert = nil
+                c.dismissAlert()
             } label: { Image(systemName: "xmark").font(.system(size: 9)) }
                 .buttonStyle(.plain)
         }
@@ -2330,17 +2431,6 @@ struct StudioRootView: View {
             }
             Spacer()
             Button {
-                c.showCameraPanel.toggle()
-            } label: {
-                Image(systemName: "camera.aperture")
-                    .foregroundStyle(c.showCameraPanel ? StudioSkin.mostaza : StudioSkin.dim)
-                    .padding(.horizontal, 8).padding(.vertical, 4)
-                    .background(StudioSkin.panel)
-                    .clipShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .help("Controles de la cámara: ISO, obturación, apertura, balance, enfoque y formato — sin salir del Estudio")
-            Button {
                 c.showSetPanel.toggle()
             } label: {
                 Image(systemName: "lightbulb.max.fill")
@@ -2350,7 +2440,7 @@ struct StudioRootView: View {
                     .clipShape(Capsule())
             }
             .buttonStyle(.plain)
-            .help("EL SET: luces, Pixoo y cámara del panel :8088, embebido — funciona también grabando")
+            .help("EL SET: la cámara (ISO y todo lo demás), luces, Pixoo y micro — funciona también grabando")
             Button {
                 c.showSettings = true
             } label: {

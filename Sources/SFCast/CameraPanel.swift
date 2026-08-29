@@ -1,8 +1,15 @@
-/// PANEL CÁMARA — la Sony ZV-E10 se opera DENTRO del Estudio.
+/// LA CÁMARA — la Sony ZV-E10 se opera DENTRO del Estudio, en UNA tarjeta.
 ///
 /// Por qué vive aquí y no en una app aparte: SFCast ya tiene la vista de la
 /// cámara, ya es donde se graba, y durante una toma cambiar de ventana para
 /// corregir el ISO no es una opción. Una superficie menos que atender.
+///
+/// Y por qué UNA (28 ago 2026): llegó a estar en TRES a la vez —columna del
+/// panel inferior, cajón propio a la derecha y la tarjeta del enchufe al fondo
+/// de El Set—. Daniel las contó: *"hay tres lugares donde tenemos la cámara
+/// conectada... la cámara es lo principal, ponla la primerita hasta arriba a la
+/// derecha en el set"*. Quedó `SetCameraCard`, la primera tarjeta del cajón,
+/// con el ISO a la vista y todo lo demás detrás de «Avanzado».
 ///
 /// Cómo habla con la cámara: llamando al CLI `sfcam` (repo `sfcam`, control por
 /// PTP sobre libgphoto2). NO se duplica el motor aquí — ese motor tiene su
@@ -44,11 +51,24 @@ enum SFCam {
         let opciones: [String]
         let grupo: String
         let editable: Bool
+        /// RADIO / MENU / RANGE, tal cual lo manda el CLI. `temp` (temperatura
+        /// de color) es RANGE y llega SIN opciones: si no se mira el tipo, la
+        /// fila cae en el camino de "no editable" y el control desaparece.
+        let tipo: String
         /// Su valor es un CÓDIGO que nadie tradujo. Se muestra aparte y
         /// avisando: bautizar un código con un nombre inventado es fabricar
         /// un dato, y aquí se toman decisiones con lo que dice la pantalla.
         let crudo: Bool
         var id: String { clave }
+
+        var esRango: Bool { tipo == "RANGE" }
+        /// Cuánto mueve un ±. La ZV-E10 solo acepta múltiplos de 100 en la
+        /// temperatura de color: MEDIDO el 28 ago —`set temp 4350` reintentó
+        /// seis veces y la cámara se quedó en 4300—, así que el botón nunca
+        /// pide un valor que ella va a rechazar.
+        var paso: Int { clave == "temp" ? 100 : 1 }
+        var minimo: Int { clave == "temp" ? 2500 : 0 }
+        var maximo: Int { clave == "temp" ? 9900 : 1_000_000 }
     }
 
     struct Estado {
@@ -107,6 +127,27 @@ enum SFCam {
         return parsear(correr(args, timeout: 90))
     }
 
+    /// Solo estas claves, de la cámara real. Un parpadeo corto y dirigido.
+    static func leerCamara(claves: [String]) -> Estado {
+        parsear(correr(["status", "--json", "--keys", claves.joined(separator: ",")], timeout: 90))
+    }
+
+    /// PROPIEDADES QUE ABREN O CIERRAN A OTRAS (medido el 28 ago 2026).
+    ///
+    /// El balance de blancos manda sobre la temperatura de color: con cualquier
+    /// preajuste (Daylight, Fluorescent…) la ZV-E10 devuelve `colortemperature`
+    /// con `Readonly: 1`, y solo la abre en «Choose Color Temperature».
+    ///
+    /// EL PROBLEMA MEDIDO: `sfcam set wb X` actualiza el espejo de `wb`, pero
+    /// deja el `readonly` de `temp` como estaba. O sea que la app ponía el
+    /// balance correcto y seguía pintando la temperatura como intocable —
+    /// para siempre, porque nadie volvía a leerla. Daniel: *"se cambia si
+    /// modifico el balance de blancos, pero la temperatura no cambia"*.
+    ///
+    /// Por eso, y SOLO en estos casos, se paga un parpadeo extra: escribir la
+    /// clave de la izquierda obliga a releer las de la derecha en la cámara.
+    static let dependientes: [String: [String]] = ["wb": ["wb", "temp"]]
+
     /// Devuelve nil si salió bien, o el motivo del fallo.
     static func escribir(_ clave: String, _ valor: String) -> String? {
         let salida = correr(["set", clave, valor], timeout: 150)
@@ -154,6 +195,7 @@ enum SFCam {
                 opciones: (v["choices"] as? [String]) ?? [],
                 grupo: (v["group"] as? String) ?? "Estado",
                 editable: escribible && !soloLectura,
+                tipo: (v["type"] as? String) ?? "",
                 crudo: (v["raw"] as? Bool) ?? false
             ))
         }
@@ -264,7 +306,23 @@ final class CameraPanelModel: ObservableObject {
             let err = SFCam.escribir(clave, valor)
             // `sfcam set` ya verifica contra la cámara y actualiza el espejo.
             // Releerla aquí sería un parpadeo de más para saber lo que ya sabemos.
-            let r = SFCam.leerEspejo()
+            var r = SFCam.leerEspejo()
+            // …salvo cuando lo que se escribió MANDA sobre otra propiedad: ahí el
+            // espejo se queda con un permiso viejo y el panel bloquea un control
+            // que la cámara ya abrió. Ver `SFCam.dependientes`.
+            if let dep = SFCam.dependientes[clave] {
+                let real = SFCam.leerCamara(claves: dep)
+                if real.conectada {
+                    var props = r.props
+                    for p in real.props {
+                        if let i = props.firstIndex(where: { $0.clave == p.clave }) { props[i] = p }
+                        else { props.append(p) }
+                    }
+                    r = SFCam.Estado(props: props, modelo: real.modelo ?? r.modelo,
+                                     leidoEn: real.leidoEn ?? r.leidoEn, fresco: real.fresco,
+                                     conectada: true, error: nil)
+                }
+            }
             DispatchQueue.main.async {
                 self.enVuelo = nil
                 self.aviso = err
@@ -333,6 +391,8 @@ private struct FilaProp: View {
             Spacer(minLength: 4)
             if m.enVuelo == p.clave {
                 ProgressView().scaleEffect(0.4).frame(width: 12, height: 12)
+            } else if p.editable && p.esRango {
+                RangoProp(m: m, p: p, compacta: compacta)
             } else if p.editable && !p.opciones.isEmpty {
                 Menu {
                     ForEach(p.opciones, id: \.self) { op in
@@ -360,6 +420,56 @@ private struct FilaProp: View {
                     .lineLimit(1)
             }
         }
+    }
+}
+
+/// UN VALOR CONTINUO (la temperatura de color): ± en los pasos que la cámara
+/// acepta, más un menú con las temperaturas de rodaje. No hay lista de opciones
+/// que enseñar —la cámara manda un rango, no un catálogo—, así que sin esto la
+/// fila salía como texto muerto: se veía el número y no se podía tocar. Fue el
+/// segundo hallazgo del 28 ago (*"no me permite modificar la temperatura de
+/// color manualmente, ¿por qué pasa esto?"*).
+private struct RangoProp: View {
+    @ObservedObject var m: CameraPanelModel
+    let p: SFCam.Prop
+    var compacta = false
+
+    /// Las de rodaje, no una escala de física: tungsteno, halógena, día,
+    /// nublado, sombra. Son las que se piden de verdad delante de una cámara.
+    private static let deRodaje = [3200, 4300, 5600, 6500, 7500]
+
+    var body: some View {
+        HStack(spacing: 5) {
+            boton("minus") { mover(-p.paso) }
+            Menu {
+                ForEach(Self.deRodaje, id: \.self) { k in
+                    Button("\(k) K") { m.aplicar(p.clave, "\(k)") }
+                }
+            } label: {
+                Text(p.valor)
+                    .font(.system(size: compacta ? 10.5 : 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(m.e.fresco ? StudioSkin.text : StudioSkin.dim)
+            }
+            .menuStyle(.borderlessButton).fixedSize().disabled(m.ocupado)
+            boton("plus") { mover(p.paso) }
+        }
+    }
+
+    private func boton(_ icono: String, _ accion: @escaping () -> Void) -> some View {
+        Button(action: accion) {
+            Image(systemName: icono).font(.system(size: 8, weight: .bold))
+                .frame(width: 15, height: 15)
+                .background(Color.white.opacity(0.07))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+        }
+        .buttonStyle(.plain).foregroundStyle(StudioSkin.dim).disabled(m.ocupado)
+    }
+
+    private func mover(_ delta: Int) {
+        guard let n = Int(p.valor.filter(\.isNumber)) else { return }
+        let v = min(max(n + delta, p.minimo), p.maximo)
+        guard v != n else { return }
+        m.aplicar(p.clave, "\(v)")
     }
 }
 
@@ -439,203 +549,292 @@ private struct PieLectura: View {
     }
 }
 
-// MARK: - la columna del Estudio (compacta)
+// MARK: - el enchufe de la cámara (Shelly, vía el panel del Set)
 
-/// Lo que se mira de reojo mientras se graba. Todo lo demás vive en el cajón.
-struct CameraPanel: View {
-    @ObservedObject private var m = CameraPanelModel.shared
-    @EnvironmentObject var c: StudioController
+/// LA CORRIENTE DE LA ZV-E10. Vivía en una tarjeta propia al FONDO de El Set,
+/// llamada también "Cámara" — el tercer sitio donde aparecía la cámara. Se sube
+/// aquí porque es lo primero que se hace cuando pone *sin conexión*: la Sony
+/// vive con dummy battery y este enchufe es su apagón real (0 W, no standby);
+/// al llegarle corriente fresca arranca sola.
+///
+/// Habla por el MISMO proxy que el panel web (`:8088/api/shelly/...`): el
+/// adaptador sigue siendo uno solo, esto es otro mando sobre el mismo aparato.
+@MainActor
+final class EnchufeCamara: ObservableObject {
+    static let shared = EnchufeCamara()
 
-    private static let enColumna = ["iso", "shutter", "aperture", "wb", "focusarea", "formato"]
+    @Published private(set) var encendido: Bool?      // nil = todavía no se sabe
+    @Published private(set) var watts: Double?
+    @Published private(set) var ocupado = false
 
-    var body: some View {
-        PanelBox(title: "Cámara") {
-            if !SFCam.disponible {
-                Text("sfcam no está instalado")
-                    .font(.system(size: 11)).foregroundStyle(StudioSkin.dim)
-            } else {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(m.e.props.filter { CameraPanel.enColumna.contains($0.clave) }) { p in
-                        FilaProp(m: m, p: p, compacta: true)
-                    }
+    private var reloj: Timer?
+    private init() {}
 
-                    if m.e.props.isEmpty && !m.leyendo {
-                        Text(m.e.error ?? "Pulsa ↻ para leer la cámara.\nLeerla le apaga la imagen un segundo, así que no se hace sola.")
-                            .font(.system(size: 10.5)).foregroundStyle(StudioSkin.dim)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    AvisosCamara(e: m.e)
-                    if let a = m.aviso, !m.e.props.isEmpty {
-                        Text(a).font(.system(size: 9)).foregroundStyle(StudioSkin.mostaza)
-                            .lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                    }
-
-                    Spacer(minLength: 0)
-
-                    HStack(spacing: 8) {
-                        PieLectura(m: m, completo: false)
-                        Spacer(minLength: 0)
-                        Button { c.showCameraPanel = true } label: {
-                            Image(systemName: "slider.horizontal.3").font(.system(size: 10))
-                        }
-                        .buttonStyle(.plain).foregroundStyle(StudioSkin.dim)
-                        .help("Todos los controles de la cámara")
-                    }
-                }
-            }
+    /// Mientras la tarjeta está a la vista, el interruptor se refresca solo cada
+    /// 20 s. Es LAN y no le cuesta un parpadeo a nadie (esto NO es la cámara);
+    /// sin esto, apagar el enchufe desde el iPhone dejaba aquí un interruptor
+    /// mintiendo. Al desaparecer la tarjeta se para: nada late sin público.
+    func mirar() {
+        leer()
+        reloj?.invalidate()
+        reloj = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.leer() }
         }
-        // NO se lee al abrir: el espejo de disco ya está cargado y cada lectura
-        // le cuesta un parpadeo a la imagen que se está grabando.
+    }
+
+    func dejarDeMirar() { reloj?.invalidate(); reloj = nil }
+
+    func leer() { pedir("/api/shelly/status") }
+    func alternar() { pedir(encendido == true ? "/api/shelly/off" : "/api/shelly/on") }
+
+    private func pedir(_ ruta: String) {
+        guard !ocupado, let url = URL(string: "http://127.0.0.1:8088" + ruta) else { return }
+        ocupado = true
+        var r = URLRequest(url: url)
+        r.timeoutInterval = 8
+        r.cachePolicy = .reloadIgnoringLocalCacheData
+        URLSession.shared.dataTask(with: r) { [weak self] data, _, _ in
+            let d = data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+            Task { @MainActor in
+                guard let self else { return }
+                self.ocupado = false
+                // Sin respuesta NO se inventa un estado: se queda en "no sé".
+                // Un enchufe que no contesta pintado como "apagado" es el mismo
+                // error que un cero en un sensor que no midió.
+                guard let d, (d["ok"] as? Bool) == true else { self.encendido = nil; return }
+                self.encendido = d["on"] as? Bool
+                self.watts = d["watts"] as? Double
+            }
+        }.resume()
     }
 }
 
-// MARK: - el cajón completo
+// MARK: - LA tarjeta de la cámara (la primera de El Set)
 
-/// TODO lo que la cámara deja tocar, agrupado como se piensa en un rodaje.
-/// Vive al lado de la imagen a propósito: cambiar la exposición sin ver el
-/// resultado es adivinar.
-struct CameraDrawer: View {
+/// UNA sola superficie para la ZV-E10, arriba del todo en El Set.
+///
+/// Antes eran TRES (columna del panel inferior + cajón propio + tarjeta del
+/// enchufe al fondo del Set) y Daniel las contó una por una el 28 ago:
+/// *"hay tres lugares donde tenemos la cámara conectada... la cámara es lo
+/// principal, ponla la primerita hasta arriba a la derecha en el set"*.
+///
+/// QUÉ SE VE SIN ABRIR NADA: lo que él toca de verdad. Sus palabras: *"nunca
+/// toco la configuración, se queda estandarizada; por lo mucho modifico el ISO
+/// dependiendo de la iluminación. El resto casi siempre se queda estático"*.
+/// O sea: ISO, el lazo que lo mueve solo, lo que el ojo mide, y los avisos que
+/// cuestan una toma. Todo lo demás existe y se toca — detrás de «Avanzado».
+struct SetCameraCard: View {
     @ObservedObject private var m = CameraPanelModel.shared
+    @ObservedObject private var enchufe = EnchufeCamara.shared
     @EnvironmentObject var c: StudioController
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            encabezado
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    if !m.e.fresco && !m.e.props.isEmpty { bannerEspejo }
-                    if let a = m.aviso { aviso(a) }
-                    AvisosCamara(e: m.e)
-
-                    if m.e.props.isEmpty {
-                        vacio
-                    } else {
-                        if let b = m.e.valor("battery") { BarraBateria(valor: b) }
-                        loQueVe
-                        atajos
-                        ForEach(SFCam.grupos, id: \.self) { g in seccion(g) }
-                        huerfanas
-                        sinTraducir
-                        nota
-                    }
-                }
-                .padding(12)
+            cabecera
+            if !SFCam.disponible {
+                Text("sfcam no está instalado")
+                    .font(.system(size: 11)).foregroundStyle(StudioSkin.dim)
+                    .padding(10)
+            } else if c.camAvanzado {
+                // Avanzado: scroll propio y techo de altura, para que la tarjeta
+                // no se coma El Set entero.
+                ScrollView { cuerpo(avanzado: true).padding(10) }
+                    .frame(maxHeight: 420)
+            } else {
+                cuerpo(avanzado: false).padding(10)
             }
         }
         .background(StudioSkin.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(StudioSkin.panelBorder))
+        // NO se lee la cámara al aparecer: el espejo de disco ya está cargado y
+        // cada lectura le apaga la imagen 1-4 s. El enchufe sí (es LAN, gratis).
+        .onAppear { enchufe.mirar() }
+        .onDisappear { enchufe.dejarDeMirar() }
     }
 
-    private var encabezado: some View {
-        HStack(spacing: 8) {
+    // MARK: cabecera
+
+    private var cabecera: some View {
+        HStack(spacing: 7) {
             Circle()
                 .fill(m.e.conectada ? (m.e.fresco ? Color(red: 0.25, green: 0.85, blue: 0.45)
                                                   : StudioSkin.mostaza)
                                     : Color.gray)
                 .frame(width: 7, height: 7)
-            Text(m.e.modelo ?? "ZV-E10")
-                .font(.system(size: 12, weight: .semibold)).foregroundStyle(StudioSkin.text)
-            Spacer()
+            Text("Cámara")
+                .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(StudioSkin.text)
+            Text(m.e.conectada ? (m.e.modelo ?? "ZV-E10") : "sin conexión")
+                .font(.system(size: 10)).foregroundStyle(StudioSkin.dim)
+                .lineLimit(1)
+            if let b = m.e.valor("battery"), m.e.conectada {
+                Text(b).font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(bateriaColor(b))
+            }
+            Spacer(minLength: 4)
             if m.ocupado {
-                ProgressView().scaleEffect(0.45).frame(width: 14, height: 14)
+                ProgressView().scaleEffect(0.42).frame(width: 13, height: 13)
             } else {
-                Button { m.refrescar(completo: true) } label: {
+                Button { m.refrescar(completo: c.camAvanzado) } label: {
                     Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 11, weight: m.e.fresco ? .regular : .bold))
+                        .font(.system(size: 10.5, weight: m.e.fresco ? .regular : .bold))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(m.e.fresco ? StudioSkin.dim : StudioSkin.mostaza)
-                .help("Leer TODAS las propiedades de la cámara")
+                .help(m.e.fresco ? "Leer la cámara (le apaga la imagen un segundo)"
+                                 : "Estos valores son de la sesión anterior — pulsa para confirmarlos")
             }
-            Button { c.showCameraPanel = false } label: {
-                Image(systemName: "xmark").font(.system(size: 10))
-            }
-            .buttonStyle(.plain).foregroundStyle(StudioSkin.dim)
+            avanzadoToggle
+            // SIN APARATO NO HAY MANDO (28 ago 2026). El Shelly de la cámara no
+            // está en la LAN —barrido completo del /24 ese día: cero respuestas—
+            // y el interruptor salía gris, sin hacer nada, pareciendo un control
+            // roto de la app. Daniel: *"la cámara no tiene un botón de toggle
+            // para apagar; siempre está activa a menos que la apague
+            // manualmente"*. Si el enchufe no contesta, aquí no hay botón; en
+            // cuanto conteste (se reintenta cada 20 s) vuelve solo.
+            if enchufe.encendido != nil { interruptor }
         }
-        .padding(.horizontal, 12).padding(.vertical, 10)
-        .overlay(Rectangle().frame(height: 1).foregroundStyle(StudioSkin.panelBorder), alignment: .bottom)
+        .padding(.horizontal, 10).padding(.vertical, 9)
+        .overlay(Rectangle().frame(height: 1).foregroundStyle(StudioSkin.panelBorder),
+                 alignment: .bottom)
     }
 
-    private var bannerEspejo: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 11)).foregroundStyle(StudioSkin.mostaza)
-            Text("Valores de la sesión anterior · sin confirmar")
-                .font(.system(size: 10, weight: .semibold)).foregroundStyle(StudioSkin.mostaza)
+    /// ABRE Y CIERRA, y por eso vive en la CABECERA (arreglo del 28 ago). Estaba
+    /// al final del contenido: con «Avanzado» abierto quedaba detrás de un scroll
+    /// de cinco secciones, o sea que se podía abrir y no se podía cerrar —
+    /// Daniel: *"no me permite volver a contraerlo"*. Un interruptor tiene que
+    /// estar en el mismo sitio en los dos estados.
+    private var avanzadoToggle: some View {
+        Button { withAnimation(.easeInOut(duration: 0.16)) { c.camAvanzado.toggle() } } label: {
+            HStack(spacing: 3) {
+                Text("Avanzado").font(.system(size: 9.5, weight: .medium))
+                Image(systemName: c.camAvanzado ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 7.5))
+            }
+            .padding(.horizontal, 6).padding(.vertical, 3)
+            .foregroundStyle(c.camAvanzado ? StudioSkin.mostaza : StudioSkin.dim)
+            .background(c.camAvanzado ? StudioSkin.mostaza.opacity(0.12) : Color.white.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
         }
-        .padding(.horizontal, 9).padding(.vertical, 6)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(StudioSkin.mostaza.opacity(0.11))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .buttonStyle(.plain)
+        .help("Obturación, apertura, balance, temperatura, enfoque, formato y estado")
     }
 
-    private func aviso(_ s: String) -> some View {
-        Text(s).font(.system(size: 10)).foregroundStyle(StudioSkin.mostaza)
-            .fixedSize(horizontal: false, vertical: true)
+    /// El enchufe. Gris cuando no se sabe: no se pinta un estado que no se midió.
+    private var interruptor: some View {
+        Button { enchufe.alternar() } label: {
+            Capsule()
+                .fill(enchufe.encendido == true ? StudioSkin.mostaza : Color.white.opacity(0.12))
+                .frame(width: 30, height: 16)
+                .overlay(
+                    Circle().fill(.white.opacity(enchufe.encendido == nil ? 0.35 : 0.95))
+                        .frame(width: 12, height: 12)
+                        .offset(x: enchufe.encendido == true ? 7 : -7)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(enchufe.ocupado)
+        .help(enchufeAyuda)
+    }
+
+    private var enchufeAyuda: String {
+        switch enchufe.encendido {
+        case .some(true):  return "Corriente de la ZV-E10: ENCENDIDA"
+                                + (enchufe.watts.map { String(format: " · %.1f W medidos", $0) } ?? "")
+        case .some(false): return "Corriente de la ZV-E10: apagada — enciéndela y la cámara arranca sola"
+        case .none:        return "No sé si el enchufe está encendido (no contestó)"
+        }
+    }
+
+    private func bateriaColor(_ v: String) -> Color {
+        let pct = Double(v.replacingOccurrences(of: "%", with: "")) ?? 0
+        return pct > 40 ? Color(red: 0.25, green: 0.85, blue: 0.45)
+                        : (pct > 18 ? StudioSkin.mostaza : .red)
+    }
+
+    // MARK: cuerpo
+
+    @ViewBuilder
+    private func cuerpo(avanzado: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            if m.e.props.isEmpty {
+                vacio
+            } else {
+                if avanzado, let b = m.e.valor("battery") { BarraBateria(valor: b) }
+                filaISO
+                atajos
+                loQueVe
+                AvisosCamara(e: m.e)
+                if avanzado {
+                    ForEach(SFCam.grupos, id: \.self) { g in seccion(g) }
+                    huerfanas
+                    sinTraducir
+                }
+            }
+            if let a = m.aviso {
+                Text(a).font(.system(size: 9.5)).foregroundStyle(StudioSkin.mostaza)
+                    .lineLimit(3).fixedSize(horizontal: false, vertical: true)
+            }
+            pie(avanzado: avanzado)
+        }
     }
 
     private var vacio: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 7) {
             Text(m.e.error ?? "Sin leer todavía")
                 .font(.system(size: 11)).foregroundStyle(StudioSkin.dim)
                 .fixedSize(horizontal: false, vertical: true)
+            if enchufe.encendido == false {
+                Text("El enchufe está apagado: enciéndelo con el interruptor de arriba y la cámara arranca sola.")
+                    .font(.system(size: 10)).foregroundStyle(StudioSkin.mostaza)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Button("Leer la cámara") { m.refrescar(completo: true) }
                 .font(.system(size: 11)).disabled(m.ocupado)
         }
     }
 
-    /// LO QUE VE: la medición de la imagen real, en vivo. Es el único número de
-    /// este panel que NO cuesta un parpadeo — sale del frame que ya está
-    /// entrando, no de preguntarle a la cámara.
+    /// EL ISO, grande. Es LO ÚNICO que Daniel mueve a mano en un rodaje.
     @ViewBuilder
-    private var loQueVe: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("LO QUE VE").font(.system(size: 8, weight: .semibold)).tracking(0.8)
-                .foregroundStyle(StudioSkin.mostaza)
-            if let o = m.ojo, o.hayImagen {
-                HStack(spacing: 10) {
-                    dato("cara", String(format: "%.0f", o.lumCentro), colorCara(o.lumCentro))
-                    dato("quemado", String(format: "%.1f%%", o.clipAlto),
-                         o.clipAlto > 2 ? .red : StudioSkin.dim)
-                    Text(o.veredicto)
-                        .font(.system(size: 9.5, weight: .semibold))
-                        .foregroundStyle(colorCara(o.lumCentro))
+    private var filaISO: some View {
+        if let iso = m.e.props.first(where: { $0.clave == "iso" }) {
+            HStack(spacing: 8) {
+                Text("ISO").font(.system(size: 11, weight: .semibold)).tracking(0.6)
+                    .foregroundStyle(StudioSkin.mostaza)
+                Spacer(minLength: 4)
+                if m.enVuelo == "iso" {
+                    ProgressView().scaleEffect(0.45).frame(width: 14, height: 14)
+                } else if iso.editable && !iso.opciones.isEmpty {
+                    Menu {
+                        ForEach(iso.opciones, id: \.self) { op in
+                            Button(op) { m.aplicar("iso", op) }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(iso.valor)
+                                .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(m.e.fresco ? StudioSkin.text : StudioSkin.dim)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 8)).foregroundStyle(StudioSkin.dim.opacity(0.7))
+                        }
+                    }
+                    .menuStyle(.borderlessButton).fixedSize().disabled(m.ocupado)
+                } else {
+                    Text(iso.valor).font(.system(size: 15, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(StudioSkin.dim)
                 }
-            } else if m.ojo != nil {
-                Text("sin señal de la cámara")
-                    .font(.system(size: 10)).foregroundStyle(.red)
-            } else {
-                Text("el Estudio no está capturando")
-                    .font(.system(size: 10)).foregroundStyle(StudioSkin.dim)
             }
         }
     }
 
-    private func dato(_ etiqueta: String, _ valor: String, _ c: Color) -> some View {
-        HStack(spacing: 3) {
-            Text(etiqueta).font(.system(size: 9)).foregroundStyle(StudioSkin.dim)
-            Text(valor).font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundStyle(c)
-        }
-    }
-
-    /// El rango sano de una cara bien expuesta: 75-110. Salió de calibrar
-    /// contra la luz real de este estudio, no de una tabla.
-    private func colorCara(_ v: Double) -> Color {
-        (75...110).contains(v) ? Color(red: 0.25, green: 0.85, blue: 0.45) : StudioSkin.mostaza
-    }
-
-    /// Las dos cosas que se piden hablando y ahora también se piden con el dedo.
+    /// Las dos cosas que se piden hablando y también con el dedo.
     private var atajos: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("ATAJOS").font(.system(size: 8, weight: .semibold)).tracking(0.8)
-                .foregroundStyle(StudioSkin.mostaza)
-            HStack(spacing: 6) {
-                boton("Exponer a la cara", "wand.and.stars") { m.autoISO() }
-                    .help("Mide la luz de tu cara en la imagen real y mueve el ISO hasta dejarla en rango")
-                if m.e.valor("formato") != "XAVC S 4K" {
-                    boton("4K limpia", "sparkles") { m.aplicar("formato", "XAVC S 4K") }
-                        .help("En XAVC S 4K la cámara apaga sus sobreimpresos sola (medido: bandas 15.6% → 0%)")
-                }
+        HStack(spacing: 6) {
+            boton("Exponer a la cara", "wand.and.stars") { m.autoISO() }
+                .help("Mide la luz de tu cara en la imagen real y mueve el ISO hasta dejarla en rango")
+            if m.e.valor("formato") != "XAVC S 4K" {
+                boton("4K limpia", "sparkles") { m.aplicar("formato", "XAVC S 4K") }
+                    .help("En XAVC S 4K la cámara apaga sus sobreimpresos sola (medido: bandas 15.6% → 0%)")
             }
         }
     }
@@ -656,26 +855,85 @@ struct CameraDrawer: View {
         .disabled(m.ocupado)
     }
 
+    /// LO QUE VE: la medición de la imagen real. El único número de aquí que NO
+    /// cuesta un parpadeo — sale del frame que ya está entrando.
+    @ViewBuilder
+    private var loQueVe: some View {
+        if let o = m.ojo, o.hayImagen {
+            HStack(spacing: 9) {
+                dato("cara", String(format: "%.0f", o.lumCentro), colorCara(o.lumCentro))
+                dato("quemado", String(format: "%.1f%%", o.clipAlto),
+                     o.clipAlto > 2 ? .red : StudioSkin.dim)
+                Text(o.veredicto)
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(colorCara(o.lumCentro))
+                Spacer(minLength: 0)
+            }
+        } else if m.ojo != nil {
+            Text("sin señal de la cámara").font(.system(size: 10)).foregroundStyle(.red)
+        }
+    }
+
+    private func dato(_ etiqueta: String, _ valor: String, _ col: Color) -> some View {
+        HStack(spacing: 3) {
+            Text(etiqueta).font(.system(size: 9)).foregroundStyle(StudioSkin.dim)
+            Text(valor).font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(col)
+        }
+    }
+
+    /// El rango sano de una cara bien expuesta: 75-110. Salió de calibrar contra
+    /// la luz real de este estudio, no de una tabla.
+    private func colorCara(_ v: Double) -> Color {
+        (75...110).contains(v) ? Color(red: 0.25, green: 0.85, blue: 0.45) : StudioSkin.mostaza
+    }
+
     @ViewBuilder
     private func seccion(_ g: String) -> some View {
-        let items = m.e.grupo(g)
+        let items = m.e.grupo(g).filter { !(g == "Exposición" && $0.clave == "iso") }
         if !items.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 7) {
                 Text(g.uppercased())
                     .font(.system(size: 8, weight: .semibold)).tracking(0.8)
                     .foregroundStyle(StudioSkin.mostaza)
                 ForEach(items) { p in FilaProp(m: m, p: p) }
+                if g == "Color" { notaTemperatura }
             }
         }
     }
 
+    /// POR QUÉ LA TEMPERATURA NO SE DEJA TOCAR (28 ago 2026).
+    ///
+    /// No es la app: es la cámara. Con el balance en Daylight (o en cualquier
+    /// preajuste) la ZV-E10 devuelve `colortemperature` con `Readonly: 1`, y solo
+    /// la abre cuando el balance está en «Choose Color Temperature». Medido ese
+    /// día por USB: en Daylight `readonly: true`; al cambiar el balance,
+    /// `readonly: false` y `set temp 5600` entra a la primera.
+    ///
+    /// Así que el panel no se calla ni finge un control muerto: dice el motivo y
+    /// ofrece el único movimiento que lo desbloquea.
+    @ViewBuilder
+    private var notaTemperatura: some View {
+        if let t = m.e.props.first(where: { $0.clave == "temp" }), !t.editable,
+           let wb = m.e.valor("wb"), !wb.lowercased().contains("color temperature") {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("La cámara solo deja mover la temperatura con el balance en «Choose Color Temperature». Ahora está en \(wb).")
+                    .font(.system(size: 9.5)).foregroundStyle(StudioSkin.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+                boton("Poner el balance en temperatura", "thermometer.medium") {
+                    m.aplicar("wb", "Choose Color Temperature")
+                }
+            }
+            .padding(.top, 1)
+        }
+    }
 
     /// El candado hecho pantalla: si algo no cayó en su grupo, sale aquí.
     @ViewBuilder
     private var huerfanas: some View {
         let items = m.e.huerfanas
         if !items.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 7) {
                 Text("SIN CLASIFICAR").font(.system(size: 8, weight: .semibold)).tracking(0.8)
                     .foregroundStyle(.red)
                 ForEach(items) { p in FilaProp(m: m, p: p) }
@@ -686,15 +944,15 @@ struct CameraDrawer: View {
         }
     }
 
-    /// Lo que la cámara expone pero nadie mapeó. Va colapsado y rotulado como
-    /// lo que es: códigos. Está a propósito — esconderlo sería mentir por
-    /// omisión, y bautizarlo sería mentir a secas.
+    /// Lo que la cámara expone pero nadie mapeó. Va colapsado y rotulado como lo
+    /// que es: códigos. Esconderlo sería mentir por omisión, bautizarlo sería
+    /// mentir a secas.
     @ViewBuilder
     private var sinTraducir: some View {
         let items = m.e.sinTraducir
         if !items.isEmpty {
             DisclosureGroup {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 7) {
                     ForEach(items) { p in FilaProp(m: m, p: p) }
                     Text("La cámara devuelve estos como número. No se les puso\nnombre porque no está verificado cuál es cuál.")
                         .font(.system(size: 9)).foregroundStyle(StudioSkin.dim.opacity(0.65))
@@ -711,47 +969,19 @@ struct CameraDrawer: View {
         }
     }
 
-    private var nota: some View {
+    /// Pie: la frescura del dato (el toggle vive arriba, en la cabecera).
+    private func pie(avanzado: Bool) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            PieLectura(m: m, completo: true)
-            Text("No se consulta la cámara sola: cada consulta le apaga la\nimagen un segundo. Se lee al cambiar algo o con ↻.")
-                .font(.system(size: 9.5)).foregroundStyle(StudioSkin.dim.opacity(0.65))
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.top, 2)
-    }
-}
-
-
-// MARK: - agarradera del cajón
-
-/// Arrastra para cambiar el ancho del cajón de la cámara (280-520). El ancho
-/// persiste en UserDefaults via `StudioController.cameraPanelWidth`.
-struct CameraResizeHandle: View {
-    @EnvironmentObject var c: StudioController
-    @State private var startWidth: CGFloat? = nil
-
-    var body: some View {
-        Rectangle()
-            .fill(Color.white.opacity(0.001))   // zona de agarre invisible
-            .frame(width: 9)
-            .overlay(
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(StudioSkin.panelBorder)
-                    .frame(width: 3, height: 46)
-            )
-            .contentShape(Rectangle())
-            .onHover { inside in
-                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            HStack(spacing: 8) {
+                PieLectura(m: m, completo: avanzado)
+                Spacer(minLength: 0)
             }
-            .gesture(
-                DragGesture(minimumDistance: 1)
-                    .onChanged { g in
-                        let base = startWidth ?? c.cameraPanelWidth
-                        if startWidth == nil { startWidth = base }
-                        c.cameraPanelWidth = min(max(base - g.translation.width, 280), 520)
-                    }
-                    .onEnded { _ in startWidth = nil }
-            )
+            if avanzado {
+                Text("No se consulta la cámara sola: cada consulta le apaga la\nimagen un segundo. Se lee al cambiar algo o con ↻.")
+                    .font(.system(size: 9.5)).foregroundStyle(StudioSkin.dim.opacity(0.65))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.top, 1)
     }
 }

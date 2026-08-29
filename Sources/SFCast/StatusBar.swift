@@ -206,13 +206,16 @@ final class StatusBar: NSObject, NSMenuDelegate {
         /// arrancar: una señal vieja en disco dispararia sola al abrir la app.
         let señales: [String: () -> Void] = [
             "abrir-estudio": { StudioController.shared.open() },
-            // El panel de la camara, hablando. Es la puerta AI-first del
-            // control de la ZV-E10 desde dentro del Estudio.
+            // La camara, hablando. Es la puerta AI-first del control de la
+            // ZV-E10 desde dentro del Estudio. Desde el 28 ago la camara es LA
+            // primera tarjeta de El Set: abrirla = abrir el cajon y desplegar
+            // «Avanzado» (lo simple ya se ve sin pedir nada).
             "abrir-camara": {
                 StudioController.shared.open()
-                StudioController.shared.showCameraPanel = true
+                StudioController.shared.showSetPanel = true
+                StudioController.shared.camAvanzado = true
             },
-            "cerrar-camara": { StudioController.shared.showCameraPanel = false },
+            "cerrar-camara": { StudioController.shared.camAvanzado = false },
             // EL SET (luces, Pixoo) por la misma puerta.
             "abrir-set": {
                 StudioController.shared.open()

@@ -59,7 +59,17 @@ final class StudioEngine: NSObject {
     private var cameraRetryAt: Double = 0
     var onStatusChange: (() -> Void)?
     /// Aviso de alto nivel para la UI (congelada / disco / recuperada).
-    var onAlert: ((String, Bool) -> Void)?       // (mensaje, esCrítico)
+    /// La CAUSA existe para poder curarlo: ver `onAlertResolved`.
+    var onAlert: ((String, Bool, String?) -> Void)?   // (mensaje, esCrítico, causa)
+    /// LA CURA DE LA ALARMA (28 ago 2026). Una alarma crítica es PEGAJOSA a
+    /// propósito —se queda hasta que la situación se arregle— pero hasta hoy
+    /// NADIE decía que se había arreglado. Medido: el 28 ago la sesión se
+    /// bloqueó a las 17:50, la pantalla volvió sola a las 18:07 y el banner rojo
+    /// «No pude reenganchar la pantalla» siguió pintado encima de un preview que
+    /// estaba capturando perfectamente. Un instrumento que sobrevive a su causa
+    /// miente, y encima entrena a ignorar el único sitio donde salen las cosas
+    /// graves. Quien levanta la alarma es el que tiene que apagarla.
+    var onAlertResolved: ((String) -> Void)?          // (causa)
 
     /// Solo para marcar "esta fuente lleva rato sin imagen nueva" en la UI.
     /// NO dispara nada: una pantalla quieta es legítima.
@@ -96,6 +106,16 @@ final class StudioEngine: NSObject {
     /// con prioridad de tiempo real.
     private let renderQueue = DispatchQueue(label: "so.saasfactory.sfcast.studio.render", qos: .userInteractive)
     private let videoQueue = DispatchQueue(label: "so.saasfactory.sfcast.studio.video", qos: .userInitiated)
+    /// CARRIL PROPIO PARA LA CÁMARA (28 ago 2026). Hasta hoy los frames de
+    /// pantalla y los de cámara se entregaban en la MISMA cola serial: dos
+    /// fuentes independientes de alta frecuencia haciendo fila una detrás de
+    /// otra. Con `alwaysDiscardsLateVideoFrames = true` (que es lo correcto),
+    /// cada milisegundo que la cámara pasa esperando su turno detrás de un
+    /// frame de pantalla es un frame de cara que AVFoundation tira. Medido: con
+    /// las tres salidas activas la cámara caía de 25.00 a 12-15 fps.
+    /// `FrameStore.set` y `sondaPTS` son lock-protected, así que las dos colas
+    /// pueden correr a la vez sin carreras.
+    private let camVideoQueue = DispatchQueue(label: "so.saasfactory.sfcast.studio.camvideo", qos: .userInitiated)
     private let audioQueue = DispatchQueue(label: "so.saasfactory.sfcast.studio.audio", qos: .userInitiated)
     /// TODA la cirugía del AVCaptureSession (begin/commitConfiguration, start/
     /// stopRunning) vive AQUÍ, serializada. En main era la bolita de arcoíris:
@@ -153,6 +173,30 @@ final class StudioEngine: NSObject {
     /// pool, contra 66 MB a 1080p. En una Mac de 16 GB con dos monitores 4K,
     /// esos 236 MB son la diferencia entre tener margen y no tenerlo.
     private var streamPixels: CGSize?
+    /// ¿Se está guardando `screen.mp4`? Decide si la captura puede subir por
+    /// encima del lienzo (ver `captureSize`). Se refresca en start/applyLive.
+    private var rawScreenWanted = false
+    // MARK: - ARRANQUE REAL DE CADA RAW (v3, 28 ago 2026)
+    //
+    // El desfase entre las pistas NO se deriva del cierre. Medido el 28 ago:
+    // derivarlo de "todos terminan juntos" daba 2.23 s donde el real era 1.63
+    // (18 frames), porque la cámara cierra antes que el programa. Aquí se
+    // ANOTA el instante host del PRIMER frame que cada raw pudo escribir, que
+    // es el único dato con el que la edición puede alinear las capas.
+    /// Caja aparte porque los delegates de captura son `nonisolated` y el motor
+    /// vive en el MainActor: el estado que tocan las dos orillas no puede ser
+    /// una propiedad aislada. Mismo patrón que la sonda de PTS.
+    let rawStarts = RawStartBox()
+    /// Cuándo EMPEZÓ A ESCRIBIR cada raw (del callback del writer, no del
+    /// instante en que se le pidió: ver `CamFileDelegate.startedHost`). El
+    /// primer frame posterior a la llamada queda de respaldo por si el callback
+    /// no llegara, pero es una cota inferior, no la verdad.
+    var camRawFirstFrameHost: Double? { cameraMovieDelegate?.startedHost ?? rawStarts.first(camara: true) }
+    var screenRawFirstFrameHost: Double? { screenRecDelegate?.startedHost ?? rawStarts.first(camara: false) }
+    func armRawStarts(camera: Bool, screen: Bool) { rawStarts.arm(camara: camera, pantalla: screen) }
+    func disarmRawStarts() { rawStarts.disarm() }
+    /// Techo del raw de pantalla: el mismo `captureMaxHeight` del Loom.
+    private var rawScreenMaxHeight: CGFloat { CGFloat(AppSettings.load().captureMaxHeight) }
     /// La config viva del SCStream: applyLive la muta y la re-aplica con
     /// updateConfiguration (fps / audio del sistema en caliente, estilo OBS).
     private var screenCfg: SCStreamConfiguration?
@@ -214,6 +258,7 @@ final class StudioEngine: NSObject {
         fpsParaCamara = fps
         canvasOverride = config.canvasMode.size
         if let o = canvasOverride { canvasSize = o }
+        rawScreenWanted = config.outputs.rawScreen
         systemAudioWanted = config.systemAudioEnabled
         isRunning = true
         startedRunningAt = CACurrentMediaTime()
@@ -291,7 +336,9 @@ final class StudioEngine: NSObject {
         fpsParaCamara = fps
         canvasOverride = config.canvasMode.size
         let newCanvas = canvasOverride ?? nativeCanvas ?? canvasSize
-        let canvasChanged = newCanvas != canvasSize
+        let rawChanged = config.outputs.rawScreen != rawScreenWanted
+        rawScreenWanted = config.outputs.rawScreen
+        let canvasChanged = newCanvas != canvasSize || rawChanged
         canvasSize = newCanvas
         let audioChanged = config.systemAudioEnabled != systemAudioWanted
         systemAudioWanted = config.systemAudioEnabled
@@ -304,7 +351,8 @@ final class StudioEngine: NSObject {
             // bajar a 1080p seguiría trayendo buffers de 4K y el ahorro de
             // memoria (el que de verdad da margen) no llegaría nunca.
             if canvasChanged, let native = nativeCanvas {
-                let cap = Self.captureSize(native: native, canvas: canvasSize)
+                let cap = Self.captureSize(native: native, canvas: canvasSize,
+                                           rawScreen: rawScreenWanted, rawMaxHeight: rawScreenMaxHeight)
                 cfg.width = Int(cap.width)
                 cfg.height = Int(cap.height)
                 streamPixels = cap
@@ -480,7 +528,8 @@ final class StudioEngine: NSObject {
         nativeCanvas = CGSize(width: w, height: h)
         canvasSize = canvasOverride ?? CGSize(width: w, height: h)
 
-        let cap = Self.captureSize(native: CGSize(width: w, height: h), canvas: canvasSize)
+        let cap = Self.captureSize(native: CGSize(width: w, height: h), canvas: canvasSize,
+                                   rawScreen: rawScreenWanted, rawMaxHeight: rawScreenMaxHeight)
         streamPixels = cap
         let cfg = SCStreamConfiguration()
         cfg.width = Int(cap.width)
@@ -518,9 +567,21 @@ final class StudioEngine: NSObject {
     /// se inventa detalle) y nunca más que el lienzo (no se paga por píxeles
     /// que el compositor va a tirar). Preserva el aspecto del display: si se
     /// deformara, el espejo y el programa dejarían de coincidir.
-    nonisolated static func captureSize(native: CGSize, canvas: CGSize) -> CGSize {
+    /// EL RAW MANDA SOBRE LA CAPTURA; EL LIENZO SOLO MANDA SOBRE EL PROGRAMA
+    /// (28 ago 2026). Cuando se está guardando `screen.mp4`, ese archivo ES la
+    /// capa de pantalla que la edición va a componer después: clamparlo al
+    /// lienzo del programa lo condenaba a la resolución del PROXY. Con el raw
+    /// apagado no cambia nada (no se paga por píxeles que el compositor tira).
+    nonisolated static func captureSize(native: CGSize, canvas: CGSize,
+                                        rawScreen: Bool = false, rawMaxHeight: CGFloat = 0) -> CGSize {
         guard native.width > 1, native.height > 1, canvas.width > 1, canvas.height > 1 else { return native }
-        let s = min(canvas.width / native.width, canvas.height / native.height, 1.0)
+        // Techo efectivo: el lienzo, o el del raw si es mayor y el raw está vivo.
+        var techo = canvas
+        if rawScreen, rawMaxHeight > canvas.height, native.height > 1 {
+            let k = rawMaxHeight / native.height
+            techo = CGSize(width: native.width * k, height: rawMaxHeight)
+        }
+        let s = min(techo.width / native.width, techo.height / native.height, 1.0)
         guard s < 0.999 else { return native }
         // Pares: los codificadores y los escaladores de vídeo lo agradecen, y
         // un impar aquí produce medio píxel de corrimiento en el mapeo.
@@ -581,6 +642,7 @@ final class StudioEngine: NSObject {
                 screenRetryFails = 0
                 nextScreenRetryAt = 0
                 screenRetryNotified = false
+                onAlertResolved?("pantalla")   // la causa murió: el banner también
                 onStatusChange?()
             } catch {
                 screenRetryFails += 1
@@ -597,7 +659,7 @@ final class StudioEngine: NSObject {
                     notify("SFCast — SIN PANTALLA",
                            "No puedo capturar la pantalla. Aprueba «Grabación de pantalla» en Ajustes.")
                     onAlert?("No consigo capturar la pantalla. Aprueba «Grabación de pantalla» "
-                             + "en Ajustes del sistema y reabre SFCast.", true)
+                             + "en Ajustes del sistema y reabre SFCast.", true, "pantalla")
                 }
             }
             retryingScreen = false
@@ -616,6 +678,7 @@ final class StudioEngine: NSObject {
         recCfg.videoCodecType = .hevc
         let del = SegmentDelegate()
         let rec = SCRecordingOutput(configuration: recCfg, delegate: del)
+        armRawStarts(camera: false, screen: true)
         try stream.addRecordingOutput(rec)
         screenRecOutput = rec
         screenRecDelegate = del
@@ -672,7 +735,8 @@ final class StudioEngine: NSObject {
             }
             out.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: elegidoPF]
             out.alwaysDiscardsLateVideoFrames = true
-            out.setSampleBufferDelegate(self, queue: videoQueue)
+            // Cola PROPIA, no la compartida con la pantalla — ver camVideoQueue.
+            out.setSampleBufferDelegate(self, queue: camVideoQueue)
             cameraVideoOut = out
         }
         if cameraAudioOut == nil {
@@ -853,7 +917,7 @@ final class StudioEngine: NSObject {
                           + "La configurada no está conectada.")
                 Task { @MainActor in
                     self.onAlert?("Ojo: estás con «\(resuelta.localizedName)», no con tu cámara de "
-                                  + "siempre. ¿Está encendida y conectada?", true)
+                                  + "siempre. ¿Está encendida y conectada?", true, "camara")
                 }
             }
             if !session.isRunning { session.startRunning() }
@@ -1012,11 +1076,31 @@ final class StudioEngine: NSObject {
         guard cameraAvailable, let out = cameraMovieOut, !out.isRecording else { return }
         let del = CamFileDelegate(label: "Estudio raw de cámara")
         cameraMovieDelegate = del
+        armRawStarts(camera: true, screen: false)
         out.startRecording(to: url, recordingDelegate: del)
     }
 
+    /// Instante host en que arrancó `camera.mov`, RECONSTRUIDO al cerrarlo:
+    /// `instanteDelStop − recordedDuration`. Es el único camino exacto que da
+    /// AVFoundation. Los otros dos se midieron el 28 ago y fallan: el instante
+    /// de la LLAMADA a `startRecording` se adelanta 52 frames (la apertura del
+    /// archivo es asíncrona) y `didStartRecordingTo` llega 6 frames TARDE
+    /// (el writer ya venía guardando muestras cuando avisa).
+    /// Instante host EXACTO en que se pidió detener `camera.mov`. El arranque
+    /// del archivo se reconstruye como `camRawStopHost − duraciónRealDelArchivo`.
+    /// Los otros tres caminos se midieron el 28 ago y fallan: la LLAMADA a
+    /// `startRecording` se adelanta ~52 frames (la apertura es asíncrona),
+    /// `didStartRecordingTo` llega ~6 frames tarde, y `recordedDuration` cuenta
+    /// desde la llamada (~48 frames de más).
+    private(set) var camRawStopHost: Double?
+
     func stopCameraMovie() async {
         guard let out = cameraMovieOut, out.isRecording else { return }
+        // El instante del STOP es el ancla: el arranque se reconstruye después
+        // restándole la duración REAL del archivo (la que trae el contenedor,
+        // no `recordedDuration` — esa cuenta desde la LLAMADA a startRecording e
+        // ignora el ~1.6 s de cabeza que AVFoundation descarta mientras abre).
+        camRawStopHost = CACurrentMediaTime()
         out.stopRecording()
         if let del = cameraMovieDelegate {
             let deadline = Date().addingTimeInterval(10)
@@ -1185,7 +1269,7 @@ final class StudioEngine: NSObject {
             if dead {
                 Log.error(String(format: "Estudio: CÁMARA CONGELADA — %.1fs sin imagen nueva "
                                  + "(¿se apagó sola? ¿cable USB?)", age))
-                onAlert?("La cámara dejó de dar imagen: se está grabando su último frame congelado.", true)
+                onAlert?("La cámara dejó de dar imagen: se está grabando su último frame congelado.", true, "camara")
                 if StudioController.shared.recorder.isRecording
                     || RecordingController.shared.state != .idle {
                     notify("SFCast — LA CÁMARA SE APAGÓ",
@@ -1195,7 +1279,7 @@ final class StudioEngine: NSObject {
                 }
             } else {
                 Log.info("Estudio: cámara viva de nuevo")
-                onAlert?("La cámara volvió.", false)
+                onAlertResolved?("camara")     // se curó: el banner se va solo
             }
         }
         // Mientras siga muerta, reintentar — pero SOLO si la cámara ELEGIDA
@@ -1243,13 +1327,13 @@ final class StudioEngine: NSObject {
             micDead = dead
             if dead {
                 Log.error(String(format: "Estudio: MICRÓFONO MUDO — %.1fs sin una muestra", age))
-                onAlert?("El micrófono dejó de entregar audio. Si estás grabando, esta toma va sin voz.", true)
+                onAlert?("El micrófono dejó de entregar audio. Si estás grabando, esta toma va sin voz.", true, "microfono")
                 if StudioController.shared.recorder.isRecording {
                     notify("SFCast — EL MICRÓFONO SE CAYÓ", "Llevas grabando SIN VOZ. Revisa el Shure.")
                 }
             } else {
                 Log.info("Estudio: micrófono vivo de nuevo")
-                onAlert?("El micrófono volvió.", false)
+                onAlertResolved?("microfono")
             }
             onStatusChange?()
         }
@@ -1276,11 +1360,11 @@ final class StudioEngine: NSObject {
                 Log.error(String(format: "Estudio: PANTALLA CONGELADA — el stream lleva %.1fs mudo "
                                  + "(motivo: %@, latidos video=%d audio=%d). Reenganchando…",
                                  silence, bad ?? "silencio", b.video, b.audio))
-                onAlert?("Pantalla congelada — reenganchando la captura", false)   // se está curando; si falla, 1346 sí grita
+                onAlert?("Pantalla congelada — reenganchando la captura", false, "pantalla")   // se está curando; si falla, reportRestartFailure sí grita
                 restartScreenTap(reason: bad ?? String(format: "%.1fs sin latido", silence))
             } else {
                 Log.info("Estudio: pantalla viva de nuevo")
-                onAlert?("Pantalla recuperada", false)
+                onAlertResolved?("pantalla")
             }
         }
     }
@@ -1311,6 +1395,7 @@ final class StudioEngine: NSObject {
             do {
                 try await startScreenTap(systemAudio: systemAudioWanted)
                 Log.info("Estudio: captura de pantalla reenganchada")
+                onAlertResolved?("pantalla")
             } catch {
                 reportRestartFailure(error.localizedDescription)
                 // Si el reenganche murió por permiso (fila de TCC muerta),
@@ -1343,9 +1428,39 @@ final class StudioEngine: NSObject {
     /// mientras Daniel presenta. Mismo patrón que costó 45 minutos esa mañana.
     func reportRestartFailure(_ motivo: String) {
         Log.error("Estudio: reenganche falló: \(motivo)")
-        onAlert?("No pude reenganchar la pantalla: \(motivo)", true)
-        if RecordingController.shared.state != .idle
-            || StudioController.shared.recorder.isRecording {
+        let grabando = RecordingController.shared.state != .idle
+            || StudioController.shared.recorder.isRecording
+
+        // ⛔ LA SESIÓN BLOQUEADA NO ES UNA AVERÍA (28 ago 2026, Daniel: *"es
+        // molesto porque sí estoy grabando pantalla y ese anuncio no debería
+        // salir"*). macOS deniega la captura mientras la pantalla está
+        // bloqueada, POR DISEÑO, y la devuelve sola al desbloquear: medido ese
+        // mismo día —cayó 17:50:35, volvió 18:07:42, nadie tocó nada— y también
+        // el 27 (16:45 y 16:57). O sea: la clase de fallo más frecuente de este
+        // banner es la que NO es un fallo. Sin grabación viva no hay nada que
+        // decirle a nadie; queda en el log, que es donde se revisa en frío.
+        if ScreenDoctor.sesionBloqueada(), !grabando {
+            Log.info("Estudio: … la sesión está BLOQUEADA — no es una falla, la captura "
+                     + "vuelve sola al desbloquear. Sin alarma.")
+            onStatusChange?()
+            return
+        }
+        // Bloqueada PERO grabando sí importa (el programa está escribiendo el
+        // último frame congelado), y el aviso dice la verdad: qué pasa y qué lo
+        // arregla. Se cura solo en cuanto la pantalla vuelve (onAlertResolved).
+        if ScreenDoctor.sesionBloqueada() {
+            onAlert?("La pantalla está BLOQUEADA: mientras lo esté, la toma graba su último "
+                     + "frame congelado. Se reengancha sola al desbloquear.", true, "pantalla")
+            notify("SFCast — PANTALLA BLOQUEADA GRABANDO",
+                   "Sigo grabando cámara y voz, pero la pantalla está bloqueada y sale "
+                   + "congelada. Desbloquea y se reengancha sola.")
+            Log.error("Estudio: NOTIFICACIÓN enviada (sesión bloqueada con grabación viva)")
+            onStatusChange?()
+            return
+        }
+
+        onAlert?("No pude reenganchar la pantalla: \(motivo)", true, "pantalla")
+        if grabando {
             notify("SFCast — LA PANTALLA SE CAYÓ",
                    "Sigo grabando tu cámara y tu voz, pero la PANTALLA quedó "
                    + "congelada y no pude reengancharla. Revisa el permiso.")
@@ -1408,7 +1523,7 @@ extension StudioEngine: SCStreamDelegate {
             guard let self, self.isRunning else { return }
             self.screenAvailable = false
             self.frames.drop(.screen)
-            self.onAlert?("La captura de pantalla se cayó — reenganchando", false)   // idem
+            self.onAlert?("La captura de pantalla se cayó — reenganchando", false, "pantalla")   // idem
             self.onStatusChange?()
             self.restartScreenTap(reason: "didStopWithError")
         }
@@ -1435,6 +1550,7 @@ extension StudioEngine: SCStreamOutput {
                 return
             }
             guard status == .complete, let pb = CMSampleBufferGetImageBuffer(sb) else { return }
+            rawStarts.notar(camara: false)
             frames.set(pb, for: .screen, pts: CMSampleBufferGetPresentationTimeStamp(sb))
         case .audio:
             // El tap de audio del MISMO stream late aunque la pantalla no
@@ -1502,6 +1618,7 @@ extension StudioEngine: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureA
             // SONDA (27 ago): ¿el dispositivo MANDA 25, o manda 30 y nosotros
             // tiramos 5? El PTS lo dice y el contador de callbacks no.
             StudioEngine.sondaPTS(CMSampleBufferGetPresentationTimeStamp(sb))
+            rawStarts.notar(camara: true)
             // El PTS viaja con el frame: es la única forma de saber CUÁNDO se
             // capturó de verdad esta imagen y no cuándo nos llegó.
             frames.set(pb, for: .camera, pts: CMSampleBufferGetPresentationTimeStamp(sb))
@@ -2585,8 +2702,20 @@ final class AudioLevelBox: @unchecked Sendable {
     private var system: Float = 0
     private var micAt: Double = 0
     private var systemAt: Double = 0
+    private var micCuenta = 0
     func setMic(_ v: Float) {
-        lock.lock(); mic = v; micAt = CACurrentMediaTime(); lock.unlock()
+        lock.lock(); mic = v; micAt = CACurrentMediaTime(); micCuenta &+= 1; lock.unlock()
+    }
+
+    /// Cuántos buffers de micrófono han entrado, MONÓTONO desde que se abrió el
+    /// Estudio. El guard de voz necesita "¿llegó algo DESDE QUE ARRANCÓ ESTA
+    /// TOMA?", y un `Bool` obligaría a acordarse de resetearlo al empezar cada
+    /// una — un olvido ahí deja el guard ciego para siempre y en silencio.
+    /// Con un contador, el guard toma su propia línea base y no hay nada que
+    /// resetear: si el número no se movió, no entró audio.
+    func micArrivals() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return micCuenta
     }
     func setSystem(_ v: Float) {
         lock.lock(); system = v; systemAt = CACurrentMediaTime(); lock.unlock()
@@ -2877,5 +3006,38 @@ enum Deadline {
                 }
             }
         }
+    }
+}
+
+
+/// ARRANQUE REAL DE CADA RAW (v3, 28 ago 2026) — ver `StudioManifest.OutputFile`.
+///
+/// El desfase entre pistas NO se deriva del cierre: medido el 28 ago, derivarlo
+/// de "todos terminan juntos" daba 2.23 s donde el real era 1.63 (18 frames a 30
+/// fps), porque la cámara cierra antes que el programa. Esto anota el instante
+/// host del PRIMER frame que cada raw pudo escribir, que es el origen honesto.
+final class RawStartBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var armadaCam = false, armadaPant = false
+    private var primeraCam: Double?, primeraPant: Double?
+
+    func arm(camara: Bool, pantalla: Bool) {
+        lock.lock()
+        if camara { armadaCam = true; primeraCam = nil }
+        if pantalla { armadaPant = true; primeraPant = nil }
+        lock.unlock()
+    }
+    func disarm() { lock.lock(); armadaCam = false; armadaPant = false; lock.unlock() }
+    /// Se llama en el camino caliente de cada frame: sale por el `guard` en
+    /// cuanto la primera ya se anotó, así que el costo es un lock y una lectura.
+    func notar(camara: Bool) {
+        lock.lock()
+        if camara { if armadaCam, primeraCam == nil { primeraCam = CACurrentMediaTime() } }
+        else { if armadaPant, primeraPant == nil { primeraPant = CACurrentMediaTime() } }
+        lock.unlock()
+    }
+    func first(camara: Bool) -> Double? {
+        lock.lock(); defer { lock.unlock() }
+        return camara ? primeraCam : primeraPant
     }
 }

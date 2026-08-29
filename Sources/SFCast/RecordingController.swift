@@ -30,6 +30,8 @@ final class RecordingController {
         didSet {
             onStateChange?()
             liveSyncFollow(from: oldValue, to: state)
+            // Mientras rueda, El Set no se repinta solo. Ver MarcaDeRodaje.
+            MarcaDeRodaje.set(state != .idle || StudioController.shared.isRecording)
         }
     }
     private(set) var mode: Mode = .screen
@@ -633,6 +635,20 @@ final class CamFileDelegate: NSObject, AVCaptureFileOutputRecordingDelegate, @un
 
     var finished: Bool { lock.lock(); defer { lock.unlock() }; return _finished }
     var failure: String? { lock.lock(); defer { lock.unlock() }; return _error }
+
+    /// CUÁNDO EMPEZÓ DE VERDAD (28 ago 2026). `startRecording` es ASÍNCRONO:
+    /// medido, el archivo tarda ~1.65 s en abrirse de verdad después de la
+    /// llamada. Anclar el offset al instante de la LLAMADA daba −0.09 s donde
+    /// el real era +1.655 (52 frames a 30 fps), y solo lo cazó contrastar
+    /// contra una correlación de audio independiente. Este callback es el
+    /// único que sabe el instante bueno.
+    private var _startedHost: Double?
+    var startedHost: Double? { lock.lock(); defer { lock.unlock() }; return _startedHost }
+
+    func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo outputFileURL: URL,
+                    from connections: [AVCaptureConnection]) {
+        lock.lock(); _startedHost = CACurrentMediaTime(); lock.unlock()
+    }
 
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL,
                     from connections: [AVCaptureConnection], error: Error?) {

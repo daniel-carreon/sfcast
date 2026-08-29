@@ -1537,3 +1537,321 @@ permiso sigue vivo, y no había forma de preguntárselo a la app sin abrirla y g
 ahora" de "está roto" no es un diagnóstico — y si además tiene permiso para reparar, es un
 destructor con buenas intenciones.* Antes de que un órgano ejecute algo irreversible, tiene
 que poder demostrar que el paciente está enfermo, no solo que no responde.
+
+## v4.0 — «Dos Caras»: la pantalla y la cámara como dos archivos, y el 24% de frames que se perdía sin que nadie lo supiera (28 ago 2026)
+
+Pedido de Daniel: *"¿es posible crear una escena especial para esto? de modo que
+no peleamos con el resto de config, sino que directo accedo a esta y me
+despreocupo"*. Y la propiedad que él mismo nombró y que ordena todo el diseño:
+*"aun incluso si no sabes qué hacer con la cámara, puedes dejarlo justo en la
+posición donde lo haríamos con la pantalla fijada"* — o sea, **separar las capas
+no puede costar nada en el peor caso**.
+
+### El A/B que existía por accidente
+
+Tres grabaciones suyas seguidas, esa mañana, con la misma cámara:
+
+| salidas activas | cámara medida |
+|---|---|
+| solo programa | `cam:25fps`, sonda `40ms×1800` (metrónomo perfecto) |
+| las tres | `cam:23 → 19 → 15` |
+
+Los saltos de la sonda eran **múltiplos exactos de 40 ms** (`40ms×1501 · 80ms×266
+· 120ms×33`): la fuente entregaba 25.00 clavados y **la app tiraba el 24%**. En
+el archivo: 1,175 frames donde debía haber 1,543.
+
+Y todo lo demás estaba ocioso: `comp:1.3ms` de 33 de presupuesto, `drops:0`,
+`sinBuf:0`, `cadencia:30/30`, 15 GB de RAM libres. **No era capacidad.**
+
+### Las dos hipótesis que se cayeron (y valen)
+
+**1. "Los dos writers pelean con la sesión de cámara".** Falsa. Un 2×2 lo mató:
+
+| condición | flujo de cámara |
+|---|---|
+| solo programa | 25.0 fps |
+| programa + `camera.mov` | 25.0 fps |
+| programa + `screen.mp4` | 25.0 fps |
+| **las tres** | **12.1 fps** |
+
+Ningún writer por separado hace daño. **Solo los dos juntos.**
+
+**2. "La pantalla y la cámara comparten cola serial".** Era verdad —
+`videoQueue` alimentaba las dos— y arreglarlo **no cambió nada** (13.7 fps). El
+carril propio se quedó porque es correcto, no porque curara.
+
+### La causa: se codifican los mismos píxeles dos veces
+
+Con el lienzo en 1440 y las tres salidas, la pantalla se codifica **dos veces a
+tamaño completo** (una en `screen.mp4`, otra dentro del programa). Ni el bitrate
+ni los fps lo mueven —calidad `baja` salió peor, 24 fps tampoco ayudó— pero la
+resolución sí: a 1080 la cámara vuelve a 25.00 clavados. Es throughput de
+píxeles por los motores de encode, no bits ni frames.
+
+### El arreglo: el raw manda sobre la captura, el lienzo solo sobre el programa
+
+`captureSize` ataba la resolución de captura al lienzo (sensato cuando nada
+guardaba el raw: no se paga por píxeles que el compositor tira). Con `screen.mp4`
+activo esa atadura lo condenaba a la resolución del **proxy**. Desatadas:
+
+| | `screen.mp4` | `camera.mov` | programa | cámara |
+|---|---|---|---|---|
+| lienzo 1440 | 2560×1440 | 1920×1080 | 2560×1440 | **15.8 fps** |
+| **lienzo 1080** | **2560×1440** | 1920×1080 | 1920×1080 | **25.0 fps** |
+
+Las capas conservan su calidad completa; lo único que baja es el programa, que
+aquí es el proxy de revisión — el máster se compone después desde las capas.
+
+### El offset entre pistas: cuatro caminos de reloj y ninguno sirve
+
+Medidos contra una correlación de audio externa, en grabaciones reales:
+
+| camino | error |
+|---|---|
+| instante de la LLAMADA a `startRecording` | **52 frames** (la apertura es asíncrona) |
+| `didStartRecordingTo` | **6 frames tarde** |
+| `stopHost − recordedDuration` | **48 frames** (cuenta desde la llamada) |
+| `stopHost − duración real del archivo` | **3 frames** |
+
+Lo que sí sirve: **el mismo micrófono está en los dos archivos**. `AlineadorDeAudio`
+correlaciona sus envolventes y eso es física, no una promesa de framework.
+
+⚠️ **Y aun así hay un piso.** En un `.mov` con edit list, "el desfase" **depende del
+decodificador**: AVFoundation y ffmpeg difieren en **44 ms constantes = 2112
+muestras a 48 kHz, el retardo de codificación de AAC**. Por eso el manifest
+declara `startOffsetUncertaintySeconds` y `scripts/refinar-offset.py` da la cifra
+en los términos de ffmpeg, que es quien compone.
+
+⛔ **El método que estaba documentado en §v2.0 (derivar de que todas las pistas
+cierran juntas) queda refutado**: con la cámara sana acierta, pero el 28 ago —con
+el 24% de frames perdidos— erraba 18 frames. Acertaba por casualidad.
+
+### Los dos bugs que solo aparecieron al verificar
+
+1. **El QA le robaba el foco a Daniel.** `open -g` evita que LaunchServices traiga
+   la app al frente, y no sirve de nada si la app se trae a sí misma con
+   `NSApp.activate`. En `testMode` la ventana ahora se queda atrás.
+2. **El decoder a mano de `StudioConfig` ignoraba los campos nuevos.** Se escribían
+   en disco y se leían como `nil`: el punto de retorno de la receta nunca volvía
+   (el lienzo 1440 de Daniel se perdía) y la migración se re-ejecutaba en cada
+   arranque — solo la salvó ser idempotente. **Si agregas un `var`, agrégalo también
+   al decoder.**
+3. **El punto de retorno se envenenaba solo.** Se capturaba ANTES del guard: si la
+   config ya coincidía con la receta, el guard salía sin cambiar nada pero el
+   "estado previo" ya se había guardado con los valores de la propia receta.
+
+### QA nuevo
+
+```bash
+python3 scripts/refinar-offset.py ~/Movies/SFCast/<id>   # offset exacto para ffmpeg
+```
+
+---
+
+## El guard de voz mataba tomas buenas cuando «Programa» estaba apagado (28 ago 2026)
+
+Daniel intentó grabar **cinco veces seguidas**. Las cinco murieron a los ~20 s con *"Detuve la
+grabación: no entraba tu voz"* — hablando, con el vúmetro del MIXER marcando nivel sano. Lo dijo
+en cámara antes de que lo cortara: *"dice que no está entrando mi voz güey, si sí está conectado
+el micrófono… y aquí en el mixer parece que sí está girando"*.
+
+### La evidencia
+
+| sesión | «Programa» | `micSamples` | voz real (`levels.json`) | resultado |
+|---|---|---:|---|---|
+| `c9z94683s8hr` | **SÍ** | **83,260** | — | 888 s completos |
+| las 5 de las 15:55-15:58 | **NO** | **0** | hasta **85% de muestras con voz** | muertas ~20 s |
+
+**93 sesiones históricas con «Programa» encendido: todas bien. 5 sin él: las 5 muertas.**
+Correlación perfecta. Fue la primera vez que apagó esa salida.
+
+### La causa
+
+```swift
+let samples = self.sink?.snapshot().micSamples ?? 0   // ← StudioRecorder.swift:632
+```
+
+`sink` es el writer de la salida «Programa» y sólo se crea dentro de `if config.outputs.program`.
+Con esa salida apagada `sink` es `nil`, el `?? 0` devuelve 0 **para siempre**, y las dos ramas que
+colgaban de él disparaban sí o sí: banner a los 3 s, **auto-stop a los 20**.
+
+**El guard no medía "¿llega voz del micrófono?". Medía "¿cuántas muestras se escribieron en la
+pista AAC de `seg-001.mp4`?"** — un contador que cuelga del compositor y de una salida opcional.
+
+Y no era una puerta, eran **tres**: (a) «Programa» apagado · (b) `ProgramSink.prepare()` que falla
+· (c) **el compositor atascado con «Programa» encendido** — `appendVideo()` es lo único que pone
+`sessionStarted = true`, y sin eso `appendAudio()` descarta cada buffer. En la (c) el guard
+acusaba al micrófono de un fallo del compositor, con el mic perfecto.
+
+### El arreglo
+
+- **El guard lee el sensor real**: `engine.levels.micArrivals()`, alimentado desde el delegate de
+  captura en su propia cola, sin pasar por el compositor ni por ningún writer. Es el mismo dato
+  que pinta el vúmetro que Daniel estaba mirando — **ese desacuerdo entre la pantalla y el guard
+  era, él solo, la prueba de que el guard miraba la cosa equivocada.**
+- **Contador monótono, no un `Bool`.** El guard toma su línea base al empezar la toma y compara.
+  Un booleano obligaría a acordarse de resetearlo, y un olvido ahí deja el guard ciego en silencio.
+- **La política NO se tocó** (firma de Daniel: *"el guard está bien, el tema es que el puto bug
+  nunca debería ocurrir"*): aviso a los 3 s, auto-stop a los 20.
+- **Guard nuevo para el programa**, que se queda con lo que de verdad le tocaba: si pediste esa
+  salida y no está escribiendo, se avisa nombrando al culpable correcto. **Avisa, no detiene.**
+- El fallo de `prepare()` ya no es sólo un `Log.error`: levanta banner.
+
+### Por qué la prueba vieja no lo cazó, y la nueva sí
+
+`--mutemic` corta el audio **en el propio delegate**, o sea antes del vúmetro Y antes del contador.
+Mata los dos caminos a la vez, así que **nunca pudo ejercer el caso real**: vúmetro vivo con el
+contador en cero. Era un hueco de cobertura, no mala suerte.
+
+`--noprogram` es el **inverso** de `--mutemic`: allá el éxito es que el guard corte; aquí el éxito
+es que **no** corte. Ojo: el arnés trata "un guard detuvo la toma" como éxito por defecto, así que
+este escenario lo declara FALLO explícitamente.
+
+```
+✓ --rectest 30 --noprogram → la toma llegó entera (30.1s de 30) y NINGÚN guard la detuvo
+✓ --rectest 40 --mutemic   → el guard cortó a los 20 s (no se debilitó)
+✓ --rectest 30             → toma normal, pistas alineadas 0 ms, 899 frames, 0 rellenados
+```
+
+### La regla
+
+**Un cero en un sensor significa "no se midió", no "vale cero".** Es la misma regla que ya está
+escrita en la casa de Daniel (`feedback/dato-ausente-no-es-cero-2026-08-17.md`) y que este archivo
+ya enunciaba con otras palabras: *"un sensor que se auto-satisface con una imagen falsa es peor que
+no tener sensor"*. Aquí el actuador (el auto-stop) colgaba de un sensor que medía otra cosa.
+
+Corolario para cualquier guard futuro: **el sensor de un guard no puede colgar de una salida
+opcional.** Si el usuario puede apagarla, el guard se queda ciego justo donde nadie lo probó.
+
+---
+
+## v3.8 — UNA cámara, y una alarma que sabe apagarse (28 ago 2026)
+
+Daniel, mirando su propio Estudio: *"tenemos una sección donde está el set y al
+lado hay una donde está la cámara, pero abajo hay otra cámara y a la derecha hay
+otra. O sea, hay tres lugares donde tenemos la cámara conectada."* Y luego el
+criterio: *"la cámara es lo principal, vamos a ponerla la primerita hasta arriba
+a la derecha en el set. Por ahora, deshacernos de todo lo demás."*
+
+### 1. Tres superficies → una
+
+Estaban: (a) la columna **CÁMARA** del panel inferior, (b) el **cajón** propio a
+la derecha con todas las propiedades, y (c) la tarjeta **Cámara** al fondo de El
+Set, que era el enchufe Shelly. Tres cosas distintas llamadas igual, en la misma
+pantalla.
+
+Queda `SetCameraCard`: **la primera tarjeta del cajón derecho**, encima del panel
+web. Simple por defecto y todo lo demás detrás de **«Avanzado»** (se recuerda).
+
+Lo simple no se eligió de oído, salió de sus palabras: *"nunca toco la
+configuración, se queda estandarizada; por lo mucho modifico el ISO dependiendo
+de la iluminación. El resto casi siempre se queda estático."* Así que arriba
+está: **ISO** (grande, con menú), **Exponer a la cara** (el lazo que lo mueve
+solo), **lo que el ojo mide** —cara y quemado, el único número que no cuesta un
+parpadeo porque sale del frame que ya entra—, los avisos que cuestan una toma
+(temperatura, grabando en la tarjeta, HD con sobreimpresos) y el **interruptor de
+la corriente**. Eso último no es adorno: la ZV-E10 vive con dummy battery y ese
+enchufe es su apagón real, o sea lo primero que se hace cuando pone *sin
+conexión*.
+
+**Nativa, no reescrita en el panel web.** El motor de esta tarjeta ya sabe abrir
+por el espejo de disco sin tocar el USB, no fingir frescura, fusionar lecturas
+parciales y enseñar lo que no supo clasificar. Portar eso a JavaScript hubiera
+sido tirar el oficio para quedarse con la materia. El panel web sigue siendo la
+única implementación de las LUCES; embebido (`?embed=sfcast`) se le quitan sus
+dos tarjetas de cámara, que en iPhone/escritorio siguen intactas.
+
+### 2. El banner que sobrevivió a su causa
+
+*"Es molesto un aviso que dice «no pude reenganchar la pantalla»: es molesto
+porque sí estoy grabando pantalla, y ese anuncio no debería salir."*
+
+Tenía razón, y el log lo firma: **17:50:35** el reenganche falla con *"la sesión
+está bloqueada"*; **18:07:42** `pantalla enganchada en reintento`. La pantalla
+volvió sola a los 17 minutos y **el banner rojo se quedó**, encima de un preview
+que estaba capturando perfectamente. Lo mismo el 27 (16:45 y 16:57) y a las 13:03
+de ese mismo día. La clase de fallo más frecuente de ese banner **no era un
+fallo**.
+
+Dos arreglos, no uno:
+
+- **La sesión bloqueada no es una avería.** macOS deniega la captura mientras la
+  pantalla está bloqueada, por diseño, y la devuelve al desbloquear. Sin
+  grabación viva: al log y ya. Con grabación viva sí se avisa —el programa está
+  escribiendo el último frame congelado— pero diciendo la verdad: *"se reengancha
+  sola al desbloquear"*, no *"revisa el permiso"*.
+- **Toda alarma lleva CAUSA y toda causa se cura.** `onAlert` viaja con
+  `"pantalla"`/`"camara"`/`"microfono"` y nace su gemelo `onAlertResolved`: al
+  reengancharse la pantalla (los dos caminos, reintento y reinicio), al volver la
+  cámara y al volver el micrófono, **el aviso se quita solo**. Las críticas son
+  pegajosas a propósito, pero pegajoso sin cura es un instrumento que miente — y
+  entrena a ignorar el único sitio donde salen las cosas graves.
+
+### 3. Una superficie en cámara no se repinta sola
+
+Encontrado *haciendo* este cambio, que es la peor forma de encontrarlo: al editar
+`panel.html` mientras Daniel grababa, El Set —que está DENTRO del encuadre— se
+recargó solo a los 4 s y una tarjeta desapareció en su video.
+
+La auto-recarga es correcta y se queda (sin ella el cajón pinta una versión vieja
+durante horas). Lo que faltaba era el freno: `MarcaDeRodaje.swift` deja
+`~/.sfcast/grabando` mientras hay grabación viva —los dos caminos, Estudio y
+Loom—, `panel_server.py` lo reporta en `/version` y la página **aplaza** la
+recarga hasta el corte. No se pierde: entra en cuanto se para.
+
+### v3.8.1 — la ronda de detalles (28 ago, misma tarde)
+
+- **«Avanzado» no se podía cerrar.** Estaba al final del contenido: abierto, el
+  botón quedaba detrás del scroll de cinco secciones. Subió a la **cabecera**. Un
+  interruptor tiene que estar en el mismo sitio en sus dos estados.
+- **La temperatura de color no se dejaba tocar, y no era la app.** Medido por USB:
+  con el balance en Daylight la ZV-E10 devuelve `colortemperature` con
+  `Readonly: 1`; poniendo el balance en «Choose Color Temperature» pasa a
+  `readonly: false` y `set temp 5600` entra a la primera. Además es un **RANGE
+  sin lista de opciones**, y la fila solo sabía pintar menús: aunque hubiera
+  estado abierta, habría salido como texto muerto. Ahora `Prop` guarda su tipo,
+  los rangos se editan con ± en pasos que la cámara acepta (100 K medido: 4350 lo
+  rechaza y se queda en 4300) más un menú de temperaturas de rodaje, y cuando el
+  balance la bloquea el panel **dice por qué** y ofrece el movimiento que la abre.
+- **El interruptor del enchufe desaparece si no hay enchufe.** Barrido completo
+  del /24: el Shelly no está en la LAN (ni en su semilla `192.168.1.94`). Un
+  switch gris que no hace nada se lee como app rota. Sin aparato no hay mando; en
+  cuanto conteste (se reintenta cada 20 s) vuelve solo.
+
+### v3.8.2 — por qué el Pixoo se cambiaba solo (el MRR detrás de Daniel)
+
+*"Estaba grabando un video con una cosa detrás y se cambió al del MRR, haciendo
+parecer como si para mí este juego fuera solo hacer dinero."*
+
+No era el Pixoo: era un **lazo cerrado de tres piezas** en `entorno-fisico`.
+
+1. `modo.py` **fotografía** el estado real al cambiar de modo (memoria de looks) y
+   copiaba también la **escena** del Pixoo al modo activo.
+2. El modo fija esa escena como preset (`_modo_escena`).
+3. `pixoo_server.mantenedor()` la **repinta cada 300 s**.
+
+Con 'mrr' puesta una vez, el modo `morado` —el de GRABAR— se la quedaba para
+siempre, y editar `modos.json` no servía de nada porque la siguiente foto lo
+pisaba. Encima, pedir otra escena por el panel pintaba pero **no cambiaba el
+preset**: a los cinco minutos volvía el MRR sin decir nada.
+
+Tres cortes:
+- En un modo **de cámara** la escena ya **no se fotografía**: lo que sale en
+  pantalla es decisión declarada en `modos.json`, no herencia. El brillo sí se
+  recuerda (eso es calibración de la toma, no mensaje).
+- `morado` → escena **`marca`**, no `mrr`. Las cifras del negocio se piden a mano.
+- El mantenedor **no repinta ni rota con grabación viva** (misma marca
+  `~/.sfcast/grabando`), y la escena elegida a mano **manda** hasta que alguien
+  declare otra intención (cambio de preset o de modo). Ejercido en vivo: pausa con
+  la marca puesta y en el log *"rodaje terminado, el mantenedor vuelve a su
+  cadencia"* al quitarla.
+
+**Coda de la temperatura (misma tarde, segundo intento).** Daniel: *"sigue sin
+modificarse; el balance sí cambia, la temperatura no"*. Faltaba la mitad del
+mecanismo: `sfcam set wb X` actualiza el espejo de `wb` **pero deja el `readonly`
+de `temp` como estaba**. Medido en vivo: tras el `set`, espejo `temp
+readonly:true` mientras la cámara real ya decía `false`. Como el panel abre por
+el espejo, el control quedaba muerto para siempre — nadie volvía a leer esa
+propiedad. Ahora `SFCam.dependientes` declara que `wb` manda sobre `temp` y
+escribir el balance obliga a **releer las dos de la cámara**. Es el único sitio
+donde se paga un parpadeo extra a propósito, y está escrito por qué.

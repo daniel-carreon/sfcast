@@ -1,0 +1,14 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{background:#09090b}
+#root{position:relative;width:320px;height:180px;overflow:hidden;background:#09090b;font-family:system-ui,sans-serif}
+#dot{position:absolute;left:20px;top:80px;width:20px;height:20px;border-radius:50%;background:#ff9101}
+#txt{position:absolute;left:0;right:0;top:30px;text-align:center;color:#e8e8ee;font-weight:800;font-size:18px;opacity:0}
+</style></head><body>
+<div id="root" data-composition-id="smoke" data-start="0" data-duration="0.5" data-width="320" data-height="180">
+<div id="dot"></div><div id="txt">SFSTUDIO</div>
+</div>
+<script src="gsap.min.js"></script>
+<script>const tl=gsap.timeline({paused:true});window.__timelines=window.__timelines||{};window.__timelines["smoke"]=tl;
+tl.to('#dot',{x:250,duration:.5,ease:'power2.inOut'},0);
+tl.to('#txt',{opacity:1,duration:.3},.1);</script></body></html>

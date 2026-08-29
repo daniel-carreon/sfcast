@@ -1,0 +1,26 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{background:#09090b}
+#root{position:relative;width:1080px;height:1920px;overflow:hidden;background:#09090b;font-family:system-ui,-apple-system,sans-serif}
+#orb{position:absolute;left:50%;top:42%;width:1200px;height:1200px;transform:translate(-50%,-50%);border-radius:50%;filter:blur(60px);background:radial-gradient(circle,rgba(255,145,1,.22),rgba(140,39,241,.12) 50%,transparent 72%)}
+#kick{position:absolute;top:320px;left:0;right:0;text-align:center;font-weight:800;font-size:44px;letter-spacing:.5em;text-indent:.5em;color:#c79cff;opacity:0}
+#word{position:absolute;top:46%;left:0;right:0;text-align:center;font-weight:900;font-size:150px;color:#fff;opacity:0}
+#word .sf{color:#ff9101}
+#bar{position:absolute;left:50%;top:56%;width:0;height:8px;transform:translateX(-50%);background:linear-gradient(90deg,#ff9101,#8c27f1);border-radius:4px}
+#tag{position:absolute;top:60%;left:0;right:0;text-align:center;font-weight:600;font-size:38px;color:#8a8a99;opacity:0}
+</style></head><body>
+<div id="root" data-composition-id="card916" data-start="0" data-duration="4" data-width="1080" data-height="1920">
+<div id="orb"></div>
+<div id="kick">VERTICAL</div>
+<div id="word"><span class="sf">SF</span>STUDIO</div>
+<div id="bar"></div>
+<div id="tag">aspect-agnostic · 1080×1920</div>
+</div>
+<script src="gsap.min.js"></script>
+<script>const tl=gsap.timeline({paused:true});window.__timelines=window.__timelines||{};window.__timelines["card916"]=tl;
+tl.fromTo('#kick',{opacity:0,y:24},{opacity:1,y:0,duration:.5,ease:'power3.out'},.1);
+tl.fromTo('#word',{opacity:0,scale:.85},{opacity:1,scale:1,duration:.6,ease:'back.out(1.4)'},.35);
+tl.to('#bar',{width:620,duration:.55,ease:'power2.out'},.7);
+tl.fromTo('#tag',{opacity:0},{opacity:1,duration:.4},1.0);
+tl.to('#word',{y:-12,duration:1.2,ease:'sine.inOut',yoyo:true,repeat:1},1.4);
+tl.to(['#kick','#word','#bar','#tag'],{opacity:0,duration:.35,ease:'power2.in'},3.55);</script></body></html>

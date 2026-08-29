@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SFStudio — Sala de Revisión</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <div id="brand"><span class="sf">SF</span>STUDIO <span id="projname"></span></div>
+  <div id="speeds" title="Velocidad de reproducción · 0.75× a 3×, de 0.25 en 0.25 · &lt; y &gt; también la mueven">
+    <span class="spdEnd">0.75</span>
+    <span class="spdWrap"><input id="speedRange" class="spdRange" type="range" min="0.75" max="3" step="0.25" value="1"
+           list="spdTicks" aria-label="velocidad de reproducción"><span class="spdNotches" aria-hidden="true"></span></span>
+    <datalist id="spdTicks">
+      <option value="0.75"></option><option value="1"></option><option value="1.25"></option>
+      <option value="1.5"></option><option value="1.75"></option><option value="2"></option>
+      <option value="2.25"></option><option value="2.5"></option>
+      <option value="2.75"></option><option value="3"></option>
+    </datalist>
+    <span class="spdEnd">3</span>
+    <output id="speedOut" for="speedRange">1×</output>
+  </div>
+  <span id="saveDot" style="font-size:11px;opacity:.35;margin-right:8px;transition:opacity .3s" title="Tus recortes se guardan solos en fixes.json">● guardado</span>
+  <button id="exportBtn" title="Exportar fixes.json (⌘E) — avisa a la fábrica que ya terminaste">Exportar fixes</button>
+  <button id="gearBtn" title="Atajos y ajustes"></button>
+</header>
+
+<main id="main">
+  <!-- IZQUIERDA = LA VOZ DE DANIEL (feedback, tecla C) · DERECHA = la de la fábrica (marcadores) -->
+  <aside id="comments">
+    <h2>Comentarios <span id="cCount">0</span></h2>
+    <p id="cHint">Pulsa <kbd>C</kbd> mientras ves el video: guarda el timestamp y tu nota.</p>
+    <ol id="commentList"></ol>
+    <button id="cCopy" title="Copiar todo el feedback como texto (para pegárselo a Levy)">Copiar feedback</button>
+  </aside>
+  <div id="dragComments" title="arrastra para redimensionar el panel"></div>
+  <div id="stageWrap">
+    <div id="stage">
+      <video id="base" playsinline preload="auto"></video>
+      <div id="overlays"></div>
+    </div>
+    <!-- controles de pantalla completa: viven DENTRO del elemento fullscreen para ser visibles -->
+    <div id="fsHelp" hidden>
+      <b>Espacio</b> play · <b>←/→</b> 1 frame (⇧×10) · <b>&lt; &gt;</b> velocidad · <b>↑/↓</b> bloque · <b>Q/E</b> selección · <b>S/A/D</b> corte · <b>M</b> marcador · <b>C</b> comentario · <b>F</b> o <b>Esc</b> salir
+    </div>
+    <div id="fsBar" hidden>
+      <button id="fsPlay" class="fsBtn" title="play / pausa (Espacio)"></button>
+      <span id="fsTime" class="fsTime">0:00 / 0:00</span>
+      <div id="fsSeek" title="arrastra para moverte por el video"><div id="fsSeekFill"></div><div id="fsSeekKnob"></div></div>
+      <div id="fsSpeeds" title="Velocidad · 0.75× a 3×">
+        <span class="spdWrap"><input id="fsSpeedRange" class="spdRange" type="range" min="0.75" max="3" step="0.25" value="1"
+               list="spdTicks" aria-label="velocidad de reproducción"><span class="spdNotches" aria-hidden="true"></span></span>
+        <output id="fsSpeedOut" for="fsSpeedRange">1×</output>
+      </div>
+      <button id="fsKeys" class="fsBtn" title="atajos"></button>
+    </div>
+  </div>
+  <div id="dragSidebar" title="arrastra para redimensionar el panel"></div>
+  <aside id="sidebar">
+    <h2>Marcadores</h2>
+    <ol id="markerList"></ol>
+    <div id="trimSummary"></div>
+    <div id="itemInfo" hidden></div>
+  </aside>
+</main>
+
+<section id="transport">
+  <button id="playBtn" title="Play/Pausa (Espacio)">▶</button>
+  <span id="timecode">0:00.0 / 0:00.0</span>
+  <span id="speedBadge">1x</span>
+  <div id="modesCtl" role="group" aria-label="modos">
+    <button id="magnetBtn" title="Imán (ajuste automático): snap a playhead y bordes al arrastrar · ⌥ lo invierte por gesto"></button>
+    <button id="linkBtn" title="Vinculación: al recortar un rango del base, los assets que caen completos adentro se eliminan con él"></button>
+  </div>
+  <div id="viewCtl">
+    <button id="viewBtn" title="Ver los cortes como huecos rojos"></button>
+  </div>
+  <div id="zoomCtl">
+    <button id="zoomOut" title="alejar"></button>
+    <button id="zoomFit" title="ajustar todo"></button>
+    <button id="zoomIn" title="acercar"></button>
+  </div>
+</section>
+
+<section id="timelinePane">
+  <div id="dragTimeline" title="arrastra para redimensionar el timeline"></div>
+  <div id="timelineScroll">
+    <div id="timeline">
+      <div id="ruler"></div>
+      <div id="markerLane"></div>
+      <div class="track" id="track3" data-label="caps"></div>
+      <div class="track" id="track2" data-label="alpha"></div>
+      <div class="track" id="track1" data-label="clips"></div>
+      <div id="waveRow"><canvas id="waveCanvas"></canvas></div>
+      <div class="track base" id="track0" data-label="base"></div>
+      <div id="playhead"></div>
+    </div>
+  </div>
+</section>
+
+<div id="helpPanel" hidden>
+  <header class="hpHead"><span>Atajos</span><button id="hpClose" title="cerrar (Esc)">✕</button></header>
+  <div class="hpBody">
+    <section>
+      <h4>Reproducción</h4>
+      <div class="hpRow"><span class="hpKeys"><kbd>Espacio</kbd></span><span class="hpDesc">play / pausa</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>&lt;</kbd><kbd>&gt;</kbd></span><span class="hpDesc">velocidad — barra de <b>0.75× a 3×</b>, de 0.25 en 0.25 (tono normal siempre)</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>←</kbd><kbd>→</kbd></span><span class="hpDesc">1 frame (<kbd>⇧</kbd> ×10)</span></div>
+    </section>
+    <section>
+      <h4>Navegación y selección</h4>
+      <div class="hpRow"><span class="hpKeys"><kbd>↑</kbd><kbd>↓</kbd></span><span class="hpDesc">bloque siguiente / anterior</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>Q</kbd><kbd>E</kbd></span><span class="hpDesc">seleccionar todo (+ la base) a la izq./der. del cursor → arrastra el grupo = <b>ripple</b></span></div>
+    </section>
+    <section>
+      <h4>Corte del base</h4>
+      <div class="hpRow"><span class="hpKeys"><kbd>S</kbd><kbd>A</kbd><kbd>D</kbd></span><span class="hpDesc">split · trim← · trim→ (sin selección = base)</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>⌥</kbd>+arrastre</span><span class="hpDesc">recorta un rango</span></div>
+      <div class="hpRow"><span class="hpKeys">costura ✂</span><span class="hpDesc">click verifica · bordes ajustan · doble-click restaura</span></div>
+      <div class="hpRow"><span class="hpKeys tijeras">tijeras</span><span class="hpDesc">botón de la barra: ver los huecos en <b>rojo</b></span></div>
+    </section>
+    <section>
+      <h4>Assets (overlays)</h4>
+      <div class="hpRow"><span class="hpKeys">arrastrar</span><span class="hpDesc">mover · bordes = trim</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>⌥</kbd><kbd>←</kbd><kbd>→</kbd></span><span class="hpDesc">mover el asset 1 frame (<kbd>⇧</kbd> ×10)</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>Supr</kbd></span><span class="hpDesc">borrar el / los seleccionados</span></div>
+    </section>
+    <section>
+      <h4>Modos y general</h4>
+      <div class="hpRow"><span class="hpKeys">imán · 🔗</span><span class="hpDesc">snap al arrastrar · vinculación (recorte se lleva los assets adentro)</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>⌘Z</kbd><kbd>⌘⇧Z</kbd></span><span class="hpDesc">deshacer / rehacer</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>M</kbd></span><span class="hpDesc">marcador con nota (oro, derecha — notas de la fábrica)</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>C</kbd></span><span class="hpDesc"><b>comentario / feedback tuyo</b> (morado, izquierda) — guarda el timestamp y viaja en <code>fixes.json</code></span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>F</kbd></span><span class="hpDesc">pantalla completa</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>⌘E</kbd></span><span class="hpDesc">exportar fixes.json</span></div>
+      <div class="hpRow"><span class="hpKeys"><kbd>⌘Y</kbd></span><span class="hpDesc">panel de publicación</span></div>
+    </section>
+  </div>
+</div>
+
+<div id="popover" hidden>
+  <input id="popInput" type="text" placeholder="nota del marcador…" autocomplete="off">
+</div>
+
+<!-- menú contextual (clic derecho sobre la base / la onda): separar audio · borrar rango -->
+<div id="ctxMenu" hidden></div>
+
+<div id="publishPanel" hidden>
+  <header id="ppHead">
+    <span id="ppBrand"><span class="sf">SF</span>PUBLISH</span>
+    <span id="ppSlug"></span>
+    <div id="ppStepper" title="pipeline post-edición (hover = evidencia)"></div>
+    <button id="ppClose" title="cerrar (Y)">✕</button>
+  </header>
+  <div id="ppBody">
+    <nav id="ppRail" aria-label="secciones del dossier">
+      <button class="ppRailBtn" data-col="tr" title="prender/apagar Transcript"><span class="ppLed"></span>Transcript</button>
+      <button class="ppRailBtn" data-col="meta" title="prender/apagar Metadata"><span class="ppLed"></span>Metadata</button>
+      <button class="ppRailBtn" data-col="launch" title="prender/apagar Lanzamiento"><span class="ppLed"></span>Lanzamiento</button>
+    </nav>
+    <div id="ppGrid">
+      <section class="ppCol" data-col="tr">
+        <h3 class="ppH">Transcript <span id="ppTrMeta" class="ppHmeta"></span><button class="ppCopy" id="copyTranscript" title="copiar el transcript completo"></button></h3>
+        <div id="ppTranscript" class="ppScroll"></div>
+      </section>
+      <section class="ppCol" data-col="meta">
+        <div class="ppScroll" id="ppMetaCol">
+          <h3 class="ppH">Títulos <span class="ppHmeta"></span><button class="ppCopy" id="copyTitles" title="copiar los 3 títulos"></button></h3><div id="ppTitles"></div>
+          <h3 class="ppH">Descripción <span id="ppLinkState" class="ppHmeta"></span><button class="ppCopy" id="copyDesc" title="copiar la descripción (lista para YouTube)"></button></h3><div id="ppDesc" class="ppText"></div>
+          <h3 class="ppH">Keywords <span class="ppHmeta"></span><button class="ppCopy" id="copyKeywords" title="copiar keywords separadas por coma"></button></h3><div id="ppKeywords" class="ppChips"></div>
+          <h3 class="ppH">Post de comunidad <span class="ppHmeta"></span><button class="ppCopy" id="copyPost" title="copiar el post"></button></h3><div id="ppPost" class="ppText"></div>
+        </div>
+      </section>
+      <section class="ppCol" data-col="launch">
+        <div class="ppScroll" id="ppLaunchCol">
+          <h3 class="ppH">Miniaturas · A/B</h3><div id="ppThumbs"></div>
+          <div id="ppLight" hidden>
+            <button id="ppLightClose" title="cerrar (Esc)" aria-label="cerrar">✕</button>
+            <button id="ppLightPrev" title="anterior (←)" aria-label="anterior">‹</button>
+            <img id="ppLightImg" alt="miniatura a tamaño real">
+            <button id="ppLightNext" title="siguiente (→)" aria-label="siguiente">›</button>
+            <div id="ppLightCap"></div>
+          </div>
+          <h3 class="ppH">Menciones → tarjetas</h3><div id="ppMentions"></div>
+          <h3 class="ppH">Horario</h3><div id="ppSchedule"></div>
+          <h3 class="ppH">Gate</h3><div id="ppGate"></div>
+          <h3 class="ppH">Upload</h3><div id="ppUpload"></div>
+        </div>
+      </section>
+    </div>
+  </div>
+  <footer id="ppFoot">espejo AI-first: aquí se <b>mira</b> el lanzamiento; las etapas las corre el agente (las decisiones se toman conversando) · <b>Y</b> cierra · click en un <b>timestamp</b> = seek · <b>⇧click</b> = seek y ver el video</footer>
+</div>
+
+<div id="galleryPanel" hidden>
+  <header id="galHead">
+    <span id="galBrand"><span class="sf">SF</span>GALERÍA</span>
+    <button id="galBack" hidden title="volver a la rejilla (Esc)">← lanzamientos</button>
+    <span id="galWhere"></span>
+    <input id="galSearch" type="search" placeholder="buscar lanzamiento…" autocomplete="off" spellcheck="false">
+    <span id="galCount"></span>
+    <button id="galClose" title="cerrar (⌘⌥G o Esc)">✕</button>
+  </header>
+  <div id="galBody">
+    <div id="galGrid"></div>
+    <div id="galDetail" hidden></div>
+  </div>
+  <footer id="galFoot">espejo AI-first: aquí se <b>mira</b> y se <b>aprueba</b>; el trabajo lo hace el agente conversando · <b>click</b> en una miniatura la vuelve portada · <b>⤢</b> o <b>F</b> la abre a pantalla completa · el post se edita y se aprueba aquí (aprobar ≠ publicar: sale solo cuando el video se hace público)</footer>
+
+  <!-- una miniatura se juzga a TAMAÑO REAL: la rejilla es para navegar, esto es para decidir -->
+  <div id="galLightbox" hidden>
+    <header id="glbBar">
+      <span id="glbName"></span>
+      <span id="glbCount"></span>
+      <button class="glbBtn" data-glb="cover">usar como portada</button>
+      <button class="glbBtn x" data-glb="close" title="cerrar (Esc)">✕</button>
+    </header>
+    <button class="glbNav" data-glb="prev" title="anterior (←)">‹</button>
+    <img id="glbImg" alt="">
+    <button class="glbNav next" data-glb="next" title="siguiente (→)">›</button>
+    <footer id="glbFoot">← → cambia de miniatura · <b>Enter</b> la vuelve portada · <b>Esc</b> cierra</footer>
+  </div>
+</div>
+
+<div id="modal" hidden>
+  <div id="modalCard">
+    <h3 id="modalTitle">fixes.json</h3>
+    <pre id="modalBody"></pre>
+    <div class="modalRow"><span id="modalPath"></span><button id="modalClose">Cerrar</button></div>
+  </div>
+</div>
+
+<div id="toast" hidden></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "_comment": "Config repetible del canal @danielcarreonai para el upload agéntico. La lee sfpublish (checklist + upload).",
+  "language": "es",
+  "madeForKids": false,
+  "category": "Science & Technology",
+  "license": "standard",
+  "alteredContent": false,
+  "visibilityDefault": "private",
+  "tagsBase": ["claude code", "ia", "inteligencia artificial", "saas", "programacion con ia", "agentes ia"],
+  "commentsPolicy": "hold_inappropriate",
+  "notifySubscribers": true
+}

@@ -1940,3 +1940,27 @@ Una guarda que protege una sesión VIVA no aplica a una que el hardware ya rompi
 *"no reconfigurar a media toma"* era correcta para un mic vivo y destructiva para
 uno muerto. Es la misma familia que v3.7b —distinguir "no puedo ahora" de "está
 roto"— pero al revés: aquí el reparador se negaba a reparar lo roto.
+
+## v4.2 — la MacBook como estación: dispositivos por nombre y nunca la cámara falsa (16 sep 2026)
+
+Primer arranque de SFCast en la MacBook (settings.json nuevo, sin elección): la
+sesión quedó con **OBS Virtual Camera + HUAWEI FreeBuds Pro 5** porque eran los
+defaults del sistema (medido con `AVCaptureDevice.default`). La Cam Link estaba
+desconectada.
+
+- **Nunca una cámara virtual por default.** `Devices.camera(id:)` cae al default
+  del sistema SOLO si no es virtual (`transportType == 'virt'`, medido en OBS).
+  Sin elegida conectada y con default virtual → sin cámara, y la alarma de
+  "CÁMARA CONGELADA" lo dice. Mejor sin cámara que con un cuadro fijo que se ve vivo.
+- **Elegido por nombre si cambia el uniqueID.** El uniqueID de una capturadora
+  UVC lleva el puerto USB: la Cam Link en otro puerto "no estaba". `save()` guarda
+  `cameraDeviceName`/`micDeviceName` junto al ID (todos los selectores pasan por
+  ahí) y `cameraElegida`/`microphoneElegido` buscan por ID y luego por nombre. Las
+  guardas de `rebindCamera`/`rebindMic` usan esas mismas funciones.
+- **Mic elegido ausente → el integrado de la Mac** (`'bltn'`) antes que el
+  default: la MacBook sale del escritorio sin el Shure y el default suele ser un
+  audífono Bluetooth (modo llamada). Sin elegido, el default de siempre.
+
+Verificado al instalar: `sesión de cámara → Shure MV7+ [audio]` sin cámara falsa
+(la Cam Link seguía sin enumerar por USB). `validate.sh` no corre en esta Mac:
+su paso 1 es `swift build` y no hay Xcode (se compiló con `build-sin-xcode.sh`).

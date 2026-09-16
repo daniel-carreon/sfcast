@@ -482,8 +482,7 @@ final class StudioEngine: NSObject {
         // Por eso la presencia se verifica AQUÍ, en el único sitio que fuerza, y no
         // en cada llamador: el watchdog, el runtime error, la interrupción y el
         // despertar del Mac quedan todos cubiertos por esta misma línea.
-        let elegida = AppSettings.load().cameraDeviceID
-        guard let id = elegida, AVCaptureDevice(uniqueID: id) != nil else {
+        guard Devices.cameraElegida(id: AppSettings.load().cameraDeviceID) != nil else {
             Log.error("Estudio: NO re-pego (\(reason)) — la cámara elegida no está enumerada. "
                       + "Forzar aquí pegaría la cámara equivocada (¿OBS Virtual?).")
             return
@@ -524,7 +523,7 @@ final class StudioEngine: NSObject {
         guard s.micEnabled, Permissions.micGranted else { return }
         // Misma guarda que la cámara: forzar sin comprobar la presencia pegaría
         // el dispositivo equivocado. Con `micDeviceID` nil vale el del sistema.
-        if let id = s.micDeviceID, Devices.microphone(id: id)?.uniqueID != id {
+        if s.micDeviceID != nil, Devices.microphoneElegido(id: s.micDeviceID) == nil {
             Log.error("Estudio: NO re-pego el micrófono (\(reason)) — el elegido no está enumerado")
             return
         }

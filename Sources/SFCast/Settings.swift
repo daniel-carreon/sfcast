@@ -8,6 +8,10 @@ struct AppSettings: Codable {
     var bubbleGlow = "ambar"        // ambar | morado | nada
     var cameraDeviceID: String? = nil   // uniqueID; nil = default del sistema
     var micDeviceID: String? = nil      // uniqueID; nil = default del sistema
+    /// Nombre del dispositivo elegido, para reconocerlo si su uniqueID cambia
+    /// (la Cam Link en otro puerto USB). Lo mantiene `save()`; nadie lo escribe a mano.
+    var cameraDeviceName: String? = nil
+    var micDeviceName: String? = nil
     var screenDisplayID: String? = nil  // CGDirectDisplayID en texto; nil = la principal
     var cameraEnabled = true            // burbuja de cámara (toggle del micropanel)
     var micEnabled = true
@@ -68,6 +72,8 @@ struct AppSettings: Codable {
         bubbleGlow = try c.decodeIfPresent(String.self, forKey: .bubbleGlow) ?? bubbleGlow
         cameraDeviceID = try c.decodeIfPresent(String.self, forKey: .cameraDeviceID)
         micDeviceID = try c.decodeIfPresent(String.self, forKey: .micDeviceID)
+        cameraDeviceName = try c.decodeIfPresent(String.self, forKey: .cameraDeviceName)
+        micDeviceName = try c.decodeIfPresent(String.self, forKey: .micDeviceName)
         screenDisplayID = try c.decodeIfPresent(String.self, forKey: .screenDisplayID)
         cameraEnabled = try c.decodeIfPresent(Bool.self, forKey: .cameraEnabled) ?? cameraEnabled
         micEnabled = try c.decodeIfPresent(Bool.self, forKey: .micEnabled) ?? micEnabled
@@ -98,10 +104,16 @@ struct AppSettings: Codable {
     }
 
     func save() {
+        // Cada elección se guarda con su nombre (todos los selectores pasan por
+        // aquí). Sin elección, sin nombre; si el elegido no está conectado ahora,
+        // se conserva el nombre que ya había.
+        var s = self
+        s.cameraDeviceName = cameraDeviceID == nil ? nil : (Devices.nombre(uniqueID: cameraDeviceID) ?? cameraDeviceName)
+        s.micDeviceName = micDeviceID == nil ? nil : (Devices.nombre(uniqueID: micDeviceID) ?? micDeviceName)
         try? FileManager.default.createDirectory(at: Self.dir, withIntermediateDirectories: true)
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? enc.encode(self) {
+        if let data = try? enc.encode(s) {
             try? data.write(to: Self.file)
         }
     }

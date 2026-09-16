@@ -31,6 +31,28 @@ if [ ! -d "$KS" ]; then
     exit 1
 fi
 
+# recorta-preview: el macro #Preview de KeyboardShortcuts exige el plugin de
+# macros que solo trae Xcode. Son 3 bloques de vista previa que NO se usan; se
+# recortan del checkout (regenerable) conservando el #endif que los envuelve.
+# Idempotente: si ya no estan, no hace nada. Diagnostico del 21 ago 2026: esto
+# NO es "necesita Xcode", es una dependencia ajena con un macro de preview.
+echo "[0/5] Recortando los #Preview de KeyboardShortcuts"
+python3 - "$KS/Recorder.swift" <<'PYEOF'
+import re, sys, pathlib
+import os, stat
+f = pathlib.Path(sys.argv[1])
+# SPM deja los checkouts en solo-lectura; se abre, se recorta y se devuelve el modo.
+modo = f.stat().st_mode
+os.chmod(f, modo | stat.S_IWUSR)
+t = f.read_text()
+n = len(re.findall(r'^#Preview\s*\{', t, re.M))
+if n:
+    t = re.sub(r'^#Preview\s*\{.*?^\}\n', '', t, flags=re.M | re.S)
+    f.write_text(t)
+os.chmod(f, modo)
+print(f"  · {n} bloques #Preview recortados")
+PYEOF
+
 echo "[1/5] Puente de Bundle.module"
 cat > "$TMP/ks_bundle_shim.swift" <<'EOF'
 // Lo genera SPM (resource_bundle_accessor). Sin SPM se escribe a mano.

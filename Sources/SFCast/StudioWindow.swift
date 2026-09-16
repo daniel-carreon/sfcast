@@ -150,6 +150,10 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
     var isStudioRecording: Bool { recorder.isRecording }
     var isOpen: Bool { window?.isVisible ?? false }
 
+    /// Mientras el preset de rodaje deja la cámara lista, justo antes de una
+    /// toma. Pinta el botón y bloquea el doble clic.
+    @Published var preparandoCamara = false
+
     var activeScene: StudioScene? {
         config.scenes.first(where: { $0.id == config.activeSceneID })
     }
@@ -259,8 +263,8 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
             // sensor apagado.
             // El daño que los watchdogs detectan VIAJA AL MANIFEST, no se queda
             // en el log: el editor tiene que saber qué segundos son una foto fija.
-            engine.onSourceFrozen = { [weak self] source, frozen, reason in
-                self?.recorder.noteFrozen(source, frozen: frozen, reason: reason)
+            engine.onSourceFrozen = { [weak self] source, frozen, reason, desdeHace in
+                self?.recorder.noteFrozen(source, frozen: frozen, reason: reason, desdeHace: desdeHace)
             }
             engine.onCadenceChange = { [weak self] efectivo, pedido in
                 guard let self else { return }
@@ -578,6 +582,16 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         try? await Task.sleep(nanoseconds: 4_000_000_000)
         await StudioTomasTest.run(tomas: tomas, dura: dura, pausaBase: pausa, engine: engine,
                                   recorder: recorder, config: config, scene: activeScene)
+    }
+
+    /// QA de la CAÍDA DEL MIC (`--micdrop S --dura D`, v4.1): la toma tiene que
+    /// sobrevivir a que el micrófono se caiga del USB a mitad.
+    func runMicDropTest(dropAt: Int, dura: Int) async {
+        testMode = true
+        open()
+        try? await Task.sleep(nanoseconds: 4_000_000_000)
+        await StudioMicDropTest.run(dropAt: dropAt, dura: dura, engine: engine,
+                                    recorder: recorder, config: config, scene: activeScene)
     }
 
     /// QA de SINCRONÍA (`--synctest N`): abre el motor, deja que las fuentes
@@ -1395,8 +1409,8 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
         config.save()
     }
 
-    /// LA RECETA DE LA ESCENA (28 ago 2026). Entrar a «Dos Caras» deja las tres
-    /// salidas puestas sin que Daniel toque una casilla; salir le devuelve SU
+    /// LA RECETA DE LA ESCENA (28 ago 2026). Entrar a «Dos Caras» deja las dos
+    /// capas puestas y «Programa» apagado sin que Daniel toque una casilla; salir le devuelve SU
     /// configuración. La restauración es tan importante como la aplicación: una
     /// escena especial que se lleve por delante los ajustes del dueño deja de
     /// ser una comodidad y pasa a ser una trampa.
@@ -1796,6 +1810,36 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
             }
         } else {
             guard recorder.state == .idle else { return }   // anti doble-clic en .stopping
+            // EL ÚLTIMO GATE ANTES DE LA TOMA. Revisar el preset de rodaje es
+            // gratis (espejo de disco) y solo abre sesión PTP si algo canta;
+            // ese parpadeo pasa AQUÍ, con la grabación todavía sin arrancar, y
+            // no dentro del video. Es lo que faltaba el 2 sep, cuando los
+            // primeros 3 minutos salieron desenfocados y se cortaron en edición.
+            //
+            // No es un diálogo ni una pregunta: corrige y graba. Preguntar
+            // delante del botón de grabar es justo lo que Daniel no quiere
+            // ("es molesto siempre tengo que pedírtelo").
+            if usaCamara, !preparandoCamara {
+                preparandoCamara = true
+                CameraPanelModel.shared.prepararRodaje { [weak self] in
+                    guard let self else { return }
+                    self.preparandoCamara = false
+                    self.arrancarGrabacion()
+                }
+                return
+            }
+            arrancarGrabacion()
+        }
+    }
+
+    /// ¿La toma va a tener cámara? Una grabación de solo pantalla no necesita
+    /// que la Sony esté lista, y hacerla esperar sería un parpadeo cobrado por
+    /// nada.
+    private var usaCamara: Bool {
+        activeScene?.items.contains { $0.kind == .camera } ?? false
+    }
+
+    private func arrancarGrabacion() {
             cadenceFloorNotified = false
             do {
                 try recorder.start(engine: engine, config: config, activeScene: activeScene)
@@ -1815,7 +1859,6 @@ final class StudioController: NSObject, ObservableObject, NSWindowDelegate {
             } catch {
                 recordError = error.localizedDescription
             }
-        }
     }
 }
 
@@ -3201,8 +3244,10 @@ struct OutputsPanel: View {
                         c.toggleRecord()
                     } label: {
                         HStack(spacing: 6) {
-                            Image(systemName: c.isRecording ? "stop.fill" : "record.circle.fill")
-                            Text(c.isRecording ? "Detener" : "Grabar")
+                            Image(systemName: c.isRecording ? "stop.fill"
+                                  : (c.preparandoCamara ? "camera.aperture" : "record.circle.fill"))
+                            Text(c.isRecording ? "Detener"
+                                 : (c.preparandoCamara ? "Preparando cámara…" : "Grabar"))
                                 .font(.system(size: 12.5, weight: .semibold))
                         }
                         .foregroundStyle(.white)

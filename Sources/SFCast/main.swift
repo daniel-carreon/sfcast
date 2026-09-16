@@ -123,6 +123,17 @@ let tomasPausa: Int = {
     return Int(cliArgs[i + 1]) ?? 0
 }()
 
+/// QA DE LA CAÍDA DEL MIC (`--micdrop S [--dura D]`, v4.1): graba D segundos y
+/// en el segundo S simula lo que hizo el USB el 7 sep 2026 — el input de audio
+/// desaparece de la sesión viva y `camera.mov` se cierra solo. Verde solo si
+/// el mic vuelve solo, el raw de cámara continúa en `camera-002.mov` y el
+/// hueco queda en el manifest. Es el test que faltaba: todos los demás prueban
+/// fuentes que no se mueren.
+let micDropAt: Int? = {
+    guard let i = cliArgs.firstIndex(of: "--micdrop") else { return nil }
+    return (i + 1 < cliArgs.count ? Int(cliArgs[i + 1]) : nil) ?? 6
+}()
+
 /// QA DE SINCRONÍA (`--synctest N`): mide la latencia real de cámara, pantalla
 /// y mic contra el reloj del host. Es el número que decide cuánto compensa el
 /// `ProgramClock` — y el que no se pudo sacar del archivo por correlación.
@@ -312,6 +323,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Log.info("QA: main liberado")
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 exit(0)
+            }
+        } else if let s = micDropAt {
+            Task { @MainActor in
+                await StudioController.shared.runMicDropTest(dropAt: s, dura: max(tomasDura, s + 14))
             }
         } else if let n = tomasCount {
             Task { @MainActor in

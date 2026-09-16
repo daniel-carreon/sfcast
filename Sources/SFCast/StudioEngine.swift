@@ -49,6 +49,44 @@ final class StudioEngine: NSObject {
     /// la cámara corre en `sessionQueue`).
     nonisolated(unsafe) private var fpsParaCamara: Int = 30
     private var micRetryAt: Double = 0
+
+    // MARK: - el raw de cámara por TRAMOS (v4.1, 7 sep 2026)
+    //
+    // El 7 sep el Shure MV7+ se cayó del bus USB al minuto 46.4 de una toma de
+    // 47 ("hardware connection lost" en el kernel; volvió 11 ms después). Como
+    // mic y cámara viven en la MISMA AVCaptureSession, AVFoundation reconfiguró
+    // el grafo, cerró `camera.mov` con "Recording Stopped" y el micrófono quedó
+    // mudo. La app SABÍA (watchdog + guard de voz) pero se negaba a re-pegar
+    // "con una toma en curso", y Daniel tuvo que parar. El raw de pantalla ya
+    // sabía continuar en `screen-002.mp4` cuando el stream se reengancha; el
+    // de cámara no tenía ese camino. Ahora lo tiene: cuando `camera.mov` muere
+    // con la toma viva, en cuanto cámara y mic vuelven a entregar se abre
+    // `camera-002.mov`, y el corte queda en el manifest.
+    /// Un archivo del raw de cámara dentro de la toma actual, con su delegate
+    /// (que sabe cuándo abrió y cuándo cerró) y cómo terminó.
+    struct CamRawTramo {
+        let file: String
+        let delegate: CamFileDelegate
+        /// "stop" = lo cerró el recorder · "murió: <error>" = lo cerró AVFoundation
+        var cerradoPor: String?
+    }
+    private(set) var camRawTramos: [CamRawTramo] = []
+    /// `stopCameraMovie` lo pone ANTES de pedir el cierre; así el delegate sabe
+    /// distinguir "me pidieron parar" de "me mataron a media toma".
+    private var camRawStopPedido = false
+    /// Un tramo murió con la toma viva y todavía no se ha reabierto.
+    private var camRawPendienteDeReabrir: (file: String, host: Double, error: String?)?
+    private var camRawReabrirAt: Double = 0
+    private var camRawReaperturas = 0
+    /// Techo de reaperturas por toma: si el USB se cae 20 veces, el problema es
+    /// el cable, no algo que un writer nuevo vaya a arreglar.
+    private static let maxCamRawReaperturas = 20
+    /// Lo provee StudioRecorder: la siguiente URL del raw de cámara cuando hay
+    /// que continuar a mitad de toma (camera-002.mov, -003…). Hermano de
+    /// `onNeedNewScreenRawURL`.
+    var onNeedNewCameraRawURL: (() -> URL?)?
+    /// (archivo nuevo, segundos sin raw de cámara) — para avisar en pantalla.
+    var onCameraRawReabierto: ((String, Double) -> Void)?
     /// La CÁMARA lleva rato sin entregar imagen nueva. Descubierto el 9 ago en
     /// una prueba de 50 min: la ZV-E10 se apagó sola al minuto 31.6 (las Sony
     /// tienen auto power off) y la grabación siguió 18 minutos componiendo su
@@ -142,7 +180,12 @@ final class StudioEngine: NSObject {
     /// Una fuente se congeló (o volvió): (source, frozen, motivo). Lo consume el
     /// grabador para dejarlo escrito en el manifest — el editor tiene que saber
     /// qué segundos son una foto fija.
-    var onSourceFrozen: ((String, Bool, String) -> Void)?
+    /// (fuente, congelada?, motivo, hace cuántos segundos dejó de entregar).
+    /// El cuarto número existe porque el vigía se entera `deadAfter` segundos
+    /// DESPUÉS del último frame/muestra: una zona muerta anclada al instante
+    /// del aviso empezaba 5 s tarde (medido con `--micdrop`: 11.5→12.5 para un
+    /// mic que llevaba mudo desde 6.0).
+    var onSourceFrozen: ((String, Bool, String, Double) -> Void)?
     /// FPS que está corriendo ahora mismo el render loop (≤ el configurado).
     var effectiveFPS: Int { governor.effective == 0 ? fps : governor.effective }
 
@@ -379,8 +422,9 @@ final class StudioEngine: NSObject {
     /// Cambio de cámara/micrófono EN CALIENTE (doble clic en Fuentes/Mixer, o
     /// Ajustes → Aplicar): reconcilia los inputs de la sesión con lo elegido en
     /// AppSettings, sin parar la sesión y jamás en main.
-    func applyDeviceSelection(micEnabled: Bool, forceCamera: Bool = false, forceMic: Bool = false) {
-        guard cameraAvailable else { return }   // sin permiso de cámara no hay sesión viva
+    func applyDeviceSelection(micEnabled: Bool, forceCamera: Bool = false, forceMic: Bool = false,
+                              luego: (@MainActor () -> Void)? = nil) {
+        guard cameraAvailable else { luego.map { l in Task { @MainActor in l() } }; return }
         let s = AppSettings.load()
         let camID = s.cameraDeviceID
         let micID = s.micDeviceID
@@ -403,6 +447,7 @@ final class StudioEngine: NSObject {
                      + devs.map { "\($0.localizedName) [\($0.hasMediaType(.audio) ? "audio" : "video")]" }
                            .joined(separator: " + ")
                      + (cambio ? (forceCamera ? " (RE-PEGADA a la fuerza)" : "") : " (sin cambios)"))
+            if let luego { Task { @MainActor in luego() } }
         }
     }
 
@@ -460,10 +505,19 @@ final class StudioEngine: NSObject {
     /// cámara, y reconfigurarla a media grabación le daría un tirón a la imagen.
     /// Con la toma parada —que es cuando de verdad importa, porque si no la
     /// siguiente también nace muerta— se re-pega sin coste.
+    ///
+    /// ⚠️ ENMIENDA (v4.1, 7 sep 2026): con la toma en curso SÍ se re-pega, pero
+    /// SOLO si el micrófono está MUERTO (`micDead`, lo dice el watchdog). El
+    /// "tirón" que esta guarda evitaba ya lo dio el USB: cuando el Shure se cae
+    /// del bus, AVFoundation reconfigura el grafo por su cuenta y el audio ya
+    /// no está. Negarse a re-pegar ahí no protege nada — garantiza que el resto
+    /// de la toma salga sin voz (47 minutos el 7 sep, parados a mano). Un mic
+    /// VIVO a media toma se sigue sin tocar, por la razón original.
     func rebindMic(reason: String) {
         guard cameraAvailable else { return }
-        guard !StudioController.shared.recorder.isRecording else {
-            Log.error("Estudio: NO re-pego el micrófono con una toma en curso (\(reason))")
+        let enToma = StudioController.shared.recorder.isRecording
+        if enToma, !micDead {
+            Log.error("Estudio: NO re-pego el micrófono con una toma en curso y el mic VIVO (\(reason))")
             return
         }
         let s = AppSettings.load()
@@ -474,8 +528,13 @@ final class StudioEngine: NSObject {
             Log.error("Estudio: NO re-pego el micrófono (\(reason)) — el elegido no está enumerado")
             return
         }
-        Log.info("Estudio: RE-PEGANDO el micrófono — \(reason)")
-        applyDeviceSelection(micEnabled: true, forceMic: true)
+        Log.info("Estudio: RE-PEGANDO el micrófono" + (enToma ? " A MEDIA TOMA" : "") + " — \(reason)")
+        applyDeviceSelection(micEnabled: true, forceMic: true) { [weak self] in
+            // El raw de cámara que murió con el mic se reabre en cuanto el audio
+            // vuelva a entrar (lo comprueba el vigía cada segundo); aquí solo se
+            // adelanta el primer intento.
+            self?.reabrirRawDeCamaraSiHaceFalta(motivo: "micrófono re-pegado")
+        }
     }
 
     // MARK: - pantalla (SCStream con frames + SCRecordingOutput opcional)
@@ -857,9 +916,33 @@ final class StudioEngine: NSObject {
                 }.joined(separator: " · ")
                 Log.info("Estudio: formatos de «\(cam.localizedName)» → \(inventario)")
 
+                // ⭐ LA RESOLUCIÓN DE RODAJE SE PIDE, NO SE HEREDA (7 sep 2026).
+                //
+                // "Sólo formatos con las dimensiones del activo" tenía un agujero:
+                // el formato activo es estado del DISPOSITIVO y lo deja puesto el
+                // último proceso que lo usó. Una videollamada en el navegador
+                // pide 640x480; al abrir el Estudio después, la Cam Link seguía en
+                // VGA, este código lo "respetaba", y Daniel se veía borroso con la
+                // cámara perfectamente enfocada (1 sep, 5 sep y 7 sep: las tres
+                // sesiones a 640x480; todas las demás a 1920x1080). Es el mismo
+                // error que el 720p de sfcam el 22 ago: respetar `activeFormat` a
+                // ciegas es quedarse con el defecto de otro.
+                //
+                // Regla: si el dispositivo ofrece la resolución de rodaje a la
+                // cadencia objetivo, se pide ésa. Si no la ofrece (otra cámara,
+                // otra señal), se conserva la del activo como antes.
+                let dimRodaje = (width: Int32(1920), height: Int32(1080))
+                let ofreceRodaje = cam.formats.contains {
+                    let d = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
+                    return d.width == dimRodaje.width && d.height == dimRodaje.height && mejorRango($0) != nil
+                }
+                let dimQuiere = ofreceRodaje ? dimRodaje : (width: dimAct.width, height: dimAct.height)
+                if dimQuiere.width != dimAct.width || dimQuiere.height != dimAct.height {
+                    Log.info("Estudio: la Cam Link venía en \(dimAct.width)x\(dimAct.height) (lo dejó otro proceso); se pide \(dimQuiere.width)x\(dimQuiere.height)")
+                }
                 let candidatos = cam.formats.filter {
                     let d = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
-                    return d.width == dimAct.width && d.height == dimAct.height
+                    return d.width == dimQuiere.width && d.height == dimQuiere.height
                 }
                 // ⭐ ENTRE FORMATOS EMPATADOS, GANA EL QUE EL DISPOSITIVO LISTA
                 // PRIMERO. La Cam Link presenta cada resolución DOS veces —
@@ -890,15 +973,17 @@ final class StudioEngine: NSObject {
                         cam.activeVideoMinFrameDuration = r.minFrameDuration
                         cam.activeVideoMaxFrameDuration = r.minFrameDuration
                         cam.unlockForConfiguration()
-                        Log.info(String(format: "Estudio: FORMATO fijado %dx%d @ %.2f fps (venia a %.2f)",
-                                        dimAct.width, dimAct.height, r.maxFrameRate, actualAntes))
+                        let dimFin = CMVideoFormatDescriptionGetDimensions(formato.formatDescription)
+                        Log.info(String(format: "Estudio: FORMATO fijado %dx%d @ %.2f fps (venia a %dx%d @ %.2f)",
+                                        dimFin.width, dimFin.height, r.maxFrameRate,
+                                        dimAct.width, dimAct.height, actualAntes))
                     } catch {
                         Log.error("Estudio: no pude fijar el formato de la camara: \(error.localizedDescription)")
                     }
                 } else {
                     Log.error(String(format: "Estudio: NINGUN formato de %dx%d ofrece ~%.0f fps — se queda a %.2f. "
                                      + "Revisa la salida HDMI de la camara.",
-                                     dimAct.width, dimAct.height, objetivo, actualAntes))
+                                     dimQuiere.width, dimQuiere.height, objetivo, actualAntes))
                 }
             }
             if let cam = devs.first(where: { $0.hasMediaType(.video) }) {
@@ -951,8 +1036,24 @@ final class StudioEngine: NSObject {
         nc.addObserver(forName: .AVCaptureSessionRuntimeError, object: session,
                        queue: .main) { [weak self] note in
             let err = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
-            Log.error("Estudio: AVCaptureSession RUNTIME ERROR — \(err?.localizedDescription ?? "?")")
-            self?.rebindCamera(reason: "runtime error de la sesión")
+            // CON CÓDIGO Y RAZÓN (v4.1). "Recording Stopped" a secas es la
+            // descripción de media docena de AVError distintos; el 7 sep hubo
+            // que ir al log unificado del kernel para saber que era el Shure
+            // cayéndose del USB. El dato que decide el diagnóstico va aquí.
+            Log.error("Estudio: AVCaptureSession RUNTIME ERROR — \(err?.localizedDescription ?? "?")"
+                      + (err.map { " [\($0.domain) \($0.code)" + ($0.localizedFailureReason.map { " · \($0)" } ?? "") + "]" } ?? ""))
+            guard let self else { return }
+            if StudioController.shared.recorder.isRecording {
+                // Con la toma viva NO se re-pega la cámara a ciegas: el 7 sep la
+                // cámara siguió entregando 25 fps después de este error (el
+                // muerto era el mic). Los vigías de mic y cámara miden cada
+                // fuente por separado y re-pegan solo lo que de verdad murió.
+                Log.error("Estudio: toma en curso — la sesión sigue; los vigías de mic y cámara "
+                          + "deciden qué re-pegar (mic:\(self.levels.fresh().mic ? "ok" : "MUDO") "
+                          + "cam:\(String(format: "%.1fs", self.frames.age(.camera) ?? -1)))")
+                return
+            }
+            self.rebindCamera(reason: "runtime error de la sesión")
         }
         // OJO: `AVCaptureSessionInterruptionReasonKey` es solo de iOS (no compila en
         // macOS), así que aquí la razón no viaja. Basta con saber QUE pasó.
@@ -1072,12 +1173,117 @@ final class StudioEngine: NSObject {
     /// RAW de cámara (salida A): .mov con video+mic, patrón camOnly probado.
     /// El output YA vive en la sesión desde el arranque — aquí solo se escribe
     /// (cero reconfiguración del grafo = cero pop).
-    func startCameraMovie(url: URL) {
-        guard cameraAvailable, let out = cameraMovieOut, !out.isRecording else { return }
+    @discardableResult
+    func startCameraMovie(url: URL) -> Bool {
+        guard cameraAvailable, let out = cameraMovieOut, !out.isRecording else { return false }
         let del = CamFileDelegate(label: "Estudio raw de cámara")
-        cameraMovieDelegate = del
+        let file = url.lastPathComponent
+        // El primer tramo de la toma (`camera.mov`) sigue siendo el delegate
+        // "principal": `camRawFirstFrameHost` y el ancla del stop lo leen de ahí.
+        if camRawTramos.isEmpty { cameraMovieDelegate = del }
+        camRawTramos.append(CamRawTramo(file: file, delegate: del))
+        camRawStopPedido = false
+        del.onFinished = { [weak self] _, error in
+            let ns = error as NSError?
+            let host = CACurrentMediaTime()
+            Task { @MainActor [weak self] in
+                self?.camRawTermino(file: file, host: host,
+                                    error: ns.map { "\($0.localizedDescription) [\($0.domain) \($0.code)]" })
+            }
+        }
         armRawStarts(camera: true, screen: false)
         out.startRecording(to: url, recordingDelegate: del)
+        return true
+    }
+
+    /// Cada toma arranca con el registro de tramos limpio. Lo llama el
+    /// recorder ANTES de abrir `camera.mov`.
+    func resetCamRawTramos() {
+        camRawTramos = []
+        camRawPendienteDeReabrir = nil
+        camRawReaperturas = 0
+        camRawStopPedido = false
+    }
+
+    /// Un tramo del raw de cámara cerró. Si nadie lo pidió y la toma sigue
+    /// viva, murió: se anota y se deja pendiente de reabrir.
+    private func camRawTermino(file: String, host: Double, error: String?) {
+        if let i = camRawTramos.firstIndex(where: { $0.file == file }) {
+            camRawTramos[i].cerradoPor = camRawStopPedido ? "stop" : "murió: \(error ?? "cerró sin error y sin que nadie lo pidiera")"
+        }
+        guard !camRawStopPedido, StudioController.shared.recorder.isRecording else { return }
+        Log.error("Estudio: \(file) MURIÓ A MEDIA TOMA (\(error ?? "sin error")) — "
+                  + "se reabre en cuanto cámara y micrófono vuelvan a entregar")
+        camRawPendienteDeReabrir = (file, host, error)
+        // Un respiro antes del primer intento: la muerte del archivo llega en
+        // mitad de una reconfiguración del grafo (el input que se fue), y el
+        // vúmetro todavía trae 0.35 s de buffers en vuelo. Medido con
+        // `--micdrop`: sin esto se reabría a los 0.3 s, sin audio conectado,
+        // y ese tramo moría también.
+        camRawReabrirAt = CACurrentMediaTime() + 2
+        onStatusChange?()
+    }
+
+    /// EL ACTUADOR del tramo muerto. Corre desde el vigía (1×/s) y desde el
+    /// re-pegado del mic. Reabre SOLO cuando las dos fuentes del archivo están
+    /// entregando: un `camera-002.mov` sin audio sería un archivo que parece
+    /// bueno y no lo es (el mismo patrón que ya costó el vúmetro clavado).
+    func reabrirRawDeCamaraSiHaceFalta(motivo: String) {
+        guard let pendiente = camRawPendienteDeReabrir else { return }
+        guard StudioController.shared.recorder.isRecording else { return }
+        guard cameraAvailable, let out = cameraMovieOut, !out.isRecording else { return }
+        let now = CACurrentMediaTime()
+        guard now >= camRawReabrirAt else { return }
+        camRawReabrirAt = now + 3
+        guard camRawReaperturas < Self.maxCamRawReaperturas else {
+            Log.error("Estudio: \(Self.maxCamRawReaperturas) reaperturas del raw de cámara en esta toma — "
+                      + "no reabro más (¿cable?). Sigo grabando el resto.")
+            camRawPendienteDeReabrir = nil
+            return
+        }
+        let camViva = (frames.age(.camera) ?? .greatestFiniteMagnitude) < Self.deadAfter
+        let micPedido = AppSettings.load().micEnabled && Permissions.micGranted
+        // "El mic entrega" no basta: tiene que estar CONECTADO a este writer.
+        // Con el input de audio fuera de la sesión, el MovieFileOutput no tiene
+        // conexión de audio y el archivo saldría sin voz aunque el vúmetro se
+        // mueva (buffers en vuelo del input viejo).
+        let audioConectado = out.connection(with: .audio)?.isActive == true
+        let micOK = !micPedido || (levels.fresh().mic && audioConectado)
+        guard camViva, micOK else {
+            Log.info("Estudio: raw de cámara pendiente de reabrir (\(motivo)) — "
+                     + "cámara:\(camViva ? "ok" : "sin imagen") mic:\(levels.fresh().mic ? "ok" : "mudo")"
+                     + " audio→writer:\(audioConectado ? "sí" : "no")")
+            return
+        }
+        guard let url = onNeedNewCameraRawURL?() else { return }
+        guard startCameraMovie(url: url) else {
+            Log.error("Estudio: no pude reabrir el raw de cámara en \(url.lastPathComponent)")
+            return
+        }
+        camRawReaperturas += 1
+        camRawPendienteDeReabrir = nil
+        let hueco = now - pendiente.host
+        Log.info(String(format: "Estudio: raw de cámara continúa en %@ (%@) — %.1fs sin raw de cámara",
+                        url.lastPathComponent, motivo, hueco))
+        onCameraRawReabierto?(url.lastPathComponent, hueco)
+        onStatusChange?()
+    }
+
+    /// QA (`--micdrop`): simula lo que hizo el USB el 7 sep — el input de audio
+    /// desaparece de la sesión viva y el writer del raw de cámara se cierra
+    /// solo. Ejerce el camino REAL de recuperación, no una copia.
+    func simularCaidaDelMic() {
+        let session = cameraSession
+        Log.error("QA: --micdrop — quito el input de audio de la sesión y mato camera.mov, como el USB el 7 sep")
+        sessionQueue.async {
+            session.beginConfiguration()
+            for i in session.inputs.compactMap({ $0 as? AVCaptureDeviceInput })
+            where i.device.hasMediaType(.audio) && !i.device.hasMediaType(.video) {
+                session.removeInput(i)
+            }
+            session.commitConfiguration()
+        }
+        if let out = cameraMovieOut, out.isRecording { out.stopRecording() }
     }
 
     /// Instante host en que arrancó `camera.mov`, RECONSTRUIDO al cerrarlo:
@@ -1095,14 +1301,16 @@ final class StudioEngine: NSObject {
     private(set) var camRawStopHost: Double?
 
     func stopCameraMovie() async {
+        camRawPendienteDeReabrir = nil          // al detener ya no hay nada que reabrir
         guard let out = cameraMovieOut, out.isRecording else { return }
         // El instante del STOP es el ancla: el arranque se reconstruye después
         // restándole la duración REAL del archivo (la que trae el contenedor,
         // no `recordedDuration` — esa cuenta desde la LLAMADA a startRecording e
         // ignora el ~1.6 s de cabeza que AVFoundation descarta mientras abre).
         camRawStopHost = CACurrentMediaTime()
+        camRawStopPedido = true
         out.stopRecording()
-        if let del = cameraMovieDelegate {
+        if let del = camRawTramos.last?.delegate ?? cameraMovieDelegate {
             let deadline = Date().addingTimeInterval(10)
             while !del.finished && Date() < deadline {
                 try? await Task.sleep(nanoseconds: 60_000_000)
@@ -1241,6 +1449,7 @@ final class StudioEngine: NSObject {
                 self?.checkStreamHealth()
                 self?.checkCameraHealth()
                 self?.checkMicHealth()
+                self?.reabrirRawDeCamaraSiHaceFalta(motivo: "vigía")
             }
         }
     }
@@ -1265,7 +1474,7 @@ final class StudioEngine: NSObject {
         if dead != cameraFrozen {
             cameraFrozen = dead
             onStatusChange?()
-            onSourceFrozen?("camera", dead, "sin imagen nueva (¿se apagó sola? ¿cable USB?)")
+            onSourceFrozen?("camera", dead, "sin imagen nueva (¿se apagó sola? ¿cable USB?)", dead ? age : 0)
             if dead {
                 Log.error(String(format: "Estudio: CÁMARA CONGELADA — %.1fs sin imagen nueva "
                                  + "(¿se apagó sola? ¿cable USB?)", age))
@@ -1323,13 +1532,17 @@ final class StudioEngine: NSObject {
         guard isRunning, AppSettings.load().micEnabled, Permissions.micGranted else { return }
         let age = levels.micAge()
         let dead = age > Self.deadAfter
+        let grabando = StudioController.shared.recorder.isRecording
         if dead != micDead {
             micDead = dead
+            // El tramo sin voz viaja al manifest como zona muerta de "mic",
+            // igual que los de cámara y pantalla (v4.1).
+            onSourceFrozen?("mic", dead, "sin muestras de micrófono (¿USB? ¿se apagó?)", dead ? age : 0)
             if dead {
                 Log.error(String(format: "Estudio: MICRÓFONO MUDO — %.1fs sin una muestra", age))
                 onAlert?("El micrófono dejó de entregar audio. Si estás grabando, esta toma va sin voz.", true, "microfono")
-                if StudioController.shared.recorder.isRecording {
-                    notify("SFCast — EL MICRÓFONO SE CAYÓ", "Llevas grabando SIN VOZ. Revisa el Shure.")
+                if grabando {
+                    notify("SFCast — EL MICRÓFONO SE CAYÓ", "Llevas grabando SIN VOZ. Lo re-pego en cuanto vuelva.")
                 }
             } else {
                 Log.info("Estudio: micrófono vivo de nuevo")
@@ -1340,7 +1553,9 @@ final class StudioEngine: NSObject {
         if dead {
             let now = CACurrentMediaTime()
             if now > micRetryAt {
-                micRetryAt = now + 20
+                // Con la toma viva cada segundo sin voz cuesta: se reintenta cada
+                // 5 s (el USB del 7 sep volvió en 11 ms). En reposo, cada 20.
+                micRetryAt = now + (grabando ? 5 : 20)
                 rebindMic(reason: "watchdog: \(Int(age))s sin audio")
             }
         }
@@ -1353,7 +1568,7 @@ final class StudioEngine: NSObject {
         let dead = bad != nil || silence > Self.deadAfter
         if dead != screenFrozen {
             screenFrozen = dead
-            onSourceFrozen?("screen", dead, bad ?? "stream mudo")
+            onSourceFrozen?("screen", dead, bad ?? "stream mudo", dead ? silence : 0)
             onStatusChange?()
             if dead {
                 let b = screenHealth.beats()

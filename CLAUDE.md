@@ -46,6 +46,51 @@ consulta solo** — lee al abrirse, al escribir, y cuando se pulsa ↻. Si apare
 la tentación de poner un temporizador ahí, ya se probó: es exactamente lo que
 hacía parpadear la grabación.
 
+## La cámara se deja lista SOLA (4 sep 2026)
+
+Tres tomas desenfocadas (31 ago `focusarea` en la pared · 2 sep los primeros 3
+minutos a la basura · 4 sep `focusmode` en Manual) con la misma raíz: **la
+única alarma era Daniel mirándose borroso en el preview.**
+
+Ahora hay tres momentos, y ninguno le cuesta nada al caso normal:
+
+| Cuándo | Qué hace | Coste |
+|---|---|---|
+| al abrir el Estudio | `sfcam rodaje --check` sobre el espejo de disco; solo si canta abre sesión PTP y corrige | **0 PTP** si está en su sitio |
+| mientras está abierto | `vigilarRodaje()` mira la FECHA del espejo (gratis) y solo re-chequea cuando cambió | 0 PTP |
+| **al pulsar Grabar** | corrige y luego arranca — el botón dice «Preparando cámara…» | el parpadeo pasa ANTES de la toma |
+
+Y hay un **botón permanente** en la tarjeta de la cámara, junto a «Exponer a la
+cara»: **«Dejar lista»**. Son las dos únicas perillas que Daniel toca —
+*"lo único que debería estar modificando es la luz del softbox y el ISO"* — y
+el softbox es físico. Está SIEMPRE, no solo cuando algo falla: un botón que
+aparece cuando ya hay problema obliga a mirar el panel para enterarse de que
+hay problema, que es justo lo que falló tres veces. Pulsarlo sin nada roto no
+escribe nada (`sfcam rodaje` es idempotente).
+
+⚰️ Con él murió el botón «4K limpia»: `formato` es una perilla del preset, y dos
+botones para lo mismo reparten la responsabilidad hasta que ninguno la tiene.
+
+El gate de Grabar solo corre si la escena activa tiene cámara: una grabación de
+solo pantalla no espera por la Sony.
+
+**No pregunta, corrige.** Un diálogo delante del botón de grabar es exactamente
+lo que Daniel no quiere (*"es molesto siempre tengo que pedírtelo"*).
+
+**El ⚠ es vivo, no de apertura.** Revisarlo solo al abrir dejaba una alarma
+congelada: Daniel toca la rueda a media tarde y el panel seguía diciendo que
+todo bien. Como cualquier cambio pasa por `sfcam` y `sfcam` reescribe el espejo,
+basta con mirar el `mtime` del archivo — gratis — y solo entonces chequear.
+
+⚠️ **La lista de perillas NO se copia aquí.** Vive en `sfcam` (`CLI.rodajeConfig`)
+y se consume por el CLI (`SFCam.revisarRodaje` / `aplicarRodaje`). Dos copias
+del mismo criterio se separan en cuanto una se toca — es la misma razón por la
+que el motor PTP tampoco se duplica en este repo.
+
+También hay botón físico: `~/Applications/Cámara lista.app` (repo `sfcam`),
+para colgar de una tecla en Logi Options+. Trae el mismo candado: con
+`~/.sfcast/grabando` vivo no toca la cámara.
+
 ## El Set no se recarga EN CÁMARA (28 ago 2026)
 
 El panel web se recarga solo cuando su HTML cambia en disco (`/version`, cada
@@ -156,7 +201,14 @@ open /Applications/SFCast.app --args --mirrorlook 16                   # ESPEJO 
 open -W /Applications/SFCast.app --args --tomas 6 --dura 8              # TOMAS ENCADENADAS: 6 grabaciones con pausas crecientes
 open -W /Applications/SFCast.app --args --tomas 6 --dura 8 --bug26ago   # …con el hueco de cabeza REVIVIDO a propósito
 open -W /Applications/SFCast.app --args --bloqueamain 12                # congela main: ejerce el vigía MainWatch
+open -W /Applications/SFCast.app --args --micdrop 6 --dura 30           # MATA EL MIC a media toma: la toma tiene que sobrevivir (v4.1)
 ```
+
+⚠️ **`--micdrop` es el único arnés donde una fuente se MUERE** (7 sep 2026). El
+Shure se cayó del USB al minuto 46 y la app, que lo vio todo, se negó a re-pegar
+"con toma en curso". Si tocas `rebindMic`, `checkMicHealth`, el raw de cámara o
+el manifest, este tiene que quedar `MICDROP_OK` (exactamente 2 tramos de cámara,
+`camera-002.mov` con audio, zona muerta de `mic`). Detalle: `DECISIONS.md` §v4.1.
 
 ⚠️ **`--tomas` es el arnés que faltaba** (26 ago 2026). Todo lo demás de esta lista
 prueba UNA toma, y el bug del hueco de cabeza solo aparecía **de la segunda en
@@ -193,7 +245,8 @@ lienzo para que a tamaño completo no se lea como banda. Sensor de oclusión
 ## «Dos Caras» — pantalla y cámara como dos archivos (v4.0, 28 ago 2026)
 
 La escena estándar de grabación: se elige y ya está todo puesto. Carga su propia
-**receta** (`StudioScene.receta`) — las tres salidas + lienzo 1080 — y al salir
+**receta** (`StudioScene.receta`) — raw pantalla + raw cámara, **«Programa» apagado**
+(desde el 7 sep 2026; antes eran las tres) + lienzo 1080 — y al salir
 DEVUELVE la config de Daniel. Escribe `preset: "dos-caras"` en el manifest, que es
 la señal para la edición de que esa sesión trae capas separadas y alineables.
 
@@ -272,6 +325,13 @@ la señal para la edición de que esa sesión trae capas separadas y alineables.
      que busca** (v2.9): reducir con escala afín cruda y amplificar el filtro
      hacía que tres zonas distintas de la pantalla midieran lo mismo. Lanczos,
      intensidad por defecto, y el umbral se fija del RANGO medido.
+5c. **Un mic MUERTO se re-pega a media toma; uno VIVO no** (v4.1, 7 sep 2026).
+   La guarda "no reconfigurar la sesión a media grabación" protege un archivo
+   vivo; cuando el USB ya se llevó el input, el tirón ya ocurrió y negarse solo
+   garantiza el resto de la toma sin voz. `camera.mov` que muere con la toma viva
+   continúa en `camera-002.mov` cuando cámara y mic entregan **y el audio está
+   conectado al writer** (`connection(with: .audio).isActive`) — sin esa segunda
+   condición se reabría a los 0.3 s con buffers en vuelo y moría otra vez.
 6. **Destino local vs VPS** (toggle del micropanel, `autoUpload` en settings.json, v1.7):
    ON = sube al VPS al terminar (lo de siempre); OFF = SOLO guarda en local, sin subir.
    Se empuja luego con "↑ subir" del Historial. El push posterior NO comprime en sitio

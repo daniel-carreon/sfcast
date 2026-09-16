@@ -155,6 +155,36 @@ enum SFCam {
         return salida.split(separator: "\n").last.map(String.init) ?? "sfcam no respondió"
     }
 
+    // MARK: el preset de rodaje
+
+    /// Lo que la cámara debería tener SIEMPRE antes de una toma. La lista
+    /// canónica vive en `sfcam` (`CLI.rodajeConfig`), no aquí: dos copias del
+    /// mismo criterio se separan en cuanto una se toca.
+    struct Desvio: Equatable { let prop, tiene, quiere: String; let exigible: Bool }
+
+    /// REVISAR NO CUESTA UN PARPADEO: `--check` lee el espejo de disco. Por eso
+    /// se puede llamar al abrir el Estudio y otra vez antes de grabar, sin
+    /// pagar nada. Devuelve nil si no hay espejo (no se puede juzgar).
+    static func revisarRodaje() -> [Desvio]? {
+        let salida = correr(["rodaje", "--check", "--json"], timeout: 15)
+        guard let linea = salida.split(separator: "\n").first(where: { $0.hasPrefix("{") }),
+              let d = try? JSONSerialization.jsonObject(with: Data(linea.utf8)) as? [String: Any]
+        else { return nil }
+        if (d["error"] as? String) != nil { return nil }
+        let fuera = (d["fuera"] as? [[String: Any]]) ?? []
+        return fuera.map { Desvio(prop: $0["prop"] as? String ?? "?",
+                                  tiene: $0["tiene"] as? String ?? "?",
+                                  quiere: $0["quiere"] as? String ?? "?",
+                                  exigible: $0["exigible"] as? Bool ?? false) }
+    }
+
+    /// Corrige de verdad. SÍ le habla a la cámara: una sesión PTP para leer y
+    /// una por cada perilla fuera de sitio. Solo se llama cuando `revisarRodaje`
+    /// ya dijo que hay algo mal, y nunca con una grabación viva.
+    static func aplicarRodaje() -> String {
+        correr(["rodaje"], timeout: 240)
+    }
+
     /// El lazo del ISO: mide la cara en la imagen real y corrige hasta dejarla
     /// en rango. Necesita que algo publique la medición en `~/.sfcam/ojo.json`
     /// — lo hace el Estudio (ver `OjoDelEstudio`).
@@ -238,6 +268,11 @@ final class CameraPanelModel: ObservableObject {
     @Published var e = SFCam.Estado()
     @Published var enVuelo: String?          // propiedad que se está escribiendo
     @Published var leyendo = false
+    /// Perillas de rodaje fuera de sitio, según el espejo. `[]` = lista.
+    @Published var desvios: [SFCam.Desvio] = []
+    /// Lo que el preset está haciendo ahora mismo, para que el panel no mienta
+    /// diciendo "lista" mientras todavía escribe.
+    @Published var preparando = false
     @Published var aviso: String?
     @Published var tareaLarga: String?       // p.ej. el lazo del ISO
     /// Lo que el ojo mide de la imagen REAL. Se publica aquí para que el
@@ -249,10 +284,17 @@ final class CameraPanelModel: ObservableObject {
 
     private let cola = DispatchQueue(label: "sfcast.camara")
     private var reloj: Timer?
+    /// Cuándo se escribió por última vez el espejo que ya se revisó. Sirve para
+    /// NO lanzar el chequeo cuando nada cambió: mirar una fecha de archivo es
+    /// gratis, arrancar un proceso cada segundo no.
+    private var espejoRevisado: Date?
 
     private init() {
         // ABRIR EL ESTUDIO NO LE HABLA A LA CÁMARA: el espejo es de disco.
         cargarEspejo()
+        // …salvo que el espejo diga que una perilla de rodaje está fuera de
+        // sitio. Revisar es gratis (disco); solo entonces se paga el parpadeo.
+        prepararRodaje()
         // 1 Hz, y solo este objeto lo observa (el panel de la cámara). El aviso
         // del controlador sobre no publicar rápido va por los 15 Hz del vúmetro,
         // que invalidan la jerarquía ENTERA del Estudio.
@@ -265,6 +307,7 @@ final class CameraPanelModel: ObservableObject {
                 } else {
                     self.ojo = nil    // el ojo dejó de latir: no se finge que sí
                 }
+                self.vigilarRodaje()
             }
         }
     }
@@ -275,6 +318,71 @@ final class CameraPanelModel: ObservableObject {
         cola.async {
             let r = SFCam.leerEspejo()
             DispatchQueue.main.async { if r.conectada { self.e = r } }
+        }
+    }
+
+    /// EL PRESET DE RODAJE, aplicado solo. Este método existe porque la cámara
+    /// salió desenfocada TRES veces (31 ago: `focusarea` estacionada en la
+    /// pared · 2 sep: los primeros 3 minutos del video a la basura · 4 sep:
+    /// `focusmode` en Manual) y las tres veces la única alarma fue Daniel
+    /// mirándose borroso en el preview. Un ajuste que decide si la toma sirve
+    /// no puede depender de que alguien se acuerde de revisarlo.
+    ///
+    /// EL ORDEN IMPORTA, y es lo que hace que esto no cueste parpadeos:
+    ///  1. revisar contra el espejo de disco — gratis, y en el caso normal
+    ///     (todo en su sitio) termina aquí sin tocar la cámara;
+    ///  2. solo si algo canta, abrir sesión PTP y corregir.
+    ///
+    /// `exigirLectura` fuerza el paso 2 aunque el espejo diga que está bien:
+    /// un espejo viejo no es evidencia de nada, y antes de grabar se prefiere
+    /// un parpadeo a otra toma perdida.
+    /// EL ⚠ TIENE QUE SER VIVO. Revisarlo solo al abrir el Estudio dejaba una
+    /// alarma congelada: Daniel toca la rueda de la cámara a media tarde y el
+    /// panel sigue diciendo que todo está bien hasta la próxima vez que abra.
+    ///
+    /// Cualquier cambio de la cámara pasa por `sfcam`, y `sfcam` reescribe el
+    /// espejo. Así que basta con mirar la FECHA del archivo — gratis — y solo
+    /// arrancar el chequeo cuando de verdad cambió algo. Sin esto habría que
+    /// lanzar un proceso por segundo para vigilar algo que casi nunca se mueve.
+    private func vigilarRodaje() {
+        guard !preparando, enVuelo == nil else { return }
+        let ruta = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".sfcam/estado.json")
+        guard let at = (try? FileManager.default.attributesOfItem(atPath: ruta.path))?[.modificationDate] as? Date
+        else { return }
+        guard at != espejoRevisado else { return }
+        espejoRevisado = at
+        cola.async {
+            let d = SFCam.revisarRodaje()
+            DispatchQueue.main.async { if let d { self.desvios = d } }
+        }
+    }
+
+    func prepararRodaje(exigirLectura: Bool = false, luego: (() -> Void)? = nil) {
+        guard !preparando else { luego?(); return }
+        preparando = true
+        cola.async {
+            let antes = SFCam.revisarRodaje()
+            // nil = no hay espejo todavía: no se puede juzgar, así que se lee.
+            let hayQueTocar = exigirLectura || antes == nil || !(antes!.isEmpty)
+            guard hayQueTocar else {
+                DispatchQueue.main.async {
+                    self.desvios = []; self.preparando = false; luego?()
+                }
+                return
+            }
+            _ = SFCam.aplicarRodaje()
+            // Se re-revisa DESPUÉS de escribir: el veredicto sale del espejo ya
+            // actualizado por `sfcam`, no de haber mandado el comando. Un
+            // actuador que reporta su intención no es un sensor.
+            let despues = SFCam.revisarRodaje() ?? []
+            let estado = SFCam.leerEspejo()
+            DispatchQueue.main.async {
+                self.desvios = despues
+                if estado.conectada { self.fusionar(estado) }
+                self.preparando = false
+                luego?()
+            }
         }
     }
 
@@ -764,6 +872,7 @@ struct SetCameraCard: View {
                 filaISO
                 atajos
                 loQueVe
+                estadoRodaje
                 AvisosCamara(e: m.e)
                 if avanzado {
                     ForEach(SFCam.grupos, id: \.self) { g in seccion(g) }
@@ -827,15 +936,33 @@ struct SetCameraCard: View {
         }
     }
 
-    /// Las dos cosas que se piden hablando y también con el dedo.
+    /// LAS DOS PERILLAS, Y NADA MÁS. Daniel lo dijo así el 4 sep: *"lo único que
+    /// debería estar modificando es la luz del softbox y el ISO. El resto
+    /// deberíamos dejarlo estándar."*
+    ///
+    /// El softbox es físico (se mueve con la mano, mirando la cara). El ISO es
+    /// «Exponer a la cara». **Todo lo demás cabe en un solo botón** —
+    /// obturación, apertura, balance, medición, formato y enfoque no son
+    /// decisiones de toma: son la configuración del estudio, y el estudio es
+    /// fijo.
+    ///
+    /// Por qué el botón está SIEMPRE y no solo cuando algo falla: un botón que
+    /// aparece cuando ya hay problema obliga a mirar el panel para saber que
+    /// hay problema — que es exactamente lo que falló tres veces. Este se pulsa
+    /// sin diagnosticar nada, y si todo estaba bien no escribe nada
+    /// (`sfcam rodaje` es idempotente).
+    ///
+    /// (Aquí vivía un botón «4K limpia» que aparecía cuando el formato se
+    /// salía. Murió: `formato` es una de las perillas del preset, y dos botones
+    /// para lo mismo reparten la responsabilidad hasta que ninguno la tiene.)
     private var atajos: some View {
         HStack(spacing: 6) {
             boton("Exponer a la cara", "wand.and.stars") { m.autoISO() }
                 .help("Mide la luz de tu cara en la imagen real y mueve el ISO hasta dejarla en rango")
-            if m.e.valor("formato") != "XAVC S 4K" {
-                boton("4K limpia", "sparkles") { m.aplicar("formato", "XAVC S 4K") }
-                    .help("En XAVC S 4K la cámara apaga sus sobreimpresos sola (medido: bandas 15.6% → 0%)")
+            boton(m.preparando ? "Preparando…" : "Dejar lista", "camera.aperture") {
+                m.prepararRodaje(exigirLectura: true)
             }
+            .help("Devuelve enfoque, obturación, apertura, balance, medición y formato al estándar del estudio. El ISO NO se toca: ese es tuyo.")
         }
     }
 
@@ -853,6 +980,37 @@ struct SetCameraCard: View {
         }
         .buttonStyle(.plain)
         .disabled(m.ocupado)
+    }
+
+    /// EL ESTADO DE RODAJE, a la vista. Tres tomas salieron desenfocadas sin
+    /// que la interfaz dijera una palabra: el ajuste estaba mal y el panel
+    /// pintaba normalidad. Aquí sale cuando algo está fuera de sitio, y sale
+    /// SOLO entonces — una franja permanente de "todo bien" se vuelve
+    /// invisible en dos días.
+    @ViewBuilder
+    private var estadoRodaje: some View {
+        if m.preparando {
+            HStack(spacing: 5) {
+                Image(systemName: "camera.aperture").font(.system(size: 9))
+                Text("dejando la cámara lista para grabar…").font(.system(size: 10))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(StudioSkin.mostaza)
+        } else if !m.desvios.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(m.desvios, id: \.prop) { d in
+                    Text("⚠ \(d.prop): \(d.tiene) — debería ser \(d.quiere)")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.red)
+                }
+                // El botón para arreglarlo vive arriba y está SIEMPRE (ver
+                // `atajos`). Aquí solo se dice lo que ese botón NO puede hacer.
+                if !m.desvios.contains(where: { $0.exigible }) {
+                    Text("Se cambia en el menú de la cámara: la ZV-E10 la bloquea por USB.")
+                        .font(.system(size: 9)).foregroundStyle(StudioSkin.dim)
+                }
+            }
+        }
     }
 
     /// LO QUE VE: la medición de la imagen real. El único número de aquí que NO

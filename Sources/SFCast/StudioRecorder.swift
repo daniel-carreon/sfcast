@@ -96,6 +96,9 @@ final class StudioRecorder {
     private var wroteCamera = false
     /// Archivos extra de raw de pantalla si hubo que reenganchar a mitad.
     private var screenRawFiles: [String] = []
+    /// Tramos del raw de cámara (`camera.mov`, `camera-002.mov`…): más de uno
+    /// cuando el archivo murió a media toma y se reabrió (v4.1, 7 sep 2026).
+    private var cameraRawFiles: [String] = []
     private var health: Task<Void, Never>?
     private var lowDiskWarned = false
     /// Reenganches de pantalla que YA existían al empezar esta toma. Sin esto el
@@ -267,11 +270,30 @@ final class StudioRecorder {
             self.screenRawFiles.append(name)
             return dir.appendingPathComponent(name)
         }
+        cameraRawFiles = []
+        engine.resetCamRawTramos()
         if config.outputs.rawCamera && engine.cameraAvailable {
             engine.setCameraRawBitrate(kbps: config.programQuality.cameraRawKbps)
             engine.startCameraMovie(url: sessionDir.appendingPathComponent("camera.mov"))
             wroteCamera = true
+            cameraRawFiles = ["camera.mov"]
             activated.append("camera.mov")
+        }
+        // Si el raw de cámara MUERE a mitad (el USB del Shure el 7 sep), sigue
+        // en un archivo nuevo. Mismo contrato que el raw de pantalla: el corte
+        // queda en el manifest, no se pierde ni se disimula.
+        engine.onNeedNewCameraRawURL = { [weak self] in
+            guard let self, let dir = self.sessionDir else { return nil }
+            let name = String(format: "camera-%03d.mov", self.cameraRawFiles.count + 1)
+            self.cameraRawFiles.append(name)
+            return dir.appendingPathComponent(name)
+        }
+        engine.onCameraRawReabierto = { [weak self] file, hueco in
+            let s = String(format: "%.0f", hueco)
+            self?.onAlert?("La cámara y el micrófono volvieron: el raw sigue en \(file) "
+                           + "(\(s) s sin raw de cámara). Sigo grabando.", false)
+            notify("SFCast — EL RAW DE CÁMARA VOLVIÓ",
+                   "Sigue en \(file). Hubo \(s) s sin cámara ni voz; queda anotado en el manifest.")
         }
         if config.outputs.program {
             // El reloj arranca con la grabación: ancla la corrección de latencia
@@ -857,11 +879,15 @@ final class StudioRecorder {
 
     /// Una fuente se congeló o volvió. El tramo se cierra cuando vuelve (o al
     /// detener), y va al manifest para que el editor no use esos segundos.
-    func noteFrozen(_ source: String, frozen: Bool, reason: String) {
+    /// `desdeHace`: segundos que la fuente llevaba muda cuando el vigía avisó
+    /// (el aviso llega `deadAfter` s tarde por diseño). El tramo empieza en el
+    /// último frame/muestra real, no en el instante del aviso — y nunca antes
+    /// del inicio de la toma.
+    func noteFrozen(_ source: String, frozen: Bool, reason: String, desdeHace: Double = 0) {
         guard state == .recording else { return }
         let t = Date().timeIntervalSince(startedAt)
         if frozen {
-            if frozenSince[source] == nil { frozenSince[source] = t }
+            if frozenSince[source] == nil { frozenSince[source] = max(0, t - max(0, desdeHace)) }
         } else if let desde = frozenSince.removeValue(forKey: source) {
             deadZones.append(.init(from: desde, to: t, source: source, reason: reason))
             Log.error(String(format: "Estudio: TRAMO CONGELADO de %@ — %.1fs a %.1fs (%@)",
@@ -899,6 +925,8 @@ final class StudioRecorder {
         cadenceTask?.cancel(); cadenceTask = nil
         programTask?.cancel(); programTask = nil
         engine.onNeedNewScreenRawURL = nil
+        engine.onNeedNewCameraRawURL = nil
+        engine.onCameraRawReabierto = nil
         let duration = Date().timeIntervalSince(startedAt)
         // Un tramo congelado que seguía abierto al detener se cierra AQUÍ: si no,
         // el daño más grave (la fuente que nunca volvió) sería justo el que no
@@ -936,13 +964,27 @@ final class StudioRecorder {
         var outputs: [StudioManifest.OutputFile] = []
         var probe: [(String, String)] = screenRawFiles.map { ("screen", $0) }
         if probe.isEmpty { probe = [("screen", "screen.mp4")] }
-        probe += [("camera", "camera.mov"), ("program", "seg-001.mp4")]
+        probe += (cameraRawFiles.isEmpty ? ["camera.mov"] : cameraRawFiles).map { ("camera", $0) }
+        probe += [("program", "seg-001.mp4")]
         // EL ORIGEN COMÚN de las tres pistas: el t=0 del programa en reloj host.
-        let t0 = programStats?.sessionStartHost ?? 0
+        //
+        // SIN PROGRAMA (la receta «Dos Caras» lo apaga desde el 7 sep 2026), el
+        // origen es el primer frame de `screen.mp4`: sin esto los offsets de la
+        // cámara no se escribían y las capas quedaban sin forma de alinearse.
+        // `timeOrigin` dice cuál de los dos es, para quien componga.
+        let t0 = programStats?.sessionStartHost ?? screenFirst ?? 0
+        let timeOrigin: String? = programStats?.sessionStartHost != nil ? "program"
+                                  : (screenFirst != nil ? "screen" : nil)
+        let tramos = engine.camRawTramos
         for (role, name) in probe {
             let url = dir.appendingPathComponent(name)
             guard FileManager.default.fileExists(atPath: url.path) else { continue }
             var out = StudioManifest.OutputFile(role: role, file: name)
+            let tramo = tramos.first(where: { $0.file == name })
+            if role == "camera", let i = tramos.firstIndex(where: { $0.file == name }) {
+                out.segment = i + 1
+                out.endedBy = tramo?.cerradoPor
+            }
             let asset = AVURLAsset(url: url)
             if let d = try? await asset.load(.duration) { out.durationSeconds = d.seconds }
             if let track = try? await asset.loadTracks(withMediaType: .video).first,
@@ -959,18 +1001,29 @@ final class StudioRecorder {
                     // los dos archivos. Ver AlineadorDeAudio para los cuatro
                     // caminos de reloj que se probaron y por qué fallan.
                     let prog = dir.appendingPathComponent("seg-001.mp4")
-                    if FileManager.default.fileExists(atPath: prog.path),
+                    // Un tramo que MURIÓ a media toma no cerró con el stop: su
+                    // ancla es el instante en que el writer lo cerró menos lo
+                    // que dura, o —si no lo sabe— cuándo abrió (v4.1).
+                    let esElUltimo = tramo == nil || tramo?.file == tramos.last?.file
+                    let murio = tramo?.cerradoPor?.hasPrefix("murió") == true
+                    if (out.segment ?? 1) == 1, !murio,
+                       FileManager.default.fileExists(atPath: prog.path),
                        let off = await AlineadorDeAudio.offset(base: prog, pista: url) {
                         out.startOffsetSeconds = off
                         out.startOffsetMethod = "audio"
                         out.startOffsetUncertaintySeconds = 0.05
-                    } else if let stop = engine.camRawStopHost, let d = out.durationSeconds {
+                    } else if esElUltimo, !murio, let stop = engine.camRawStopHost, let d = out.durationSeconds {
                         out.startOffsetSeconds = (stop - d) - t0
                         out.startOffsetMethod = "reloj"
                         out.startOffsetUncertaintySeconds = 0.12
-                    } else if let f = camFirst {
+                    } else if murio, let fin = tramo?.delegate.finishedHost, let d = out.durationSeconds {
+                        out.startOffsetSeconds = (fin - d) - t0
+                        out.startOffsetMethod = "reloj"
+                        out.startOffsetUncertaintySeconds = 0.30
+                    } else if let f = tramo?.delegate.startedHost ?? camFirst {
                         out.startOffsetSeconds = f - t0
                         out.startOffsetMethod = "reloj"
+                        out.startOffsetUncertaintySeconds = 0.25
                     }
                 case "screen":
                     // La pantalla se queda con el reloj: su audio es el del
@@ -1067,6 +1120,7 @@ final class StudioRecorder {
             deadZones: deadZones,
             micDevice: micDeviceName,
             preset: presetActivo,
+            timeOrigin: timeOrigin,
             micSamples: programStats?.micSamples ?? 0,
             repeatedFrames: repetidos,
             uniqueContentFps: unicosFPS,

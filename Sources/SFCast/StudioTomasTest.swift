@@ -50,6 +50,13 @@ enum StudioTomasTest {
         // que una pausa fija habría medido un solo punto de la curva.
         let pausas = [0, 1, 2, 4, 7, 10, 3, 6, 12, 5]
         var out: [Toma] = []
+        // EL SUJETO DE ESTE ARNÉS ES `seg-001.mp4` (el hueco de cabeza vive en el
+        // writer del programa). Desde el 7 sep 2026 la receta «Dos Caras» apaga
+        // esa salida por default, y el arnés medía un archivo inexistente: "0
+        // frames, 0 fps" en las tres tomas, rojo por la razón equivocada. Aquí
+        // se enciende a propósito, sin tocar la config de Daniel.
+        var config = config
+        config.outputs.program = true
 
         for i in 0..<tomas {
             let pausa = i == 0 ? 0 : pausas[min(i, pausas.count - 1)] + pausaBase

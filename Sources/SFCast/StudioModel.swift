@@ -197,11 +197,16 @@ struct RecetaDeGrabacion: Codable, Equatable {
     /// 2560×1440 completos y lo único que baja es el PROGRAMA, que aquí es el
     /// proxy de revisión: el máster de verdad se compone después desde las
     /// capas, a resolución completa.
+    ///
+    /// **«Programa» va APAGADO (7 sep 2026, pedido de Daniel: "por default las
+    /// primeras 2 salidas sin pasar por programa").** Las dos capas SON el
+    /// producto; el programa era solo el proxy de revisión y nadie lo lee ya
+    /// (la sala compone desde las capas). Sigue a un clic en Salidas.
     static var dosCaras: RecetaDeGrabacion {
         var r = RecetaDeGrabacion()
         r.outputs.rawScreen = true
         r.outputs.rawCamera = true
-        r.outputs.program = true
+        r.outputs.program = false
         r.canvasMode = .p1080
         r.preset = "dos-caras"
         return r
@@ -212,19 +217,20 @@ struct RecetaDeGrabacion: Codable, Equatable {
 /// - raw de pantalla y cámara = caso A (Screen Studio "extract raw files")
 /// - programa compuesto = caso B (OBS Source Record)
 struct StudioOutputs: Codable, Equatable {
-    /// Los RAW arrancan APAGADOS (25 jul): son la opción "capas estilo Screen
-    /// Studio" para reeditar, pero NADA en el pipeline los lee todavía y cuestan
-    /// casi 9x lo que el programa. Se prenden cuando haya quien los use.
-    var rawScreen = false
-    var rawCamera = false
-    var program = true
+    /// DEFAULT = las dos capas, sin programa (7 sep 2026, Daniel). Historia:
+    /// el 25 jul los RAW arrancaban apagados porque nada los leía; desde «Dos
+    /// Caras» (28 ago) la edición vive de `screen.mp4` + `camera.mov` y el
+    /// programa quedó como proxy que nadie consume. El default sigue al uso.
+    var rawScreen = true
+    var rawCamera = true
+    var program = false
 
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        rawScreen = try c.decodeIfPresent(Bool.self, forKey: .rawScreen) ?? false
-        rawCamera = try c.decodeIfPresent(Bool.self, forKey: .rawCamera) ?? false
-        program = try c.decodeIfPresent(Bool.self, forKey: .program) ?? true
+        rawScreen = try c.decodeIfPresent(Bool.self, forKey: .rawScreen) ?? true
+        rawCamera = try c.decodeIfPresent(Bool.self, forKey: .rawCamera) ?? true
+        program = try c.decodeIfPresent(Bool.self, forKey: .program) ?? false
     }
 }
 
@@ -490,6 +496,26 @@ struct StudioConfig: Codable {
                          + cfg.scenes.map(\.name).joined(separator: " · "))
                 cfg.save()
             }
+            // LA RECETA CON NOMBRE SE LEE DEL CÓDIGO, NO DEL DISCO (7 sep 2026).
+            //
+            // La escena «Dos Caras» persiste su receta dentro de scenes.json, así
+            // que cambiar `.dosCaras` en el código NO tocaba la escena que Daniel
+            // ya tenía: seguía prendiendo las tres salidas en cada arranque y en
+            // cada cambio de escena, aunque él apagara «Programa» a mano.
+            // Idempotente y acotado: solo escenas cuyo `preset` es el de fábrica.
+            var recetaRefrescada = false
+            let fabrica = RecetaDeGrabacion.dosCaras
+            for i in cfg.scenes.indices
+            where cfg.scenes[i].receta?.preset == fabrica.preset && cfg.scenes[i].receta != fabrica {
+                cfg.scenes[i].receta = fabrica
+                recetaRefrescada = true
+            }
+            if recetaRefrescada {
+                Log.info("Estudio: receta «\(fabrica.preset)» refrescada desde el código — "
+                         + "salidas=[raw:\(fabrica.outputs.rawScreen) cam:\(fabrica.outputs.rawCamera) "
+                         + "prog:\(fabrica.outputs.program)] lienzo=\(fabrica.canvasMode.rawValue)")
+                cfg.save()
+            }
             return cfg
         }
         let cfg = defaultConfig()
@@ -606,6 +632,15 @@ struct StudioManifest: Codable {
         /// propio decodificador: `scripts/refinar-offset.py` lo hace en un
         /// segundo, y esa es la cifra que se usa para alinear de verdad.
         var startOffsetUncertaintySeconds: Double?
+        /// TRAMO del raw de cámara dentro de la toma (v4.1, 7 sep 2026): 1 =
+        /// `camera.mov`, 2 = `camera-002.mov`… Hay más de uno cuando el archivo
+        /// murió a media toma (el Shure cayéndose del USB mata la sesión
+        /// compartida) y se reabrió al volver las fuentes. Quien componga las
+        /// capas encadena los tramos por su `startOffsetSeconds`.
+        var segment: Int?
+        /// Cómo terminó este archivo: `stop` (lo cerró el recorder) o
+        /// `murió: <error>` (lo cerró AVFoundation con la toma viva).
+        var endedBy: String?
     }
     struct SceneSwitch: Codable {
         var t: Double           // segundos desde el inicio de la grabación
@@ -642,7 +677,7 @@ struct StudioManifest: Codable {
     struct DeadZone: Codable {
         var from: Double
         var to: Double
-        var source: String      // "camera" | "screen"
+        var source: String      // "camera" | "screen" | "mic" (v4.1)
         var reason: String
     }
 
@@ -697,6 +732,11 @@ struct StudioManifest: Codable {
     /// Es la señal para la edición de que esta sesión trae CAPAS separadas y
     /// alineables, en vez de un solo programa horneado.
     var preset: String?
+    /// De dónde sale el t=0 de los `startOffsetSeconds` (v4.1): `program` (el
+    /// primer frame de seg-001.mp4) o `screen` (el primer frame de screen.mp4,
+    /// cuando la receta graba sin programa). Sin esto un offset es un número
+    /// sin origen.
+    var timeOrigin: String?
     /// Muestras de micrófono escritas. **Si es 0, la grabación NO TIENE VOZ** —
     /// y el editor tiene que saberlo antes de invertir una hora en cortarla.
     var micSamples: Int = 0

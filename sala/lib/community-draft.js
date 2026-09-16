@@ -219,6 +219,7 @@ export async function publishCommunityPost(env, {
   agentAuthorId = null,
   mediaUrls = [],
   videoEmbedUrl = null,
+  sendEmail = false,       // opt-in: correo a los miembros elegibles (trigger notify_admin_post → Resend)
   dryRun = false,
 }) {
   if (!env.SF_SUPABASE_URL || !env.SF_SUPABASE_KEY) {
@@ -244,6 +245,8 @@ export async function publishCommunityPost(env, {
     // Un link pelón obliga a salir de la comunidad; el embed deja al miembro adentro.
     video_embed_url: videoEmbedUrl,
     is_draft: false,
+    // ⛔ alcance masivo (~466 correos): SOLO cuando el proyecto lo pide explícito (publish.json → data.post_draft.send_email)
+    send_email_notification: !!sendEmail,
   };
 
   // ⛔ IDEMPOTENCIA CONTRA LA BD, no contra el archivo local (27 jul 2026).
@@ -274,3 +277,21 @@ export async function publishCommunityPost(env, {
   const post = (await res.json())[0];
   return { id: post.id, title: postTitle, url: `${COMMUNITY_URL}?post=${post.id}`, chars: content.length };
 }
+
+/**
+ * SENSOR DE SALIDA del correo (regla del 25 jul 2026: ningún órgano se da por vivo sin medir su salida).
+ * Busca el acuse del webhook en admin_email_broadcast_log para ese post. Devuelve null si no hay acuse
+ * dentro del plazo: el llamador reporta "no pude confirmar", jamás "enviado".
+ */
+export async function waitEmailBroadcastAck(env, postId, { timeoutMs = 90_000, everyMs = 5_000 } = {}) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    const r = await fetch(`${env.SF_SUPABASE_URL}/rest/v1/admin_email_broadcast_log?post_id=eq.${postId}&select=status,recipients_total,sent,failed,created_at&order=created_at.desc&limit=1`, {
+      headers: { apikey: env.SF_SUPABASE_KEY, Authorization: `Bearer ${env.SF_SUPABASE_KEY}` },
+    });
+    if (r.ok) { const rows = await r.json(); if (rows[0]) return rows[0]; }
+    await new Promise((res) => setTimeout(res, everyMs));
+  }
+  return null;
+}
+

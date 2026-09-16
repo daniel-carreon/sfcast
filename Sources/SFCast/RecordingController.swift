@@ -636,6 +636,17 @@ final class CamFileDelegate: NSObject, AVCaptureFileOutputRecordingDelegate, @un
     var finished: Bool { lock.lock(); defer { lock.unlock() }; return _finished }
     var failure: String? { lock.lock(); defer { lock.unlock() }; return _error }
 
+    /// Instante host en que el writer CERRÓ (con o sin error). Para un tramo que
+    /// murió a media toma es la única ancla de su final: `finishedHost −
+    /// duración del archivo` reconstruye dónde empezó (v4.1, 7 sep 2026).
+    private var _finishedHost: Double?
+    var finishedHost: Double? { lock.lock(); defer { lock.unlock() }; return _finishedHost }
+    /// Se llama en el hilo del delegate al cerrar. El Estudio lo usa para
+    /// enterarse de que `camera.mov` murió MIENTRAS la toma sigue viva —
+    /// el 7 sep 2026 el Shure se cayó del USB al minuto 46, AVFoundation cerró
+    /// el raw de cámara con "Recording Stopped" y nadie lo volvió a abrir.
+    var onFinished: ((URL, Error?) -> Void)?
+
     /// CUÁNDO EMPEZÓ DE VERDAD (28 ago 2026). `startRecording` es ASÍNCRONO:
     /// medido, el archivo tarda ~1.65 s en abrirse de verdad después de la
     /// llamada. Anclar el offset al instante de la LLAMADA daba −0.09 s donde
@@ -653,8 +664,21 @@ final class CamFileDelegate: NSObject, AVCaptureFileOutputRecordingDelegate, @un
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL,
                     from connections: [AVCaptureConnection], error: Error?) {
         if let error {
-            Log.error("\(label) — \(outputFileURL.lastPathComponent): \(error.localizedDescription)")
+            // CON CÓDIGO Y RAZÓN, no solo "Recording Stopped": esa descripción la
+            // comparten media docena de AVError distintos (disco lleno, dispositivo
+            // desconectado, formato cambiado…) y el 7 sep costó una hora de
+            // forense en el log unificado saber cuál había sido.
+            let ns = error as NSError
+            Log.error("\(label) — \(outputFileURL.lastPathComponent): \(error.localizedDescription) "
+                      + "[\(ns.domain) \(ns.code)"
+                      + (ns.localizedFailureReason.map { " · \($0)" } ?? "")
+                      + (ns.userInfo[AVErrorRecordingSuccessfullyFinishedKey].map { " · terminóBien=\($0)" } ?? "")
+                      + "]")
         }
-        lock.lock(); _finished = true; _error = error?.localizedDescription; lock.unlock()
+        lock.lock()
+        _finished = true; _error = error?.localizedDescription; _finishedHost = CACurrentMediaTime()
+        let cb = onFinished
+        lock.unlock()
+        cb?(outputFileURL, error)
     }
 }

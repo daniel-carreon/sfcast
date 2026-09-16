@@ -14,11 +14,26 @@
 
 ---
 
+## Novedades v4.1 (7 sep 2026) — la toma sobrevive a que el mic se caiga del USB
+
+- El 7 sep el Shure MV7+ se cayó del bus USB al minuto 46 de una toma
+  (`hardware connection lost`, volvió en 11 ms). Como mic y cámara comparten
+  la sesión de captura, AVFoundation cerró `camera.mov` (`-11806`, *session
+  configuration changed*) y la app, que lo vio todo, se negaba a re-pegar
+  "con una toma en curso". Ahora: un mic **muerto** se re-pega a media toma
+  (cada 5 s), y el raw de cámara **continúa en `camera-002.mov`** en cuanto
+  cámara y mic vuelven a entregar. El manifest trae los tramos (`segment`,
+  `endedBy`, offset) y la zona muerta del mic; `timeOrigin` dice si el t=0 es
+  el programa o `screen.mp4` (sin programa, antes no había offsets).
+- Arnés: `open -W /Applications/SFCast.app --args --micdrop 6 --dura 30`.
+- Lo que el software no arregla: el cable/puerto del Shure (4 caídas en dos
+  semanas). Detalle: `DECISIONS.md` §v4.1.
+
 ## Novedades v3.8 / v4.0 (28 ago 2026)
 
 - **«Dos Caras» (v4.0):** escena estándar que graba pantalla y cámara como dos
-  archivos separados y alineables (`screen.mp4` + `camera.mov` + programa
-  proxy). Arreglado un bug donde las tres salidas activas a la vez codificaban
+  archivos separados y alineables (`screen.mp4` + `camera.mov`; el programa
+  proxy va apagado por default desde el 7 sep 2026, a un clic en Salidas). Arreglado un bug donde las tres salidas activas a la vez codificaban
   la pantalla dos veces y la cámara caía de 25 a 12-15 fps; ahora la
   resolución de captura ya no está atada al lienzo del programa. El offset
   entre pistas se mide por **audio** (`AlineadorDeAudio.swift`, el mismo
@@ -351,6 +366,7 @@ data.json con el transcript). Dile a Levy:
 | App no graba pantalla | System Settings → Privacidad → Grabación de pantalla → SFCast ON, y relanzar (típico tras un rebuild) |
 | Se ve borroso | `videoBitrateKbps` arriba (ver §6) |
 | Disco Mac <10GB | ScreenCaptureKit corta grabaciones (-3821). Liberar disco |
+| **Se calló el mic a media toma** | NO pares. El watchdog lo re-pega solo (≤5 s) y `camera.mov` sigue en `camera-002.mov`; el hueco queda en `manifest.json` (`deadZones` source `mic`). Si `sfcast.log` dice `hardware connection lost` en el kernel, es el cable/puerto del Shure (v4.1) |
 
 **QA headless** (no requieren gesto humano):
 

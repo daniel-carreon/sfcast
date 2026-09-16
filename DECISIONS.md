@@ -1855,3 +1855,88 @@ el espejo, el control quedaba muerto para siempre — nadie volvía a leer esa
 propiedad. Ahora `SFCam.dependientes` declara que `wb` manda sobre `temp` y
 escribir el balance obliga a **releer las dos de la cámara**. Es el único sitio
 donde se paga un parpadeo extra a propósito, y está escrito por qué.
+
+## v4.1 — el micrófono se cae del USB y la toma sigue (7 sep 2026)
+
+Daniel: *"en algún punto el micrófono dejó de funcionar, me tocó terminar la
+grabación"*. Toma `nqzcnzb69apb`, 46.8 min (10:08:01 → 10:54:46).
+
+### Qué pasó, medido
+
+- **Kernel, 10:54:26.982:** `AppleUSBHostPort::terminateDevice: destroying
+  0x14ed/1019/0101 (Shure MV7+): hardware connection lost` en
+  `usb-drd1-port-hs@01100000` (USB-C directo del Mac Studio, 480 Mbps).
+  Re-enumeró **11 ms después**. Es eléctrico (cable/conector/puerto), no software.
+- **CoreAudio dentro de SFCast:** `AUHAL DeviceListener: Device 115 died!
+  Looking for usable device…` → eligió la Cam Link 4K como entrada de audio →
+  AVCaptureSession `commitConfiguration → _stopAndTearDownGraph`.
+- **sfcast.log 10:54:27:** `RUNTIME ERROR — Recording Stopped` ·
+  `camera.mov: Recording Stopped` · 10:54:32 `MICRÓFONO MUDO — 5.6s` ·
+  `NO re-pego el micrófono con una toma en curso` · 10:54:35 `LA VOZ SE CAYÓ en el
+  minuto 46.6`. **La cámara siguió a 25 fps** (latido 10:54:33 `cam:25fps`):
+  murieron el mic y el archivo, no la imagen.
+- **Archivos:** `screen.mp4` 2805.1 s (siguió) · `camera.mov` 2786.9 s (murió con
+  el USB) · `levels.json` con voz hasta ~2789 s. 18 s después Daniel paró. A las
+  10:54:53, ya sin toma, el watchdog re-pegó el Shure **a la primera**.
+- **"Recording Stopped" = `AVFoundationErrorDomain -11806`** (*session
+  configuration changed*). El arnés nuevo lo reprodujo con el mismo código. La
+  app solo loggeaba la descripción, que comparten media docena de AVError.
+
+### Por qué la app no se curó sola
+
+Los sensores vieron todo (watchdog, guard de voz, notificación). Fallaron tres
+cosas del ACTUADOR:
+
+1. `rebindMic` se negaba con toma en curso (v3.7: *"reconfigurar la sesión a
+   media grabación le daría un tirón"*). Pero el tirón **ya lo había dado el
+   USB**: la sesión ya estaba reconfigurada y el audio ya no estaba. La guarda
+   protegía un archivo que ya estaba muerto.
+2. `camera.mov` no tenía camino de continuación. El raw de pantalla sí
+   (`screen-002.mp4` desde el reenganche del stream); el de cámara, no.
+3. El reintento del mic era cada 20 s, calibrado para reposo.
+
+### Qué cambió
+
+- **Un mic MUERTO se re-pega a media toma; uno VIVO no** (`micDead` del
+  watchdog decide). Reintento cada 5 s en toma, 20 en reposo.
+- **El raw de cámara por tramos.** Si `camera.mov` cierra con la toma viva y sin
+  que nadie lo pidiera (`camRawStopPedido`), queda pendiente y el vigía (1×/s)
+  abre `camera-002.mov` cuando: (a) la cámara entrega, (b) el mic entrega **y
+  está conectado al writer** (`connection(with: .audio).isActive`), (c) pasaron
+  2 s desde la muerte. Techo: 20 reaperturas por toma (a la 21ª el problema es
+  el cable). Medido sin (b)+(c): reabría a los 0.3 s con buffers en vuelo, sin
+  audio conectado, y ese tramo moría también con `-11806`.
+- **Manifest:** cada tramo es un `outputs[]` con `role: camera`, `segment: N`,
+  `endedBy: stop | murió: …` y su `startOffsetSeconds`. La ausencia de voz va a
+  `deadZones` con `source: mic`, y el tramo empieza cuando el mic **dejó de
+  entregar**, no cuando el vigía avisó (`desdeHace`; aplica a cámara y pantalla
+  también). `timeOrigin: program | screen` dice de dónde sale el t=0: **sin
+  programa —default «Dos Caras» desde hoy— el origen es `screen.mp4`; antes de
+  esto, sin programa, los offsets no se escribían.**
+- **Forense:** el runtime error y el cierre del raw loggean `[dominio código ·
+  razón]`. Con toma viva, el runtime error ya NO re-pega la cámara a ciegas
+  (siguió entregando): los vigías re-pegan solo lo que murió.
+- **Arnés `--micdrop S [--dura D]`:** quita el input de audio de la sesión viva
+  y cierra `camera.mov`, como el USB. Verde = el mic vuelve solo, `camera-002.mov`
+  con pista de audio, **exactamente** 2 tramos, zona muerta de mic en el
+  manifest. Tres corridas esta mañana: rojo falso del arnés (medía en vuelo) →
+  rojo real (reabría sin audio conectado, 3 tramos) → `MICDROP_OK`.
+- **`--tomas` enciende el programa a propósito:** su sujeto es `seg-001.mp4`, y
+  con la receta nueva apagándolo medía un archivo inexistente (0 fps, rojo por
+  la razón equivocada).
+
+### Lo que NO arregla el software
+
+El Shure se cayó del bus por hardware. Historial en `sfcast.log`: 26 ago (murió a
+media toma, 39,363 → 8,050 → 0 muestras) · 3 sep 17:44–17:54 (52 min mudo, 23
+re-pegados fallidos hasta que volvió solo) · 5 sep 08:07 (13 h mudo desde la
+noche) · 7 sep 10:54. **Cuatro veces en dos semanas.** Cambiar el cable USB-C del
+Shure (o de puerto) antes de la próxima grabación larga. Con el fix la toma
+sobrevive, pero cada caída cuesta ~6 s de voz (5 de detección + 1 de re-pegado).
+
+### La regla
+
+Una guarda que protege una sesión VIVA no aplica a una que el hardware ya rompió:
+*"no reconfigurar a media toma"* era correcta para un mic vivo y destructiva para
+uno muerto. Es la misma familia que v3.7b —distinguir "no puedo ahora" de "está
+roto"— pero al revés: aquí el reparador se negaba a reparar lo roto.

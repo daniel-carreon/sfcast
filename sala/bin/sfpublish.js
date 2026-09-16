@@ -669,7 +669,8 @@ async function run() {
       const faltan = publicSince + waitMs - Date.now();
       if (faltan > 0) { out(`· video público; faltan ${Math.ceil(faltan / 60000)} min para el post`); break; }
 
-      const { publishCommunityPost, uploadThumbToMedia } = await import('../lib/community-draft.js');
+      const { publishCommunityPost, uploadThumbToMedia, waitEmailBroadcastAck } = await import('../lib/community-draft.js');
+      const sendEmail = draft.send_email === true;   // opt-in explícito en publish.json (firma de Daniel)
       const videoUrl = draft.video_url || `https://youtu.be/${L.video_id}`;
       const trackedLink = pub.data?.link?.url ||
         (pub.video?.slug ? trackedUrl(pub.video.slug) : null);
@@ -706,11 +707,12 @@ async function run() {
         title: draft.title || pub.video?.titulo || null,
         videoUrl, trackedLink, mediaUrls,
         videoEmbedUrl: videoUrl,   // se reproduce dentro del post, no manda a YouTube
+        sendEmail,
         dryRun: !!flags.dryRun,
       });
       if (flags.dryRun) {
         out(`(dry-run) NO se escribió nada. Saldría: "${post.title}" · ${post.chars} chars de HTML · ` +
-            `miniatura ${mediaUrls.length ? 'sí' : 'no'} · video ${videoUrl}`);
+            `miniatura ${mediaUrls.length ? 'sí' : 'no'} · video ${videoUrl} · correo a miembros: ${sendEmail ? 'SÍ (send_email_notification=true)' : 'no'}`);
         break;
       }
 
@@ -730,8 +732,20 @@ async function run() {
       setStage(pub, 'post', 'done', `publicado en la comunidad ${pub.data.post_published_at}`);
       setStage(pub, 'published', 'done', `video público + post fuera (${post.id})`);
       await savePublish(projectDir, pub);
-      out(`✓ post publicado en la comunidad (${post.id}) — la comunidad ya fue notificada`);
+      out(`✓ post publicado en la comunidad (${post.id}) — push/in-app por el trigger`);
       out(`  ${post.url}`);
+      if (sendEmail) {
+        // acuse REAL del correo (admin_email_broadcast_log), nunca fe en el actuador
+        const ack = await waitEmailBroadcastAck(env, post.id);
+        if (ack) {
+          pub.data.post_email_ack = ack;
+          out(`✓ correo: ${ack.status} · ${ack.sent}/${ack.recipients_total} enviados · ${ack.failed} fallidos`);
+        } else {
+          pub.data.post_email_ack = { status: 'sin-acuse', checked_at: new Date().toISOString() };
+          out('⚠ correo: NO pude confirmar la entrega (sin acuse en admin_email_broadcast_log en 90 s) — revisar');
+        }
+        await savePublish(projectDir, pub);
+      }
       break;
     }
 

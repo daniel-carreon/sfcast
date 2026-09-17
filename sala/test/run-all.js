@@ -19,7 +19,7 @@ function report(name, ok, detail = '') {
 
 function sh(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, { cwd: ROOT, encoding: 'utf8', timeout: opts.timeout || 180000, ...opts });
-  return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
+  return { code: r.status, out: (r.stdout || '') + (r.stderr || '') + (r.error ? String(r.error) : '') };
 }
 
 // ── 1. sintaxis de todos los JS
@@ -36,7 +36,7 @@ function sh(cmd, args, opts = {}) {
 // ── 2. unit tests: modelo de trims + server (traversal/CORS) + publish (gate/menciones/slots)
 //        + galería (sandbox de ids, estado del lanzamiento, patch sobre publish.json)
 {
-  const r = sh('node', ['--test', 'test/model.test.js', 'test/server.test.js', 'test/publish.test.js',
+  const r = sh('node', ['--test', '--test-reporter=tap', 'test/model.test.js', 'test/server.test.js', 'test/publish.test.js',
     'test/gallery.test.js']);
   const pass = /# pass (\d+)/.exec(r.out)?.[1];
   const fail = /# fail (\d+)/.exec(r.out)?.[1];
@@ -372,7 +372,7 @@ const galRoot = path.join(tmp, 'lanzamientos');
     // ONDA DE AUDIO = seleccionar rango del video principal (audio pegado) → Supr lo borra; clic derecho
     // → Separar audio. La onda NO tiene intercepción de costura (eso es solo track0 en vista corte). ──
     await page.keyboard.press('Escape');
-    const wr = await page.$eval('#waveRow', (el) => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; });
+    const wr = await page.$eval('#waveCanvas', (el) => { const r = el.parentElement.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; });
     const trimBefore = await page.$eval('#trimSummary', (el) => el.textContent);
     await page.mouse.move(wr.x + wr.w * 0.03, wr.y + wr.h / 2);   // arranque, lejos de trims previos
     await page.mouse.down();
@@ -392,7 +392,7 @@ const galRoot = path.join(tmp, 'lanzamientos');
     detail = `seam="${trimTitle.slice(0, 40)}…" fixes=${fixesOk} wave=${waveOk} panel=${panelOk} items=${itemsOk} baseSel/borra/audioSep=${baseGestureOk} ⌘⌥G=${galToggleOk} (drag/trim/supr/⌥rango/rango-base/sep-audio/QE/F/vista/galería) consola=${errors.length} errores`;
     if (errors.length) detail += ` :: ${errors.slice(0, 3).join(' | ')}`;
   } catch (e) {
-    detail = e.message.split('\n')[0];
+    detail = e.stack;
   } finally {
     srv.kill();
     await fsp.rm(path.join(projDir, 'fixes.json'), { force: true }); // no ensuciar el demo

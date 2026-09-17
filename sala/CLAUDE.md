@@ -1,18 +1,10 @@
 # SFStudio — plataforma de video de la casa (familia sf*)
 
-Sustituye a HyperFrames en las DOS articulaciones donde la fábrica de edición lo tocaba:
-**sfrender** (cards HTML/GSAP → video) y **sfreview** (la Sala de Revisión). El máster final
-SIEMPRE lo imprime la fábrica ffmpeg de la skill `edicion-de-video` — SFStudio es pincel + sala,
-no imprenta.
+## Contrato vigente · 17 septiembre 2026
 
-## DECISIÓN DE SOBERANÍA (18 jul 2026 — no reabrir el debate)
+La UI canónica vive en `sfcast/sala/web`. No desarrollar copias dentro de las skills. `sfreview <proyecto>` detecta `project.json` y delega al puente Python de la skill de edición, sirviendo esta misma UI. `timeline.json` y galería conservan compatibilidad con el servidor Node histórico. `SFSTUDIO_WEB` permite una ruta explícita; `ARTIFICIAL_BRAIN_ROOT` localiza la skill desde el CLI.
 
-HyperFrames (Apache-2.0, HeyGen, release casi diario) cubría sfrender técnicamente al 100% el día
-que construimos esto. Se construyó propio a propósito: mismo principio que sfterm — *"rentamos el
-pincel, no el cuadro"* — cortar la dependencia del roadmap/namespace de un tercero (parches
-studio_unmute vs checksums, pin 0.7.39, cache, init que sobrescribe skills). sfreview sí es terreno
-abierto: ningún tool hacía master+overlays-alpha+trims no destructivos+fixes.json para consumo de
-agente. HyperFrames queda INTACTO como fallback en la skill.
+El criterio creativo y el grafo E2E viven en la skill `edicion-de-video`: abrir `references/direccion-creativa.md`, `references/estandar.md` y `references/instagram-aprendizajes.md`. No congelar aquí decisiones de herramientas o convertir escenas acabadas en plantillas. SFStudio es sala y soporte de composición; la dirección exige alternativas originales según el video. Hyperframes, Clapper, código 3D o After Effects son mecanismos posibles sujetos al contrato vigente.
 
 ## Stack
 
@@ -53,12 +45,9 @@ node bin/sfpublish.js <proyecto> <etapa>                  # etapa 2: init|metada
    driftea en chunks). VP9 no tiene HW encode en Apple Silicon: paralelizar POR CARD.
 5. **Determinismo sfrender**: seek de la timeline pausada + screenshot plano (beginFrame ya no
    existe en Chromium ≥147) + `--force-color-profile=srgb` + fonts.ready + warmup.
-6. **La sala no re-renderiza nada**: trims saltados en vivo con rVFC (no timeupdate), overlays
-   montados por ventana ±3s, server con Range + no-cache. Target Chrome (Safari no decodifica
-   WebM alpha). La edición manual de items (arrastrar/trim de bordes/Supr/⌥-rango) tampoco
-   re-renderiza: muta el estado efectivo que el player refleja en vivo y viaja como `item_edits`.
-   ⚠️ Gotcha pagado: seleccionar un item re-renderiza el timeline → el div arrastrado queda
-   DETACHED; `startItemDrag` re-consulta el div por `data-idx` después del render.
+6. **Preview y fuentes separadas:** con `project.json`, un video compuesto con audio multiplexado posee el reloj nativo de reproducción. `project.json` conserva cámara, pantalla, cortes, gráficos y sonido editables. La caché por segmento reutiliza lo que no cambió; un recorte puede necesitar codificar el segmento afectado y remultiplexar la película, nunca confundir esto con modificar los originales. Mientras prepara, play permanece bloqueado para no combinar revisión nueva y audio viejo. Export y preview derivan del mismo proyecto. En `timeline.json` histórico se mantiene reproducción raw y saltos en vivo.
+7. A-roll al fondo con onda de voz integrada por defecto; separación visual por clic derecho. Pantalla sincronizada como pista propia. SFX y música visibles. No ocultar el recurso principal ni convertir todos los eventos en una única barra.
+8. Círculo: preservar altura útil completa, no hacer zoom excesivo en la cabeza. Para 1920×1080, crop cuadrado 1080×1080 con Y=0 y X medido. Burbuja 1:1 sin deformar. La geometría se comprueba en la grabación concreta.
 
 ## Gotchas pagados (no re-pagar)
 

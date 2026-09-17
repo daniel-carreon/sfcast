@@ -134,15 +134,31 @@ export function outDuration(trims, duration) {
   return Math.max(0, duration - totalTrimmed(trims));
 }
 
-/** raw → out. Dentro de un trim colapsa a la costura. */
+/** Segmentos del base en ORDEN DE SALIDA, tal como llegan de `project.cuts` (retime_project ya
+ *  deriva start_frame puramente de ese orden de arreglo — nunca de source_start ascendente). Esto
+ *  es lo que permite que la sala monte cortes fuera del orden cronológico de la fuente: el orden
+ *  de reproducción vive en `cuts`, no en los trims (que solo describen material raw sin usar). */
+export function segmentsFromCuts(cuts, fps) {
+  return (cuts || []).map((c) => ({ a: c.source_start, b: c.source_end, out: c.start_frame / fps }));
+}
+
+/** raw → out. Dentro de un trim colapsa a la costura.
+ *  `segs` debe venir en ORDEN DE SALIDA (`out` ascendente); `a`/`b` (raw) NO tienen por qué
+ *  estarlo — un corte reordenado (fuera del orden cronológico de la fuente) rompería el
+ *  corte-temprano de antes, así que se recorre completo buscando el segmento que contiene t.
+ *  Un raw fuera de cualquier segmento (hueco recortado) cae al borde de salida más cercano
+ *  en distancia raw (momento transitorio: el seguidor de cortes lo corrige al vuelo). */
 export function rawToOut(segs, t) {
-  let out = 0;
   for (const s of segs) {
-    if (t < s.a) return s.out;
-    if (t <= s.b + EPS) return s.out + (t - s.a);
-    out = s.out + (s.b - s.a);
+    if (t >= s.a - EPS && t <= s.b + EPS) return s.out + Math.max(0, Math.min(s.b - s.a, t - s.a));
   }
-  return out;
+  let best = 0, bestDist = Infinity;
+  for (const s of segs) {
+    const dStart = s.a - t, dEnd = t - s.b;
+    if (dStart >= 0 && dStart < bestDist) { bestDist = dStart; best = s.out; }
+    if (dEnd >= 0 && dEnd < bestDist) { bestDist = dEnd; best = s.out + (s.b - s.a); }
+  }
+  return best;
 }
 
 /** out → raw (inversa). Una costura exacta resuelve HACIA ADELANTE (inicio del material
@@ -172,6 +188,7 @@ export function editItem(state, idx, id, patch) {
 /** Item efectivo (base + edición). Devuelve null si está eliminado. */
 export function effItem(state, idx, baseItem) {
   if (!baseItem) return null;
+  if(baseItem.synchronized)return baseItem;
   const ed = state.items[idx];
   if (!ed) return baseItem;
   if (ed.removed) return null;
@@ -260,6 +277,7 @@ export function baseOfKey(state, baseItems, key) {
 
 /** Aplica un patch de placement al item `key` (base → items{}, add → in place). */
 export function patchByKey(state, baseItems, key, patch) {
+  if(baseOfKey(state,baseItems,key)?.synchronized)return;
   if (typeof key === 'string' && key.startsWith('a')) {
     const a = state.adds[+key.slice(1)];
     if (!a) return false;
@@ -328,7 +346,7 @@ export function removeItemsInsideRange(state, baseItems, start, end) {
   }
   for (let idx = 0; idx < baseItems.length; idx++) {
     const it = effItem(state, idx, baseItems[idx]);
-    if (it && it.start >= start - EPS && it.start + it.dur <= end + EPS) {
+    if (it && !it.synchronized && it.start >= start - EPS && it.start + it.dur <= end + EPS) {
       editItem(state, idx, baseItems[idx].id, { removed: true });
       n++;
     }

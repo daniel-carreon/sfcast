@@ -24,7 +24,7 @@
     <output id="speedOut" for="speedRange">1×</output>
   </div>
   <span id="saveDot" style="font-size:11px;opacity:.35;margin-right:8px;transition:opacity .3s" title="Tus recortes se guardan solos en fixes.json">● guardado</span>
-  <button id="exportBtn" title="Exportar fixes.json (⌘E) — avisa a la fábrica que ya terminaste">Exportar fixes</button>
+  <button id="exportBtn" title="Exportar película desde el proyecto guardado (⌘E)">Exportar película</button>
   <button id="gearBtn" title="Atajos y ajustes"></button>
 </header>
 
@@ -91,9 +91,12 @@
     <div id="timeline">
       <div id="ruler"></div>
       <div id="markerLane"></div>
-      <div class="track" id="track3" data-label="caps"></div>
-      <div class="track" id="track2" data-label="alpha"></div>
-      <div class="track" id="track1" data-label="clips"></div>
+      <div class="track" id="track3" data-label="subtítulos"></div>
+      <div class="track" id="track2" data-label="gráficos"></div>
+      <div class="track" id="track1" data-label="imagen"></div>
+      <div class="track" id="track4" data-label="SFX · transiciones"></div>
+      <div class="track" id="track5" data-label="SFX · acentos"></div>
+      <div class="track" id="track6" data-label="Pantalla · vinculada" hidden></div>
       <div id="waveRow"><canvas id="waveCanvas"></canvas></div>
       <div class="track base" id="track0" data-label="base"></div>
       <div id="playhead"></div>

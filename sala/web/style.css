@@ -165,6 +165,27 @@ body {
   padding: 12px; overflow-y: auto; flex-shrink: 0;
 }
 #sidebar h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .14em; color: var(--dim); margin-bottom: 8px; }
+
+/* En un panel estrecho, comentarios y marcadores van debajo del video. */
+@media (max-width: 960px) {
+  #topbar { flex-wrap: wrap; gap: 8px 12px; }
+  #brand { flex: 0 0 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #speeds { margin-left: 0; }
+  #speeds #speedRange { width: clamp(72px, 20vw, 140px); }
+  #main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) 120px;
+  }
+  #stageWrap { grid-column: 1 / -1; grid-row: 1; min-height: 0; }
+  #comments, #sidebar {
+    width: auto !important; min-height: 0; max-height: 120px;
+    grid-row: 2; border-top: 1px solid var(--line);
+  }
+  #comments { grid-column: 1; }
+  #sidebar { grid-column: 2; }
+  #dragComments, #dragSidebar { display: none; }
+}
 #markerList { list-style: none; display: flex; flex-direction: column; gap: 6px; }
 #markerList li {
   background: #17171d; border: 1px solid var(--line); border-left: 3px solid var(--sf);
@@ -215,7 +236,7 @@ body {
 #timelinePane { border-top: 1px solid var(--line); background: #0c0c10; flex-shrink: 0; }
 #timelineScroll { overflow-x: auto; overflow-y: hidden; }
 /* alto = filas fijas (114px) + waveform + base, ambas redimensionables via drag */
-#timeline { position: relative; height: calc(114px + var(--waveH, 44px) + var(--baseH, 46px)); min-width: 100%; }
+#timeline { position: relative; height: auto; min-width: 100%; }
 
 #dragSidebar { width: 6px; cursor: col-resize; flex-shrink: 0; background: transparent; transition: background .15s; }
 #dragSidebar:hover, #dragSidebar.active { background: rgba(255,145,1,.35); }
@@ -234,7 +255,7 @@ body {
 .mpin { position: absolute; top: 0; width: 2px; height: 14px; background: var(--sf); cursor: pointer; }
 .mpin::after { content: ''; position: absolute; top: 0; left: -4px; border: 5px solid transparent; border-top-color: var(--sf); }
 
-.track { position: relative; height: 26px; border-top: 1px solid #14141a; }
+.track { position: relative; height: 34px; border-top: 1px solid #14141a; }
 .track::before {
   content: attr(data-label); position: sticky; left: 4px; top: 4px; z-index: 5;
   position: absolute; color: #55555f; font-size: 9px; text-transform: uppercase; letter-spacing: .1em;
@@ -944,3 +965,27 @@ body.galleryOnly #galClose { display: none; } /* sin sala detrás no hay a dónd
 .galPostRender pre code { background: none; padding: 0; }
 .galPostRender img { max-width: 100%; border-radius: 7px; margin: 8px 0; display: block; }
 
+
+body.adapterBusy main { pointer-events:none; opacity:.7; }
+
+/* Canonical sound events; playback comes from the synchronized mix, never doubled. */
+.clipItem.t4{background:#173b48;border:1px solid #367e91;color:#baefff}
+.clipItem.t5{background:#1e4035;border:1px solid #419477;color:#c4fbe2}
+#compositePreview{position:absolute;inset:0;width:100%;height:100%;z-index:190;pointer-events:none}
+
+/* Linked A-roll: waveform inside the bottom video row, seams remain interactive. */
+#track0 #waveCanvas{position:sticky;left:0;z-index:2;pointer-events:none;opacity:.9}
+#track0 .cutSeam,#track0 .splitLine,#track0 .trimRange{z-index:4}
+#track0::before{z-index:5;color:#b7c6b9;background:#111a14c9;padding:0 4px}
+#track0{min-height:56px}
+
+.t6{background:#193244;border:1px solid #467b96;color:#c4e6f3}.syncSource{cursor:pointer}.syncSource::after{content:" 🔗"}
+
+#track6::before{color:#b9d2df;background:#0e1b24e8;padding:0 4px}
+.track[hidden]{display:none}
+
+#ctxMenu button.ctxItem{display:block;width:100%;background:transparent;border:0;text-align:left;font-family:inherit}
+#ctxMenu button.ctxItem[aria-pressed="true"]{color:#ff9101}
+
+/* Status messages must never intercept timeline gestures. */
+#toast{pointer-events:none}

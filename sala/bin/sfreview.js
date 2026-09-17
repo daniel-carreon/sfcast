@@ -7,6 +7,7 @@
 // este binario ya tenía los tres controles de Daniel (tecla C, velocidad 3x, cortes arrastrables)
 // y le faltaba el catálogo. El port es ADITIVO — main nunca se toca, y así hay UN SOLO binario.
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { promises as fsp } from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -17,7 +18,7 @@ import {
   computeTranscriptFor, listThumbs,
 } from '../lib/gallery.js';
 
-const WEB = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'web');
+const WEB = process.env.SFSTUDIO_WEB || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'web');
 
 function usage(code = 1) {
   process.stderr.write('uso: sfreview <project-dir> [--port 3010] [--roots dir1,dir2]\n' +
@@ -41,6 +42,20 @@ for (let i = 0; i < args.length; i++) {
 }
 if (!projectDir && !galleryOnly) usage();
 roots = roots || defaultRoots();
+
+// project.json is the current editable contract; timeline.json stays supported for historical rooms.
+if(projectDir && !galleryOnly && await fsp.access(path.join(projectDir,'project.json')).then(()=>true,()=>false)){
+  const brain=process.env.ARTIFICIAL_BRAIN_ROOT || path.join(os.homedir(),'Developer/artificial-brain');
+  const bridge=path.join(brain,'.claude/skills/edicion-de-video/scripts/sala/bridge.py');
+  await fsp.access(bridge);
+  const child=spawn(process.env.PYTHON || 'python3',[bridge,'--project',projectDir,'--port',String(port)],{
+    stdio:'inherit',env:{...process.env,SFSTUDIO_WEB:WEB},
+  });
+  for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>child.kill(sig));
+  child.on('error',e=>{console.error(e.message);process.exit(1);});
+  child.on('exit',code=>process.exit(code??1));
+  await new Promise(()=>{});
+}
 
 const tlPath = projectDir ? path.join(projectDir, 'timeline.json') : null;
 let timeline = null;

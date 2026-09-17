@@ -1,6 +1,10 @@
+import { composedTransport } from './composed-transport.mjs';
+import { layoutAtRaw } from './source-layout.mjs';
+import { mediaKey, poolItems } from './media-pool.mjs';
+import { frameReady } from './frame-ready.mjs';
 // SFStudio — Sala de Revisión. AI-first: la sala es para VER, RECORTAR fino (S/A/D), ANOTAR,
 // y ahora también EDITAR overlays a mano (arrastrar/trim de bordes/eliminar items);
-// todo vuelve a la fábrica como fixes.json (trims + item_edits). Nada se re-renderiza aquí.
+// todo vuelve a la fábrica como fixes.json (trims + item_edits). El adaptador prepara una previsualización por segmentos; las fuentes siguen editables.
 import {
   newState, cloneState, mergeRanges, addSplit, trimLeft, trimRight,
   prevBoundary, nextBoundary, setTrimRange,
@@ -8,7 +12,7 @@ import {
   editItem, effItem, resolveItems, clampItem, pruneItemEdits,
   effAll, effByKey, baseOfKey, patchByKey, removeByKey,
   splitItemAt, trimItemTo, removeItemsInsideRange,
-  keptSegments, outDuration, rawToOut, outToRaw,
+  keptSegments, rawToOut, outToRaw, segmentsFromCuts,
 } from './model.js';
 import { initGallery, toggleGallery, galleryKey } from './gallery.js';
 import { paintCopy, flashCopied } from './icons.js';  // ICON_COPY ya vive local (li ~1737)
@@ -16,7 +20,250 @@ import { paintCopy, flashCopied } from './icons.js';  // ICON_COPY ya vive local
 const $ = (id) => document.getElementById(id);
 let gallery = null;      // API de la galería (⌘⌥G); se inicializa en boot()
 let galleryOnly = false; // modo `sfreview --gallery`: catálogo sin sala detrás
-const base = $('base');
+const rawBase = $('base');
+const composedMovie=document.createElement('video');
+composedMovie.id='composedMovie';composedMovie.playsInline=true;composedMovie.preload='auto';
+composedMovie.style.cssText='position:absolute;inset:0;width:100%;height:100%;object-fit:contain;z-index:100;display:none';
+$('stage').appendChild(composedMovie);
+for(const name of ['waiting','stalled','seeking','ended'])composedMovie.addEventListener(name,()=>{
+ composedMovie.dataset[name]=String(1+Number(composedMovie.dataset[name]||0));
+});
+function observeMovie(now,meta){
+ composedMovie.dataset.frames=String(meta.presentedFrames);
+ composedMovie.dataset.mediaTime=String(meta.mediaTime);
+ composedMovie.requestVideoFrameCallback(observeMovie);
+}
+composedMovie.requestVideoFrameCallback(observeMovie);
+const transport=composedTransport(rawBase,composedMovie,()=>project);
+const base=transport.proxy;
+const previewAudio = new Audio();
+previewAudio.id = 'previewScore';
+previewAudio.preload = 'auto';
+previewAudio.preservesPitch = true;
+document.body.appendChild(previewAudio);
+let adapterBusy = false;
+let adapterSavePromise = Promise.resolve();
+let adapterError = null;
+let adapterMetrics = { saves: [], audioSeeks: 0 };
+const transportEvents=[];
+function observePresentedVideo(el) {
+  const onFrame=(now,meta)=>{
+    el._presented={observedAt:now,mediaTime:meta.mediaTime,
+      presentationTime:meta.presentationTime,expectedDisplayTime:meta.expectedDisplayTime,
+      presentedFrames:meta.presentedFrames,processingDuration:meta.processingDuration};
+    el.requestVideoFrameCallback(onFrame);
+  };
+  el.requestVideoFrameCallback(onFrame);
+}
+observePresentedVideo(base);
+for(const [name,el] of [['base',base],['score',previewAudio]]) {
+  for(const type of ['waiting','stalled','seeking','seeked','play','pause','playing','ratechange','ended']) {
+    el.addEventListener(type,()=>transportEvents.push({at:performance.now(),element:name,type,
+      sourceTime:base.currentTime,audioTime:previewAudio.currentTime,rate:el.playbackRate}));
+  }
+}
+// raw → output frame. `project.cuts` es el ORDEN DE SALIDA autoritativo (puede venir reordenado
+// fuera de la cronología de la fuente vía reorder-cuts), así que se busca por CONTENCIÓN directa
+// en vez de asumir source_start ascendente. Un raw fuera de cualquier corte (hueco recortado, un
+// instante transitorio antes de que el seguidor de cortes salte) cae al borde de salida más
+// cercano en distancia raw.
+function cutIndexAtRaw(t) {
+  const cuts = project?.cuts || [];
+  for (let i = 0; i < cuts.length; i++) if (t >= cuts[i].source_start && t < cuts[i].source_end) return i;
+  return -1;
+}
+function frameAtRaw(t) {
+  const cuts = project?.cuts || [];
+  const idx = cutIndexAtRaw(t);
+  if (idx !== -1) {
+    const c = cuts[idx];
+    return c.start_frame + Math.min(c.duration_frames, Math.max(0, (t - c.source_start) * project.fps));
+  }
+  let best = null, bestDist = Infinity;
+  for (const c of cuts) {
+    const dStart = c.source_start - t, dEnd = t - c.source_end;
+    if (dStart >= 0 && dStart < bestDist) { bestDist = dStart; best = c.start_frame; }
+    if (dEnd >= 0 && dEnd < bestDist) { bestDist = dEnd; best = c.start_frame + c.duration_frames; }
+  }
+  return best ?? (project?.duration_frames || 0);
+}
+function setupAdapterMedia() {
+  if(!project?.adapter){rawBase.muted=false;return;}
+  if(project?.adapter){
+    const movie=project.preview?.src;
+    if(movie){
+      const src='/media/'+movie;
+      if(composedMovie.getAttribute('src')!==src){
+        const t=base.currentTime||project.cuts[0]?.source_start||0;
+        transport.setEnabled(true);composedMovie.src=src;composedMovie.playbackRate=speed;
+        composedMovie.addEventListener('loadedmetadata',()=>{base.currentTime=t;},{once:true});
+        composedMovie.load();
+      }else transport.setEnabled(true);
+      composedMovie.style.display='';rawBase.style.visibility='hidden';
+      if(compositeCanvas)compositeCanvas.style.display='none';
+      for(const key of [...mounted.keys()])unmountOverlay(key);
+      previewAudio.pause();previewAudio.removeAttribute('src');
+      return;
+    }
+    if(transport.active()){composedMovie.pause();return;}
+  }
+  // Preserve loaded decoders across trims. Match stable event-slice identity, never array index.
+  const nextItems=effAll(state,project.items), retained=new Map();
+  for (const [key,m] of [...mounted]) {
+    const next=nextItems.find(it=>it.id===m.itemId && it.src===m.itemSrc);
+    if(next) { m.el.style.zIndex=20+(next.track||1)*10; retained.set(project.adapter?mediaKey(next,project.fps):next._key,m); }
+    else unmountOverlay(key);
+  }
+  mounted.clear();
+  for(const [key,m] of retained) mounted.set(key,m);
+  audioNeedsSync=true;
+  base.muted = true;
+  if (!project.audio) {
+    // Mezcla pendiente (preparation.ready===false): NUNCA se empareja el video/anclas NUEVOS
+    // con el preview.wav de una revisión VIEJA. Sin audio propio, previewAudio queda mudo/vacío
+    // hasta que un sondeo (pollOnce) traiga la mezcla que sí corresponde a este `project`.
+    previewAudio.pause();
+    previewAudio.removeAttribute('src');
+    return;
+  }
+  const target = '/media/' + project.audio.src;
+  if (previewAudio.getAttribute('src') !== target) {
+    previewAudio.pause();
+    previewAudio.src = target;
+    previewAudio.load();
+  }
+  previewAudio.preservesPitch = true;
+}
+// ---------- mezcla pendiente: la sala NUNCA sirve audio viejo con cortes/anclas nuevos ----------
+// Política (revisión de Levy, 8 sep): proyecto/cortes/anclas NUEVOS se ven de inmediato; el
+// PLAYBACK queda bloqueado (playBtn deshabilitado) hasta que la mezcla de audio que le corresponde
+// esté lista. Un solo temporizador de sondeo (`pollTimer`) — nunca se duplica ni reintenta tras un
+// error de horneado (el backend deja de reintentar solo y expone `preparation.error`).
+let pollTimer = null;
+function stopPendingPoll() { clearTimeout(pollTimer); pollTimer = null; }
+async function pollOnce() {
+  pollTimer = null;
+  try {
+    const pr = await (await fetch('/api/project')).json();
+    // Un guardado más reciente (u otro sondeo) ya movió `project` — no lo pisamos con esta
+    // respuesta en vuelo, y ese guardado ya trae/gestiona su propio preparation.
+    if (!project || pr.revision !== project.revision) return;
+    project = pr;
+    setupAdapterMedia(); updateMapping(); renderTimeline();
+    handlePreparationStatus(pr.preparation);
+  } catch {
+    pollTimer = setTimeout(pollOnce, 1500); // red intermitente: mismo sondeo, no uno nuevo
+  }
+}
+// Deshabilita el play mientras la mezcla no está lista y arma/detiene el sondeo; NUNCA toca el
+// texto de estado (para no pisar un mensaje de rechazo que ya se mostró). Devuelve `ready`.
+function gatePlayback(prep) {
+  const ready = !project?.adapter || !!prep?.ready;
+  $('playBtn').disabled = !ready;
+  if (!ready && !prep?.error) { if (!pollTimer) pollTimer = setTimeout(pollOnce, 1000); }
+  else stopPendingPoll();
+  return ready;
+}
+function handlePreparationStatus(prep) {
+  const error = prep?.error || null;
+  const ready = gatePlayback(prep);
+  if (error) {
+    adapterStatus('● preparación falló: ' + error, true);
+    toast('la mezcla de audio falló: ' + error);
+  } else if (!ready) {
+    adapterStatus('● preparando mezcla…');
+  } else {
+    adapterStatus('● guardado');
+  }
+}
+let audioNeedsSync=true, audioStarting=null;
+function syncAdapterAudio(t, playing) {
+  if(transport.active())return;
+  if (!project?.adapter || !project.audio) return;
+  const target=frameAtRaw(t)/project.fps;
+  const canPlay=playing && !base.seeking && base.readyState>=3 && !adapterBusy;
+  if(previewAudio.playbackRate!==speed) previewAudio.playbackRate=speed;
+  previewAudio.preservesPitch=true;
+  // Clock reads at accelerated rate include decoder/output latency. Seeking on every
+  // 45ms difference repeatedly interrupted PCM playback (measured 203 seeks/15s at2x).
+  // Align at transport transitions, then let the two native clocks run continuously.
+  if(!canPlay) {
+    if(!previewAudio.paused) previewAudio.pause();
+    if(!base.seeking && previewAudio.readyState>=1 && base.paused &&
+       Math.abs(previewAudio.currentTime-target)>.001) {
+      previewAudio.currentTime=target;adapterMetrics.audioSeeks++;
+    }
+    return;
+  }
+  if(audioNeedsSync && previewAudio.readyState>=1) {
+    previewAudio.currentTime=target;
+    adapterMetrics.audioSeeks++;
+    audioNeedsSync=false;
+  }
+  if(previewAudio.paused && !audioStarting) {
+    audioStarting=previewAudio.play().catch(()=>{}).finally(()=>{audioStarting=null;});
+  }
+}
+for(const type of ['seeking','waiting','pause','ratechange']) {
+  base.addEventListener(type,()=>{
+    audioNeedsSync=true;
+    previewAudio.pause();
+  });
+}
+function adapterStatus(text, failed=false) {
+  const el = document.getElementById('saveDot');
+  el.textContent = text;
+  el.style.color = failed ? '#ff8080' : '#6ee7a8';
+  el.style.opacity = '1';
+}
+async function saveAdapterSnapshot(snapshot) {
+  adapterBusy = true; document.body.classList.add('adapterBusy'); adapterError = null;
+  base.pause(); previewAudio.pause();
+  adapterStatus('● preparando mezcla y cortes…');
+  try {
+    const response = await fetch('/api/fixes', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({...snapshot, revision:project.revision})});
+    const data = await response.json();
+    if (!response.ok) throw Error(data.error || 'No se pudo guardar');
+    project = data.project;
+    state = fromFixes(data.fixes);
+    setupAdapterMedia();
+    updateMapping(); renderTimeline(); renderMarkers(); renderComments();
+    adapterMetrics.saves.push({revision:project.revision, seconds:data.seconds});
+    handlePreparationStatus(project.preparation);
+    return data;
+  } catch (error) {
+    adapterError = String(error.message);
+    adapterStatus('● rechazado: ' + adapterError, true);
+    toast(adapterError);
+    // Restore saved canonical state. No partial source or anchor modifications survive.
+    const [pr,fx] = await Promise.all([fetch('/api/project').then(r=>r.json()),
+                                      fetch('/api/fixes').then(r=>r.json())]);
+    project=pr;state=fromFixes(fx);
+    setupAdapterMedia();updateMapping();renderTimeline();renderMarkers();renderComments();
+    gatePlayback(pr.preparation);   // sin pisar el mensaje de rechazo recién mostrado
+    throw error;
+  } finally { adapterBusy=false; document.body.classList.remove('adapterBusy'); }
+}
+function queueAdapterSave() {
+  const snapshot=toFixes(state,project.base.src,{duration:project.duration});
+  adapterSavePromise=adapterSavePromise.catch(()=>{}).then(()=>saveAdapterSnapshot(snapshot));
+  adapterSavePromise.catch(()=>{});
+  return adapterSavePromise;
+}
+window.adapter = {
+  snapshot:()=>({revision:project?.revision, project, state:cloneState(state),
+    busy:adapterBusy,error:adapterError,metrics:adapterMetrics,
+    sourceTime:base.currentTime,outputTime:frameAtRaw(base.currentTime)/(project?.fps||30),
+    audioTime:previewAudio.currentTime,audioPaused:previewAudio.paused,
+    audioRate:previewAudio.playbackRate,preservesPitch:previewAudio.preservesPitch,
+    baseMuted:base.muted,sampledAt:performance.now(),lastPresentedFrame:base._presented,
+    presentedOutputTime:base._presented ? frameAtRaw(base._presented.mediaTime)/(project?.fps||30) : null}),
+  telemetry:()=>transportEvents.slice(),
+  saved:()=>adapterSavePromise,
+  flush:()=>{clearTimeout(saveTimer);return queueAdapterSave();}
+};
 // Velocidad: barra continua de 0.75× a 3× en saltos de 0.25 (Daniel, 10 ago 2026; tope subido
 // de 2.5 a 3 el mismo día, revisando el video largo: «permíteme hasta un x3»).
 // 0.25 es exacto en binario ⇒ 0.75 + n*0.25 no driftea; aun así todo pasa por snapSpeed().
@@ -84,8 +331,22 @@ let viewMode = localStorage.getItem('sf.viewmode') || 'compact';
 let segsCache = []; // keptSegments cacheado; se recomputa en cada render (updateMapping)
 
 // ---------- cambio de coordenadas raw ↔ timeline (la vista corte vive aquí) ----------
-function updateMapping() { segsCache = keptSegments(state.trims, project.duration); }
-function tlDur() { return viewMode === 'compact' ? outDuration(state.trims, project.duration) : project.duration; }
+// segsCache viene de project.cuts (orden de SALIDA autoritativo, puede estar reordenado fuera de
+// la cronología de la fuente), no de state.trims: un corte reordenado necesita que la vista
+// compacta lo posicione donde realmente se reproduce, no donde cae en el raw de la fuente.
+function updateMapping() {
+  if(!project.adapter){
+    project.fps=project.fps||30;
+    const kept=keptSegments(state.trims,project.duration);
+    project.cuts=kept.map((s,i)=>({id:'legacy-'+i,source_start:s.a,source_end:s.b,start_frame:s.out*project.fps,duration_frames:(s.b-s.a)*project.fps}));
+    project.duration_frames=kept.reduce((n,s)=>n+(s.b-s.a)*project.fps,0);
+  }
+  segsCache=segmentsFromCuts(project.cuts,project.fps);
+}
+// vista corte: duración = suma de los cortes (project.duration_frames/fps), autoritativa y
+// agnóstica al orden — no se deriva de state.trims (una vista raw-ascendente que un corte
+// reordenado ya no puede representar fielmente).
+function tlDur() { return viewMode === 'compact' ? project.duration_frames / project.fps : project.duration; }
 function tlOf(traw) { return viewMode === 'compact' ? rawToOut(segsCache, traw) : traw; }
 function tlToRaw(tl) { return viewMode === 'compact' ? outToRaw(segsCache, tl) : tl; }
 function XT(traw) { return tlOf(traw) * pxPerSec; }
@@ -122,8 +383,14 @@ async function boot() {
     return; // sin timeline que montar: la sala no existe en este modo
   }
 
-  base.src = '/media/' + project.base.src;
+  updateMapping();
+  rawBase.src = '/media/' + project.base.src;
+  const cueStart = () => cueCut(0);
+  if (base.readyState >= 1) cueStart();
+  else base.addEventListener('loadedmetadata', cueStart, {once:true});
+  setupAdapterMedia();
   base.preservesPitch = true; // 2x con TONO NORMAL (nativo; la razón #1 de los parches a HF muere aquí)
+  handlePreparationStatus(project.preparation);
 
   // restaurar sesión previa si hay fixes.json
   try {
@@ -187,7 +454,7 @@ function drawWave() {
   ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(W, mid); ctx.stroke();
   if (!wave || !wave.peaks.length) {
     ctx.fillStyle = '#55555f'; ctx.font = '9px system-ui';
-    ctx.fillText(wave ? 'sin pista de audio' : 'cargando waveform…', 8, H - 6);
+    ctx.fillText(project?.adapter ? (project.audio ? 'audio de la revisión' : 'preparando audio…') : (wave ? 'sin pista de audio' : 'cargando waveform…'), 8, H - 6);
     return;
   }
   const t0 = scroll.scrollLeft / pxPerSec; // tiempo del TIMELINE (out en vista corte)
@@ -203,7 +470,7 @@ function drawWave() {
   for (let x = 0; x < W; x++) {
     const bA = Math.floor(colRaw(t0 + x / pxPerSec) * wave.rate);
     if (bA * 2 >= wave.peaks.length) break;
-    const bB = Math.max(bA + 1, Math.floor(colRaw(t0 + (x + 1) / pxPerSec) * wave.rate));
+    const bB = Math.max(bA + 1, Math.min(bA+Math.ceil(wave.rate/pxPerSec)+1,Math.floor(colRaw(t0 + (x + 1) / pxPerSec) * wave.rate)));
     let mn = 0, mx = 0;
     for (let b = bA; b < bB && b * 2 + 1 < wave.peaks.length; b++) {
       const lo = wave.peaks[b * 2], hi = wave.peaks[b * 2 + 1];
@@ -238,13 +505,18 @@ function unmountOverlay(key) {
   mounted.delete(key);
 }
 function syncOverlays(t, playing) {
+  if(transport.active())return;
   // lista EFECTIVA (base editados + piezas añadidas): mover/trim/split/eliminar se reflejan en vivo
-  const items = effAll(state, project.items);
+  const items = poolItems(effAll(state,project.items),t,project.adapter?frameAtRaw(t)/project.fps:t,project.fps,project.adapter,WINDOW);
+  const activeMedia=[];
   const present = new Set();
   for (const it of items) {
     present.add(it._key);
     let m = mounted.get(it._key);
-    const inWindow = t >= it.start - WINDOW && t < it.start + it.dur + WINDOW;
+    const out=frameAtRaw(t)/project.fps;
+    const begin=project.adapter?it.start_frame/project.fps:it.start;
+    const end=begin+(project.adapter?it.duration_frames/project.fps:it.dur);
+    const inWindow = project.adapter ? out>=begin-WINDOW && out<end+WINDOW : t>=it.start-WINDOW && t<it.start+it.dur+WINDOW;
     // clave = _key estable del modelo, NO it.id: los ids de negocio pueden repetirse y colisionarían
     if (inWindow && !m) {
       const el = it.type === 'video' ? document.createElement('video') : document.createElement('img');
@@ -256,45 +528,129 @@ function syncOverlays(t, playing) {
         el.playsInline = true;
         el.preload = 'auto';
         el.playbackRate = speed;
+        observePresentedVideo(el);
       }
       el.src = '/media/' + it.src;
       el.style.display = 'none';
       $('overlays').appendChild(el);
-      m = { el };
+      m = { el, itemId:it.id, itemSrc:it.src };
       mounted.set(it._key, m);
     } else if (!inWindow && m) {
       unmountOverlay(it._key);
       continue;
     }
     if (!m) continue;
-    const local = t - it.start + (it.offset || 0); // offset = in-point del media (trim izq. de video)
-    const active = t >= it.start && t < it.start + it.dur;
+    const local = project.adapter ? (frameAtRaw(t)-it.start_frame)/project.fps+(it.offset||0) : t - it.start + (it.offset || 0); // offset = in-point del media (trim izq. de video)
+    const active = it.poolActive && it.visible!==false;
     m.el.style.display = active ? '' : 'none';
+    m.el.style.visibility = 'hidden'; // decoded offscreen; the complete frame is committed below
     if (m.el.tagName === 'VIDEO') {
       const dur = m.el.duration;
       const target = Math.max(0, Number.isFinite(dur) ? Math.min(local, dur - 0.03) : local);
-      if (active) {
-        if (Math.abs(m.el.currentTime - target) > 0.12 && m.el.readyState >= 1) m.el.currentTime = target;
-        if (playing && m.el.paused) m.el.play().catch(() => {});
-        if (!playing && !m.el.paused) m.el.pause();
-      } else {
-        if (!m.el.paused) m.el.pause();
-        if (m.el.readyState >= 1 && Math.abs(m.el.currentTime - target) > 0.3) m.el.currentTime = target;
-      }
+      // Keep shared graphic/caption clocks moving across item boundaries and gaps.
+      const advancing=playing&&local>=0&&(!Number.isFinite(dur)||local<dur);
+      if(!m.el.seeking&&m.el.readyState>=1&&Math.abs(m.el.currentTime-target)>(advancing?2/project.fps:.012))m.el.currentTime=target;
+      if(advancing&&m.el.paused)m.el.play().catch(()=>{});
+      if(!advancing&&!m.el.paused)m.el.pause();
     }
+    if(active)activeMedia.push({el:m.el,target:Math.max(0,local),track:it.track||1,fit:it.fit||'contain'});
   }
+  commitComposite(activeMedia,t,playing);
   // desmontar lo que ya no existe (item eliminado / add deshecho)
   for (const key of [...mounted.keys()]) if (!present.has(key)) unmountOverlay(key);
 }
 
-// ---------- salto de trims: rVFC (por-frame), NUNCA timeupdate (250ms = 7 frames visibles) ----------
+// Only expose a complete, decoded composition. Seeking one layer must never expose
+// the raw camera or combine the old graphic with the next camera framing.
+let compositeCanvas=null, compositeBuffer=null, compositeKey=null;
+function commitComposite(layers,t,playing) {
+  if(!compositeCanvas){
+    compositeCanvas=document.createElement('canvas');compositeCanvas.id='compositePreview';
+    compositeBuffer=document.createElement('canvas');$('stage').appendChild(compositeCanvas);
+  }
+  if(compositeCanvas.width!==project.width||compositeCanvas.height!==project.height){
+    for(const c of [compositeCanvas,compositeBuffer]){c.width=project.width;c.height=project.height;}
+  }
+  const tolerance=(playing?2.5:1.2)/project.fps;
+  const ready=(el,target)=>frameReady(el,target,tolerance);
+  const hasCamera=layers.some(l=>l.track===1);
+  const layout=layoutAtRaw(project,t);
+  if(project.synchronized&&!layout){compositeCanvas.dataset.waiting='true';return;}
+  if(layers.some(l=>!ready(l.el,l.target))||(!hasCamera&&!ready(base,t))){
+    compositeCanvas.dataset.waiting='true';return;
+  }
+  const key=project.revision+'|'+Math.round(frameAtRaw(t))+'|'+layers.map(l=>l.el.src+':'+Math.round(l.target*project.fps)).join('|');
+  if(key===compositeKey){compositeCanvas.dataset.waiting='false';return;}
+  compositeKey=key;
+  const ctx=compositeBuffer.getContext('2d');ctx.fillStyle='#000';ctx.fillRect(0,0,project.width,project.height);
+  function draw(el,fit){
+    const w=el.videoWidth||el.naturalWidth,h=el.videoHeight||el.naturalHeight;if(!w||!h)return;
+    const k=fit==='cover'?Math.max(project.width/w,project.height/h):Math.min(project.width/w,project.height/h);
+    ctx.drawImage(el,(project.width-w*k)/2,(project.height-h*k)/2,w*k,h*k);
+  }
+  if(project.synchronized){
+    const screen=layers.find(l=>l.track===6);
+    if(screen)draw(screen.el,'contain');
+    if(layout.mode==='camera')draw(rawBase,'contain');
+    else if(layout.mode==='pip'){
+      const [x,y,w,h]=layout.rect;const [cx,cy,cw,ch]=layout.camera_crop;
+      ctx.save();ctx.beginPath();ctx.ellipse(x+w/2,y+h/2,w/2,h/2,0,0,Math.PI*2);ctx.clip();
+      ctx.drawImage(rawBase,cx*base.videoWidth,cy*base.videoHeight,cw*base.videoWidth,ch*base.videoHeight,x,y,w,h);ctx.restore();
+    }
+  } else if(!hasCamera)draw(rawBase,'contain');
+  for(const l of layers.filter(l=>l.track!==6).sort((a,b)=>a.track-b.track))draw(l.el,l.fit);
+  compositeCanvas.getContext('2d').drawImage(compositeBuffer,0,0);
+  compositeCanvas.dataset.waiting='false';compositeCanvas.dataset.sourceTime=t;
+  compositeCanvas.dataset.commits=String(1+Number(compositeCanvas.dataset.commits||0));
+  compositeCanvas.dataset.layerCount=layers.length;
+}
+
+// Playback follows canonical cut identities, including adjacent source intervals and EOF.
+// A source seek selects a cut; natural playback advances from the previously selected cut.
+let cutPtr = null;
+let montageEnded = false;
+let clampingEnd = false;
+function finishMontage() {
+  base.pause(); previewAudio.pause(); montageEnded = true;
+  const last = project.cuts.at(-1);
+  if(!last)return;
+  if (base.currentTime >= last.source_end || base.currentTime < last.source_start) {
+    clampingEnd = true;
+    base.addEventListener('seeked', () => { clampingEnd = false; }, {once:true});
+    base.currentTime = Math.max(last.source_start, last.source_end - 1 / project.fps);
+  }
+}
+function cueCut(index, resume=false) {
+  const cut = project?.cuts?.[index];
+  if (!cut) { finishMontage(); return; }
+  cutPtr = index; montageEnded = false; audioNeedsSync = true;
+  if (resume) base.addEventListener('seeked', () => base.play().catch(() => {}), {once:true});
+  base.currentTime = cut.source_start;
+}
+base.addEventListener('seeking', () => {
+  if (clampingEnd) return;
+  const index = cutIndexAtRaw(base.currentTime);
+  cutPtr = index < 0 ? null : index;
+  montageEnded = false;
+});
+base.addEventListener('ended', () => {
+  if(transport.active()){montageEnded=true;return;}
+  if (cutPtr !== null && cutPtr + 1 < project.cuts.length) cueCut(cutPtr + 1, true);
+  else finishMontage();
+});
 function armFrameSkip() {
   const cb = () => {
-    if (!base.paused) {
-      const tgt = skipTarget(state.trims, base.currentTime);
-      if (tgt !== null) {
-        if (tgt >= project.duration - 0.05) base.pause();
-        base.currentTime = Math.min(tgt, project.duration - 0.04);
+    if (!transport.active() && !base.paused && !base.seeking) {
+      const cuts = project?.cuts || [];
+      if (cutPtr === null) cutPtr = cutIndexAtRaw(base.currentTime);
+      if (cutPtr >= 0 && cutPtr < cuts.length) {
+        // Check the previous cut BEFORE asking which source interval contains this frame.
+        // Otherwise touching intervals silently follow raw chronology after a reorder.
+        if (base.currentTime >= cuts[cutPtr].source_end - .5 / project.fps) cueCut(cutPtr + 1);
+      } else {
+        const target = skipTarget(state.trims, base.currentTime);
+        if (target !== null && target >= project.duration - .05) finishMontage();
+        else { const index = cutIndexAtRaw(target ?? base.currentTime); cueCut(index < 0 ? 0 : index); }
       }
     }
     base.requestVideoFrameCallback(cb);
@@ -309,13 +665,15 @@ function loop() {
     const t = base.currentTime || 0;
     const playing = !base.paused && !base.ended;
     syncOverlays(t, playing);
-    $('playhead').style.transform = `translateX(${XT(t)}px)`;
+    syncAdapterAudio(t, playing);
+    const shownTime = montageEnded && viewMode === 'compact' ? tlDur() : tlOf(t);
+    $('playhead').style.transform = `translateX(${shownTime * pxPerSec}px)`;
     // en vista corte el reloj es el del RESULTADO (tiempo final), como CapCut
-    $('timecode').textContent = `${fmt(tlOf(t))} / ${fmt(tlDur())}`;
+    $('timecode').textContent = `${fmt(shownTime)} / ${fmt(tlDur())}`;
     $('playBtn').textContent = playing ? '⏸' : '▶';
     // controles de pantalla completa (solo cuando aplica): scrub + reloj + icono play/pausa
     if (document.fullscreenElement || document.webkitFullscreenElement) {
-      const cur = tlOf(t), dur = tlDur();
+      const cur = shownTime, dur = tlDur();
       const frac = dur > 0 ? Math.max(0, Math.min(1, cur / dur)) : 0;
       $('fsSeekFill').style.width = `${frac * 100}%`;
       $('fsSeekKnob').style.left = `${frac * 100}%`;
@@ -386,23 +744,25 @@ function renderTimeline() {
   // bordes = trim, click = seleccionar). En vista corte ambos EXTREMOS se remapean (un item que
   // cruza trims conserva su ancho de salida real).
   const effItems = effAll(state, project.items);
-  for (const tr of [1, 2, 3]) {
+  for (const tr of [1, 2, 3, 4, 5, 6]) {
     const el = $('track' + tr);
     el.innerHTML = '';
+    el.hidden=tr===6 ? !project.synchronized : !effItems.some(i=>(i.track||1)===tr);
     for (const it of effItems.filter((i) => (i.track || 1) === tr)) {
       const edited = typeof it._key === 'string' || !!state.items[it._key];
       const d = document.createElement('div');
       d.className = `clipItem t${tr}` + (isSel(it._key) ? ' sel' : '') + (edited ? ' edited' : '');
       const x0 = XT(it.start);
-      const w = Math.max(2, XT(it.start + it.dur) - x0 - 1); // ancho OUT real (colapsa costuras internas)
+      const w = Math.max(it.type==='audio'?7:2, XT(it.start + it.dur) - x0 - 1); // ancho OUT real (colapsa costuras internas)
       d.style.left = `${x0}px`;
       d.style.width = `${w}px`;
-      d.title = `${it.id} · ${it.start}s +${it.dur}s — arrastra para mover · bordes = trim · Supr borra`;
+      d.title = `${it.label || it.id} · ${it.start}s +${it.dur}s — arrastra para mover · bordes = trim · Supr borra`;
       d.dataset.key = String(it._key);
-      if (w > 34) d.textContent = it.id; // el label depende del ancho renderizado, no de la dur cruda
+      if (w > 34) d.textContent = it.label || it.id; // el label depende del ancho renderizado, no de la dur cruda
       const hl = document.createElement('div'); hl.className = 'hd l';
       const hr = document.createElement('div'); hr.className = 'hd r';
-      d.append(hl, hr);
+      if(!it.synchronized)d.append(hl, hr);
+      else {d.classList.add('syncSource');d.title='Pantalla vinculada a cámara · '+it.cut_id+' · '+(it.visible?'visible':'oculta en este encuadre');}
       el.appendChild(d);
     }
   }
@@ -412,6 +772,7 @@ function renderTimeline() {
   //    la costura se arrastra (bordes = ajustar el corte, cuerpo = moverlo) y doble-click restaura
   //  · RAW: material completo con los rangos recortados visibles (la vista quirúrgica)
   const bt = $('track0');
+  const waveform=$('waveCanvas'); waveform.remove();
   bt.innerHTML = '';
   const merged = mergeRanges(state.trims);
   // ¿la base de este lado del playhead está seleccionada? (Q/E la incluyen para el ripple)
@@ -477,7 +838,7 @@ function renderTimeline() {
   const cut = totalTrimmed(state.trims);
   const nEdits = Object.keys(state.items).length;
   $('trimSummary').innerHTML = (state.trims.length
-    ? `<b>${cut.toFixed(1)}s</b> recortados en ${mergeRanges(state.trims).length} rango(s) · dur final ${fmt(project.duration - cut)}`
+    ? `<b>${cut.toFixed(1)}s</b> recortados en ${mergeRanges(state.trims).length} rango(s) · dur final ${fmt(project.adapter ? project.duration_frames/project.fps : project.duration - cut)}`
     : 'sin recortes') + (nEdits ? ` · <span class="iedit">${nEdits} asset(s) editado(s)</span>` : '');
   // rango persistente seleccionado sobre la base (para borrar con Supr) — el gesto de editor de Daniel
   const oldBR = $('timeline').querySelector('.baseRangePersist');
@@ -490,13 +851,18 @@ function renderTimeline() {
     $('timeline').appendChild(br);
   }
   // audio separado del video (clic derecho) → despega la vista de la onda
-  $('waveRow').classList.toggle('detached', state.audioLinked === false);
+  const detached=state.audioLinked===false;
+  $('waveRow').hidden=!detached;
+  $('waveRow').classList.toggle('detached',detached);
+  (detached?$('waveRow'):$('track0')).appendChild(waveform);
+  $('track0').dataset.label=detached?'A-roll · video':'A-roll · video + voz';
+  layoutStage();
   renderItemInfo();
   queueWave();
 }
 
 // ---------- inspector del item seleccionado ----------
-const TRACK_NAMES = { 1: 'clips', 2: 'alpha', 3: 'caps' };
+const TRACK_NAMES = { 1: 'clips', 2: 'alpha', 3: 'caps', 4: 'SFX · transiciones', 5: 'SFX · acentos' };
 function renderItemInfo() {
   const box = $('itemInfo');
   // selección múltiple (Q/E) y/o la base: tarjeta de grupo, no de item
@@ -522,7 +888,7 @@ function renderItemInfo() {
   const off = it.offset ? ` · in ${it.offset.toFixed(2)}s` : '';
   const isAdd = typeof it._key === 'string' ? ' · pieza de split' : '';
   box.innerHTML = `<div class="iiId">${it.id}</div>` +
-    `<div class="iiMeta">${TRACK_NAMES[it.track || 1]} · ${fmt(it.start)} → ${fmt(it.start + it.dur)} (${it.dur.toFixed(2)}s)${off}${isAdd}</div>` +
+    `<div class="iiMeta">${TRACK_NAMES[it.track || 1]} · ${fmt(tlOf(it.start))} → ${fmt(tlOf(it.start + it.dur))} (${it.dur.toFixed(2)}s)${off}${isAdd}</div>` +
     `<div class="iiHint"><b>S</b> parte · <b>A/D</b> trim al playhead · <b>⌥←/→</b> mover 1 frame (⇧×10) · <b>Supr</b> borra · <b>Esc</b> deselecciona</div>`;
 }
 
@@ -588,7 +954,7 @@ function commentsAsText() {
   return head + list.map((c) => `- [${fmt(tlOf(c.t))}] ${c.texto}`).join('\n') + '\n';
 }
 
-function refresh() { renderTimeline(); renderMarkers(); renderComments(); autosave(); }
+function refresh() { updateMapping(); renderTimeline(); renderMarkers(); renderComments(); autosave(); }
 
 // ---------- AUTOSAVE (25 jul 2026) ----------
 // Antes, el estado de la sala SOLO llegaba al backend con ⌘E. Todo lo que Daniel recortaba antes de
@@ -598,6 +964,7 @@ function refresh() { renderTimeline(); renderMarkers(); renderComments(); autosa
 // ⌘E sigue existiendo: marca el export EXPLÍCITO (`exported:true`) = "ya terminé, imprime".
 let booted = false, saveTimer = null, lastSaved = '';
 function autosave() {
+  if(!project?.adapter){
   if (!booted) return;                      // no pisar el fixes.json al restaurar la sesión
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
@@ -611,6 +978,12 @@ function autosave() {
       else setSaveDot('err');
     } catch { setSaveDot('err'); }
   }, 1200);
+    return;
+  }
+  if (!booted) return;
+  clearTimeout(saveTimer);
+  base.pause(); previewAudio.pause();
+  saveTimer=setTimeout(()=>queueAdapterSave(),1200);
 }
 function setSaveDot(st) {
   const el = document.getElementById('saveDot');
@@ -690,7 +1063,7 @@ function removeSelectedItem() {
     if (it && removeByKey(state, project.items, k)) { n++; lastId = it.id; }
   }
   if (!n) { undoStack.pop(); return; }
-  toast(n === 1 ? `${lastId} eliminado · ⌘Z deshace` : `${n} assets eliminados · ⌘Z deshace`);
+  toast(project?.adapter ? (n === 1 ? `${lastId} eliminado · revisión recuperable` : `${n} assets eliminados · revisión recuperable`) : (n === 1 ? `${lastId} eliminado · ⌘Z deshace` : `${n} assets eliminados · ⌘Z deshace`));
   clearSel();
   refresh();
 }
@@ -1007,6 +1380,10 @@ function startTrimDrag(e, div, tidx) {
 // El ripple cambia TODA la geometría → re-render completo por frame (rAF).
 function startSeamDrag(e, div, tidx) {
   e.preventDefault();
+  if (project.adapter && project.cuts.some((c,i,a) => i > 0 && c.source_start < a[i-1].source_start)) {
+    toast('Montaje reordenado: ajusta esta frontera en vista fuente o pídeselo a Levy.');
+    return;
+  }
   const r0 = state.trims[tidx];
   if (!r0) return;
   const zone = e.target.classList.contains('hd') ? (e.target.classList.contains('l') ? 'l' : 'r') : 'move';
@@ -1133,8 +1510,7 @@ function startBaseRangeSelect(e) {
 }
 
 // borra el rango seleccionado = recorte del base (video + audio JUNTOS; ripple a la izquierda). El
-// audio va con el video porque son el mismo mp4 (audioLinked); si Daniel lo separó, la fábrica lo
-// trata como pista aparte vía la señal audio_linked del fixes.json.
+// audio conserva las mismas anclas aunque la forma de onda se muestre en otra fila.
 function deleteBaseRange() {
   if (!baseRange) return false;
   const { a, b } = baseRange;
@@ -1150,14 +1526,13 @@ function deleteBaseRange() {
 }
 
 // clic derecho: separar/unir el audio del video principal. Por default van pegados (un solo mp4);
-// separarlos marca la intención para la fábrica (audio_linked:false en el fixes) y despega la vista
-// de la onda. La mayoría del tiempo Daniel NO separa (lo hace la IA), pero la capacidad existe.
+// audio_linked:false separa la vista, no permite desincronizar la voz ni cambiar sus anclas.
 function toggleAudioLink() {
   state.audioLinked = state.audioLinked === false ? true : false;
   hideCtxMenu();
   refresh();
   toast(state.audioLinked === false
-    ? 'audio SEPARADO del video · la fábrica lo tratará como pista aparte · clic derecho → Unir audio'
+    ? 'forma de onda en pista aparte · sincronía conservada · clic derecho → Unir audio'
     : 'audio UNIDO al video · se cortan juntos');
 }
 
@@ -1240,8 +1615,9 @@ function nearestSeam(clientX) {
   return best;
 }
 
-for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2', 'track3']) {
+for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2', 'track3', 'track4', 'track5', 'track6']) {
   $(id).addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return; // menú contextual no busca ni inicia arrastres
     if (e.target.classList.contains('mpin')) {
       const mk = state.markers[+e.target.dataset.idx];
       if (mk) base.currentTime = mk.t;
@@ -1253,6 +1629,7 @@ for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2'
       return;
     }
     const clip = e.target.closest('.clipItem');
+    if (clip?.classList.contains('syncSource')) { seekFromEvent(e); return; }
     if (clip) {
       const k = clip.dataset.key;
       const key = k.startsWith('a') ? k : +k;
@@ -1287,6 +1664,24 @@ for (const id of ['ruler', 'markerLane', 'waveRow', 'track0', 'track1', 'track2'
 for (const id of ['track0', 'waveRow']) {
   $(id).addEventListener('contextmenu', (e) => { e.preventDefault(); showCtxMenu(e.clientX, e.clientY); });
 }
+// Linked source layouts are real canonical edits, never a flattened preview toggle.
+$('track6').addEventListener('contextmenu',e=>{
+ e.preventDefault();const key=e.target.closest('.clipItem')?.dataset.key;
+ const item=key!==undefined?project.items[Number(key)]:null;
+ const cut=project.cuts.find(c=>c.id===item?.cut_id)||project.cuts.find(c=>base.currentTime>=c.source_start&&base.currentTime<c.source_end);
+ if(!cut)return;
+ const menu=$('ctxMenu');menu.innerHTML='';menu.hidden=false;menu.style.left=Math.min(e.clientX,window.innerWidth-225)+'px';menu.style.top=Math.max(0,e.clientY-125)+'px';
+ for(const [mode,label] of [['camera','Cámara completa'],['pip','Pantalla + cámara'],['screen','Sólo pantalla']]){
+  const b=document.createElement('button');b.className='ctxItem';b.textContent=label;b.setAttribute('aria-pressed',String(cut.layout?.mode===mode));b.onclick=async()=>{
+   hideCtxMenu();base.pause();previewAudio.pause();
+   try{
+    const r=await fetch('/api/layout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:project.revision,cut_id:cut.id,layout:{...cut.layout,mode}})});
+    const d=await r.json();if(!r.ok)throw Error(d.error);
+    project=d.project;state=fromFixes(d.fixes);setupAdapterMedia();updateMapping();renderTimeline();handlePreparationStatus(project.preparation);
+   }catch(err){toast(err.message);}
+  };menu.appendChild(b);
+ }
+});
 // cerrar el menú al clicar fuera (captura, antes que otros handlers)
 document.addEventListener('pointerdown', (e) => {
   const m = $('ctxMenu');
@@ -1319,7 +1714,10 @@ function togglePlay() {
   // justo el fallo que Daniel reportó, solo que en una ventana más corta.
   if (arrancando) return;
   if (!base.paused) { base.pause(); return; }
-  const tgt = skipTarget(state.trims, base.currentTime);
+  // Playback bloqueado mientras la mezcla de audio no está lista (gatePlayback deshabilita el
+  // botón, pero atajos de teclado / clic en pantalla completa llaman aquí directo).
+  if (project?.adapter && !project.audio) { toast('preparando la mezcla de audio… un momento'); return; }
+  const tgt = montageEnded ? (project.cuts[0]?.source_start||0) : skipTarget(state.trims, base.currentTime);
   if (tgt !== null && tgt < project.duration - 0.05) {
     arrancando = true;
     base.currentTime = Math.min(tgt, project.duration - 0.04);
@@ -1694,6 +2092,7 @@ function openNotePopover(t, kind = 'marker', editIdx = -1) {
 
 // ---------- export ----------
 async function exportFixes() {
+  if(!project.adapter){
   const fixes = toFixes(state, project.base.src, { project: project.name, duration: project.duration });
   fixes.exported = true;   // ⌘E = "ya terminé de recortar, la fábrica puede imprimir"
   fixes.autosaved = false;
@@ -1706,6 +2105,23 @@ async function exportFixes() {
   $('modalBody').textContent = JSON.stringify(fixes, null, 2);
   $('modalPath').textContent = savedPath;
   $('modal').hidden = false;
+    return;
+  }
+  clearTimeout(saveTimer);
+  try {
+    await queueAdapterSave();
+    adapterBusy=true;
+    adapterStatus('● exportando película…');
+    const response=await fetch('/api/export',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({revision:project.revision})});
+    const data=await response.json();
+    if(!response.ok) throw Error(data.error);
+    window.adapterExport=data;
+    $('modalBody').textContent=JSON.stringify(data.report,null,2);
+    $('modal').hidden=false;
+    adapterStatus('● película exportada');
+  } catch(e) { adapterError=e.message;adapterStatus('● '+e.message,true); }
+  finally {adapterBusy=false;}
 }
 $('exportBtn').addEventListener('click', exportFixes);
 $('cCopy').addEventListener('click', async () => {
@@ -1956,7 +2372,7 @@ function renderPublish(j) {
   // descripción completa, con el /go/ resaltado; estado del link junto al header
   const desc = md.description || '';
   $('ppDesc').innerHTML = desc
-    ? escapeHtml(desc).replace(/(https?:\/\/\S*\/go\/[a-z0-9-]+)/g, '<span class="ppGo">$1</span>')
+    ? escapeHtml(desc).replace(/(https?:\/\/(?:www\.)?saasfactory\.so\/(?:go\/)?[a-z0-9-]+)/gi, '<span class="ppGo">$1</span>')
     : '<div class="ppEmptyBlock">sin descripción aún.</div>';
   const link = pub.data?.link;
   $('ppLinkState').textContent = link ? (link.verified ? `/go/ verificado ✓ ${link.status} + cookies` : `/go/ SIN verificar (${link.status})`) : '';
@@ -2018,6 +2434,7 @@ function toast(msg) {
 // S/A/D operan sobre el COMPONENTE SELECCIONADO; sin selección, el default es la línea base.
 window.addEventListener('keydown', (e) => {
   if (!project) return;
+  if (adapterBusy) { e.preventDefault(); return; }
   // ⌘⌥G = GALERÍA. Se compara e.code y NO e.key: en macOS ⌥+g produce "©" y un switch por
   // letra nunca dispararía. Va ANTES del early-return de modificadores — ese return era
   // exactamente por qué ⌘⌥G no hacía nada en este binario (27 ago 2026).

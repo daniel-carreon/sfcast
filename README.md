@@ -5,7 +5,7 @@
 > genera transcript en español + título + resumen + capítulos + viewer web, solo.
 > **$0/mes** (Loom Business cobra $18-24 por usuario al mes).
 >
-> Repo: `~/Developer/software/sfcast` (independiente, sin remote).
+> Repo: `~/Developer/software/sfcast` (independiente; consultar `git remote -v` para su remoto vigente).
 > Por qué cada decisión es como es: **`DECISIONS.md`** (v1.1 → v4.0).
 >
 > **Grabar y revisar viven en el mismo repo.** `sala/` es SFStudio — la Sala de
@@ -99,10 +99,8 @@ ISP, no la infra). De ahí que comprimir antes de subir sea el fix grande.
 
 ```bash
 cd ~/Developer/software/sfcast
-./scripts/build-app.sh                    # compila + firma "SFlow Dev" → dist/SFCast.app
-rm -rf /Applications/SFCast.app
-cp -R dist/SFCast.app /Applications/
-open /Applications/SFCast.app
+./scripts/install-app.sh                  # compila, verifica, cierra en reposo, respalda e instala
+# --skip-build instala explícitamente el artefacto ya preparado en dist/
 ```
 
 Vive en **/Applications** con su icono propio (anillo mostaza): Spotlight o

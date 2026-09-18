@@ -200,3 +200,5 @@ en aprobada. Cambiar dirección, montaje, código o evidencia invalida el regist
 solo lo vincula si su ID coincide con YouTube y declara transporte completado. Ruta, bytes y
 hash registrado no equivalen a aprobación artística; cambios de tamaño/ausencia se muestran.
 No inferir un máster aprobado por el nombre más reciente ni fabricar recibos históricos.
+
+La ficha agrupa recursos en desplegables por función (originales, corte, dirección, publicación, exportaciones y evidencias). Editor y recorrido permanecen visibles. Grupos con archivos faltantes se abren para no esconder el problema; no se elimina ni se interpreta como aprobado ningún recurso al agruparlo.

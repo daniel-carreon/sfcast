@@ -17,6 +17,26 @@
 
 import { paintCopy, flashCopied } from './icons.js';
 
+function renderResourceGroups(it) {
+  const esc = deps.escapeHtml;
+  const resources = it.production?.resources || [];
+  if (!resources.length) return '<p class="galEmptyBlock">Sin recursos localizados.</p>';
+  const labels = { project: 'Proyecto editable', source: 'Grabaciones originales', cut: 'Decisiones de corte', publication: 'Publicación', design: 'Dirección y planes', export: 'Versiones exportadas', verification: 'Evidencias' };
+  const kinds = [...new Set(resources.map(r => r.kind))];
+  return kinds.map(kind => {
+    const group = resources.filter(r => r.kind === kind);
+    const missing = group.filter(r => r.state !== 'available').length;
+    return `<details class="galResourceGroup"${missing ? ' open' : ''}>
+      <summary>${esc(labels[kind] || kind)} <span class="galHmeta">${group.length}${missing ? ` · ${missing} sin archivo` : ''}</span></summary>
+      ${group.map(r => `<div class="galResource">
+        <span class="galHmeta">${r.state === 'available' ? 'Disponible' : 'Falta el archivo'}</span>
+        ${r.state === 'available' ? `<a class="galLink" href="/gallery/resource?id=${encodeURIComponent(it.id)}&resource=${encodeURIComponent(r.id)}" target="_blank" rel="noopener">${esc(r.label)} ↗</a>` : `<strong>${esc(r.label)}</strong>`}
+        <small>${esc(shortPath(r.path))}</small>
+      </div>`).join('')}
+    </details>`;
+  }).join('');
+}
+
 const $ = (id) => document.getElementById(id);
 
 let deps = { toast: () => {}, escapeHtml: (s) => s, fmt: (s) => String(s) };
@@ -346,11 +366,7 @@ function renderDetail(it) {
         ${it.production?.identity ? `<p class="galNote">Identidad permanente · ${esc(it.production.identity.id)}${it.production.identity.parent_id ? `<br>Derivado de ${esc(it.production.identity.parent_id)}` : ''}</p>` : '<p class="galNote">Identidad permanente pendiente de inicializar.</p>'}
         <div class="galNote">Archivos del proyecto. Disponible significa que el archivo existe; no implica aprobación.</div>
         ${it.production?.error ? `<p class="galEmptyBlock">${esc(it.production.error)}</p>` : ''}
-        <div class="galResourceList">${(it.production?.resources || []).map(r => `<div class="galResource">
-          <span class="galHmeta">${esc(r.kind)} · ${r.state === 'available' ? 'disponible' : 'falta el archivo'}</span>
-          ${r.state === 'available' ? `<a class="galLink" href="/gallery/resource?id=${encodeURIComponent(it.id)}&resource=${encodeURIComponent(r.id)}" target="_blank" rel="noopener">${esc(r.label)} ↗</a>` : `<strong>${esc(r.label)}</strong>`}
-          <small>${esc(shortPath(r.path))}</small>
-        </div>`).join('') || '<p class="galEmptyBlock">Sin recursos localizados.</p>'}</div>
+        <div class="galResourceList">${renderResourceGroups(it)}</div>
         <h3>Pendientes registrados</h3>
         ${(it.production?.pending || []).map(p => `<p class="galNote">${esc(p)}</p>`).join('') || '<p class="galNote">Sin pendientes registrados. Esto no certifica que el proyecto esté terminado.</p>'}
       </section>

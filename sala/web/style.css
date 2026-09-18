@@ -992,3 +992,8 @@ body.adapterBusy main { pointer-events:none; opacity:.7; }
 
 /* Status messages must never intercept timeline gestures. */
 #toast{pointer-events:none}
+
+.galResourceGroup { border-bottom: 1px solid var(--border, #303039); }
+.galResourceGroup summary { cursor: pointer; padding: 12px 0; font-size: 14px; }
+.galResourceGroup summary:focus-visible { outline: 2px solid var(--accent, #a970ff); outline-offset: 3px; }
+.galResourceGroup .galResource { margin-left: 16px; }

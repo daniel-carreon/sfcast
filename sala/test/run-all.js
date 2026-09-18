@@ -447,6 +447,13 @@ const galRoot = path.join(tmp, 'lanzamientos');
 
     // la ficha COMPLETA: capítulos, transcript, miniaturas y el post
     await page.click('.galCard[data-id="r0/2026-09-01-lanzamiento-completo"]');
+    await page.waitForSelector('#galDetail:not([hidden])', { timeout: 5000 });
+    const compactDefault = await page.$eval('.galDetGrid',e=>e.dataset.cols==='3')
+      && await page.$eval('.galSec[data-sec="recursos"]',e=>e.style.display!=='none')
+      && await page.$eval('.galSec[data-sec="post"]',e=>e.style.display==='none');
+    await page.click('.galSecBtn[data-sec="recursos"]');
+    await page.click('.galSecBtn[data-sec="transcript"]');
+    await page.click('.galSecBtn[data-sec="post"]');
     await page.waitForSelector('#galPostBody', { timeout: 5000 });
     // LAS DOS FASES (el contrato de Daniel, no las 9 etapas internas) + el RAIL de secciones
     const fases = await page.$$eval('.galFase .galFaseCnt', (e) => e.map((x) => x.textContent));
@@ -462,7 +469,7 @@ const galRoot = path.join(tmp, 'lanzamientos');
       e.filter((x) => x.style.display !== 'none').length)) === 1;            // la última no se apaga
     await page.click('.galSecBtn[data-sec="transcript"]');
     for (const sec of ['portada', 'texto']) await page.click(`.galSecBtn[data-sec="${sec}"]`);
-    const railOk = fases.length === 2 && fases[0] === '3/5' && fases[1] === '1/3' && faseItems === 8
+    const railOk = compactDefault && fases.length === 2 && fases[0] === '2/5' && fases[1] === '1/3' && faseItems === 8
       && sinStepper && sinLink && cols0 === '4' && cols1 === '3' && trOculto && ultimaViva;
     // los capítulos NO se pintan aparte: viven dentro del texto de la descripción (pintarlos
     // arriba era la misma lista dos veces). Se comprueba que estén ahí y que el bloque murió.
@@ -533,9 +540,8 @@ const galRoot = path.join(tmp, 'lanzamientos');
 
     // PERSISTENCIA REAL: recargar la página y volver a abrir la ficha
     await page.reload({ waitUntil: 'load' });
-    await page.waitForSelector('.galCard', { timeout: 10000 });
+    await page.waitForSelector('#galDetail:not([hidden])', { timeout: 10000 });
     const chipsTras = await page.$$eval('.galChip', (els) => els.map((e) => e.textContent).join(' | '));
-    await page.click('.galCard[data-id="r0/2026-09-01-lanzamiento-completo"]');
     await page.waitForSelector('#galPostBody', { timeout: 5000 });
     const bodyTras = await page.$eval('#galPostBody', (el) => el.value);
     const coverTras = await page.$eval('.galCoverName', (el) => el.textContent);

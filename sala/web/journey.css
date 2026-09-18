@@ -1,0 +1,17 @@
+/* Inherit SFStudio palette. Brand source: diseno-de-marca/references/nucleo.md. */
+body.journey{overflow:auto;height:auto;min-height:100vh;display:block;background:var(--bg,#101014);color:var(--text,#eee);font:16px/1.55 Inter,system-ui,sans-serif}
+.journey header{display:flex;align-items:center;justify-content:space-between;padding:20px 4vw;border-bottom:1px solid #ffffff20;gap:20px}
+.journey a{color:inherit;text-decoration:underline;text-underline-offset:4px}.journey header span,.eyebrow{font-size:12px;letter-spacing:.16em;color:var(--orange,#f5aa51)}
+.journey main{max-width:1280px;margin:auto;padding:36px 40px}.journey h1{font-size:clamp(32px,4vw,58px);line-height:1.08;letter-spacing:-.04em;margin:12px 0 18px;font-weight:650}
+#projectName{color:#bdbdc8;max-width:900px}.journey nav{display:flex;margin:35px 0 30px;border-bottom:1px solid #ffffff25;gap:12px}
+.journey nav button{flex:1;border:0;border-bottom:3px solid transparent;border-radius:0;background:transparent;padding:16px 10px;color:#aaaab8;font:600 18px Inter,system-ui;cursor:pointer;text-align:left}
+.journey nav button[aria-current="step"]{color:#fff;border-color:var(--orange,#f5aa51)}.journey nav button span{font-size:12px;display:block;margin-bottom:8px;font-weight:400}
+.journey button:focus-visible,.journey a:focus-visible{outline:2px solid #fff;outline-offset:5px}
+#detail{display:grid;grid-template-columns:1.15fr 1fr;gap:50px;align-items:start}.journey h2{font-size:30px;line-height:1.2;margin:0 0 20px}.journey h3{font-size:17px;margin:24px 0 8px}
+.journey details{border-bottom:1px solid #ffffff20;padding:12px 0}.journey summary{cursor:pointer;font-size:18px}.journey details p{color:#c5c5cf;font-size:15px}.journey details small{white-space:pre-wrap;overflow-wrap:anywhere}
+.journey ul{padding:0;list-style:none}.journey li{padding:10px 0;border-bottom:1px solid #ffffff15}.journey li small{display:block;color:#aaaab8}.journeyNote{margin-top:35px;font-size:13px;color:#aaaab8}.journey .evidence{border-left:1px solid #ffffff25;padding-left:30px}.journey .return{margin-top:18px;border:1px solid #ffffff40;padding:10px 16px;background:transparent;color:inherit;border-radius:6px;cursor:pointer}
+@media(max-width:700px){.journey main{padding:25px 20px}.journey header{flex-wrap:wrap;font-size:13px}.journey nav{gap:0}.journey nav button{font-size:13px;padding:12px 4px}#detail{grid-template-columns:1fr;gap:24px}.journey .evidence{border-left:0;padding-left:0}}
+
+.decision-state{display:block;font:12px/1.5 Inter,system-ui;color:#c8ad85;margin-top:3px}.creative{margin-top:24px}.creative>p{font-size:14px;color:#bdbdc8}
+
+.journey h1{font-size:clamp(28px,3vw,40px);margin:10px 0 12px}.journey main{padding-top:24px}.journey nav{margin:22px 0 24px}.creative{margin-top:16px}.creative h3{margin-top:18px}

@@ -39,19 +39,38 @@ export function publishPath(projectDir) {
   return path.join(projectDir, 'publish.json');
 }
 
+const publicationSnapshots = new WeakMap();
+async function readPublication(projectDir) {
+  try { return JSON.parse(await fsp.readFile(publishPath(projectDir), 'utf8')); }
+  catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+}
 export async function loadPublish(projectDir) {
-  try {
-    return JSON.parse(await fsp.readFile(publishPath(projectDir), 'utf8'));
-  } catch {
-    return null;
-  }
+  const pub = await readPublication(projectDir);
+  if (pub) publicationSnapshots.set(pub, JSON.stringify(pub));
+  return pub;
 }
 
-export async function savePublish(projectDir, pub) {
-  // atómico (tmp + rename): el panel ⌘Y pollea cada 2s y no debe leer un JSON a medias
-  const p = publishPath(projectDir);
-  await fsp.writeFile(p + '.tmp', JSON.stringify(pub, null, 1));
-  await fsp.rename(p + '.tmp', p);
+export async function savePublish(projectDir, pub, { lockHeld = false } = {}) {
+  const lock = path.join(projectDir, '.gallery-write.lock');
+  let handle;
+  if (!lockHeld) {
+    try { handle = await fsp.open(lock, 'wx', 0o600); }
+    catch (e) { if (e.code === 'EEXIST') throw new Error('Otra escritura de publicación está en curso; reintentar'); throw e; }
+  }
+  try {
+    const current = await readPublication(projectDir);
+    const expected = publicationSnapshots.get(pub);
+    if (current && (expected === undefined || JSON.stringify(current) !== expected))
+      throw new Error('La publicación cambió; recarga antes de guardar');
+    if (!current && expected !== undefined)
+      throw new Error('La publicación fue eliminada; reconciliar antes de guardar');
+    const p = publishPath(projectDir);
+    await fsp.writeFile(p + '.tmp', JSON.stringify(pub, null, 1));
+    await fsp.rename(p + '.tmp', p);
+    publicationSnapshots.set(pub, JSON.stringify(pub));
+  } finally {
+    if (handle) { await handle.close(); await fsp.unlink(lock); }
+  }
 }
 
 // ---------- slugs (misma regla que el admin API del producto: constraint slug_format [a-z0-9-]) ----------

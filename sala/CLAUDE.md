@@ -82,29 +82,79 @@ node bin/sfpublish.js <proyecto> <etapa>                  # etapa 2: init|metada
 - **Menciones: 0 falsos positivos > cobertura.** Racha textual ≥4 tokens del título (≥3 contenido,
   ≥2 distintivos). "claude code" suelto jamás matchea; referencias sin título ("el video de 30
   minutos") NO se detectan — limitación honesta, detección semántica = siguiente iteración.
-- **Upload por NAVEGADOR, no API** (tarjetas/end screens no existen en la Data API v3; apps sin
-  verificar quedan bloqueadas en privado). Perfil persistente `~/.sfstudio/browser-profile` (jamás
-  el Chrome personal). PROHIBIDO publicar público / tocar videos existentes; `--test` sube el
-  draft privado "[TEST SFPublish] borrar" y lo BORRA. Sin sesión → rama B honesta + `connect`.
+- **Upload por Data API reanudable:** `sfpublish <proyecto> upload --at "YYYY-MM-DD HH:MM"`
+  delega en `agent-server/scripts/youtube/upload_api.py` del cerebro canónico. Requiere
+  un paquete válido (publish.json canónico, metadata.json como compatibilidad) y máster (default edit/MASTER.mp4, override --file). `--dry-run` no autentica
+  ni sube; `--resume` retoma el ID registrado. `--test` se rechaza sin crear videos.
+  Sesión durable privada en `.sfstudio/youtube-upload.json`; nunca servirla en la galería.
+  Fallos de consulta del canal impiden una nueva subida. Cards/end screens siguen pendientes
+  en Studio: la API no los resuelve. `connect` queda como utilidad histórica, no requisito
+  de upload. Contrato detallado en la skill, references/publicacion.md.
 - `channel-defaults.json` = config repetible del canal (kids NO, idioma es, visibilidad private).
 
 ## La GALERÍA DE LANZAMIENTOS (⌘⌥G, 26 jul 2026)
+
+### Contrato ampliado · 18 septiembre 2026
+
+El catálogo reconoce `publish.json`, `project.json` o `timeline.json`; incluye `youtube/proyectos`.
+`project-resources.js` reúne referencias read-only y reporta archivos faltantes. `/gallery/resource`
+resuelve tokens del inventario, no rutas proporcionadas por el cliente. Los originales declarados
+pueden estar en un SSD; las demás descargas quedan dentro del proyecto.
+
+Identidad durable: `node bin/project-history.js init <proyecto>` crea exclusivamente
+`.sfstudio/identity.json` de forma idempotente, sin modificar fuentes ni publicación. El UUID
+sigue a la carpeta al moverla. IDs históricos `rN/nombre` se aceptan como compatibilidad; los
+nuevos enlaces usan `p/UUID`. Duplicar una carpeta no crea automáticamente otro video: un UUID
+duplicado se denuncia. Para un derivado, usar `initIdentity` con `parent_id` y `channel` en una
+carpeta nueva. Revertir la migración consiste en apartar `.sfstudio`, conservándola como respaldo;
+no se alteraron los archivos preexistentes.
+
+Historial: `project-history.js record <proyecto>` recibe JSON por stdin con `summary`, `result`,
+`standard_revision` y `evidence` (rutas de reportes locales de hasta 8 MB). Un `passed` requiere
+evidencia. Cada ejecución guarda un archivo nuevo; nunca sobrescribe el registro anterior.
+La galería calcula invalidación si cambia el proyecto o falta/cambia una evidencia.
+Los registros v2 también fijan hashes de los archivos declarados de estándar y motor,
+y una firma de tamaño/mtime/ctime de fuentes y medios. Esta firma evita releer gigabytes,
+pero no certifica igualdad criptográfica del contenido. `coverage` muestra qué se cubrió;
+los registros v1 conservan su alcance histórico limitado. Las plantillas de asset con
+`{variant}` deben resolverse antes de registrar una prueba de esa variante.
+`matching` significa que coinciden las entradas registradas; no aprueba el arte ni partes
+que la prueba no examinó. Los reportes están enlazados en Recursos y en Revisión del recorrido.
+
+Guardado de galería: el navegador envía `publication_revision` del expediente y ambos
+servidores delegan en el mismo adapter. Una revisión obsoleta se rechaza. El candado
+`.gallery-write.lock` serializa galería, savePublish del CLI y uploader Python.
+El CLI conserva una revisión de lo leído y rechaza sobrescribir una versión distinta.
+El uploader combina únicamente campos que cambió, preserva cambios ajenos y rechaza
+conflictos sobre el mismo campo. La anotación de autocertificación usa el mismo contrato. Esto no cubre scripts externos que escriban JSON directamente. Si un proceso muere dejando ese archivo, inspeccionar procesos y
+resguardar el candado antes de retirarlo; nunca borrar un candado con escritor vivo.
+Editar el post revoca su aprobación. Ningún PATCH de galería publica ni reprograma videos.
+
+El acceso al editor verifica `sala-handle.json` contra `/api/health`: PID y ruta del proyecto.
+Salas antiguas solo verifican PID y se identifican como compatibilidad; un puerto guardado
+no constituye evidencia de una sala viva. El lanzador transmite las raíces a ambos servidores.
+Los planes `design/plan*.md` y `design/direccion.json` aparecen como recursos de Diseño;
+su existencia no implica aprobación.
+
+La fecha cumplida no prueba publicación; se exige observación pública fechada con ID coincidente.
+Tener transcript no demuestra corte aprobado. Estas reglas sustituyen las inferencias antiguas.
 
 El catálogo de TODOS los videos del pipeline, no solo el abierto: rejilla con la portada de cada
 lanzamiento y, a un clic, el expediente completo (metadata con capítulos, transcript navegable,
 miniaturas candidatas y el post de comunidad). `lib/gallery.js` = modelo puro (con unit tests);
 `web/gallery.js` = la vista; `bin/sfreview.js` sirve `/api/gallery`.
 
-- **Un lanzamiento = una carpeta con `publish.json`** bajo las RAÍCES (`--roots`, o
-  `SFSTUDIO_ROOTS`, o el default: `business-os/youtube/videos` + `agent-server/workspace/generated`).
+- **Un proyecto = una carpeta con `publish.json`, `project.json` o `timeline.json`** bajo las RAÍCES (`--roots`,
+  `SFSTUDIO_ROOTS`, o los defaults de `defaultRoots()` en `lib/gallery.js`).
   El histórico del canal NO entra: solo lo que pasó por el pipeline.
 - **`publish.json` sigue siendo la fuente de verdad.** La galería lo lee y lo escribe (mismo
   `savePublish` atómico que el CLI); no hay modelo paralelo. Los campos que agrega:
   `data.thumbnail.chosen` (la portada) y `data.post_draft.{body,title,source,approved_at,updated_at}`.
 - **Atajo `⌘⌥G`, comparado por `e.code === 'KeyG'`**: en macOS ⌥+g produce `©` y un handler por
   `e.key` jamás dispararía (gotcha pagado). No pisa ⌘Y/⌘E/⌘Z ni S/A/D/Q/E/F/M.
-- **Sandbox del id:** un proyecto se direcciona `r<idxRaíz>/<carpeta>` y SIEMPRE se resuelve contra
-  las raíces; nombres con `/`, `\` o `..` se rechazan. Lo mismo el `f=` de `/gallery/thumb`.
+- **Sandbox del id:** la identidad estable es `p/UUID`; `r<idxRaíz>/<carpeta>` conserva compatibilidad.
+  Ambos se resuelven contra las raíces configuradas; el token nunca permite una ruta arbitraria.
+  El `f=` de `/gallery/thumb` también queda confinado al proyecto.
 - **Lo único editable de toda la app** son las dos decisiones que exigen criterio humano: cuál
   miniatura es la portada y el texto+aprobación del post. Todo lo demás sigue siendo espejo.
 
@@ -130,3 +180,12 @@ El manual del agente vive en la skill: `.claude/skills/edicion-de-video/referenc
 usa SFStudio por default; el fixture de aceptación fue el proyecto real `video-final-5-practica`
 (42 items, base 40 min) — también para SFPublish (transcript word-level de 66 min, 80 títulos del
 canal, tracked link real verificado).
+
+
+### Dirección en el recorrido humano
+
+`creative-direction.js` lee design/direccion.json y lo muestra en Diseño sin duplicarlo.
+Previsto/descartado describe decisiones; revisión declarada describe un texto del autor,
+no evidencia automáticamente vigente. La aprobación artística se muestra por separado.
+Archivos ausentes o inválidos dejan decisiones pendientes. El historial y el render deben
+probar la revisión concreta antes de afirmar cumplimiento. El método general queda desplegable.

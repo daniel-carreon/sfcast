@@ -42,7 +42,7 @@ etapas:
   watch       lazo de cierre: si el video YA es publico, pasaron N min y el post esta
               APROBADO, lo publica en la comunidad (INSERT). Sensor = estado real en
               YouTube, no un temporizador ciego. Idempotente. --dry-run para ensayar
-  upload      subida agéntica a YouTube Studio (perfil persistente; draft PRIVADO)
+  upload      subida reanudable por Data API; exige --at, admite --resume y --dry-run
   connect     abre el navegador del perfil para loguear Google (ritual de 1 vez)
   status      imprime el estado de publish.json
 opciones:
@@ -57,7 +57,8 @@ opciones:
   --thumb <path>        (launch) miniatura a subir (default: la 1a de thumbs/)
   --post-delay <min>    (launch) minutos tras publicarse el video para el post (default 5)
   --dry-run             (watch) ensaya la publicacion sin escribir nada en la comunidad
-  --test                (upload) prueba E2E con demo/out/card-916.mp4, draft privado + BORRADO
+  --resume              (upload) retoma pasos del ID registrado sin duplicar subida
+  --no-certify          (upload) omite autocertificación de Studio
   --env <path>          .env alterno (default: ~/Developer/business-os/agent-server/.env)
 `);
   process.exit(code);
@@ -78,6 +79,8 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--title') flags.title = argv[++i];
   else if (a === '--file') flags.file = argv[++i];
   else if (a === '--test') flags.test = true;
+  else if (a === '--resume') flags.resume = true;
+  else if (a === '--no-certify') flags.noCertify = true;
   else if (a === '--dry-run') flags.dryRun = true;
   else if (a === '--draft') flags.draft = true;
   else if (a === '--body') flags.body = argv[++i];
@@ -750,8 +753,20 @@ async function run() {
     }
 
     case 'upload': {
-      const { uploadFlow } = await import('../lib/upload-youtube.js');
-      await uploadFlow(projectDir, pub, { test: flags.test, root: ROOT, file: flags.file || null });
+      if (flags.test) throw new Error('Las pruebas de upload son locales; --test no crea videos en el canal.');
+      if (!flags.at) throw new Error('upload requiere --at "YYYY-MM-DD HH:MM" (hora MX).');
+      const brain = process.env.ARTIFICIAL_BRAIN_ROOT || path.join(os.homedir(), 'Developer/artificial-brain');
+      const script = path.join(brain, 'agent-server/scripts/youtube/upload_api.py');
+      const args = [script, '--project', projectDir, '--at', flags.at];
+      if (flags.file) args.push('--file', path.resolve(flags.file));
+      if (flags.resume) args.push('--resume');
+      if (flags.dryRun) args.push('--dry-run');
+      if (flags.noCertify) args.push('--no-certify');
+      const result = spawnSync(process.env.PYTHON || 'python3', args, { stdio: 'inherit' });
+      if (result.error) throw result.error;
+      if (result.status !== 0) throw new Error(`Data API terminó con código ${result.status ?? result.signal}`);
+      // Python owns publish.json. Never save the stale snapshot loaded above.
+
       break;
     }
 

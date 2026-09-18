@@ -91,6 +91,8 @@ async function load() {
     if (current) {
       // refrescar la ficha abierta sin sacar a Daniel de ella
       await openItem(current.id, { keepScroll: true });
+    } else if (location.hash.startsWith('#project=')) {
+      await openItem(decodeURIComponent(location.hash.slice(9)));
     } else {
       renderGrid();
     }
@@ -109,6 +111,7 @@ function showGrid() {
   closeLightbox();
   dirty = false;
   current = null;
+  if(location.hash.startsWith('#project=')) history.replaceState(null,'',location.pathname+location.search);
   $('galDetail').hidden = true;
   $('galGrid').hidden = false;
   $('galBack').hidden = true;
@@ -154,6 +157,7 @@ async function openItem(id, opts = {}) {
     const j = await (await fetch(`/api/gallery/item?id=${encodeURIComponent(id)}`)).json();
     if (j.error) throw new Error(j.error);
     current = j;
+    history.replaceState(null,'',location.pathname+location.search+'#project='+encodeURIComponent(j.id));
     dirty = false;
     $('galGrid').hidden = true;
     $('galDetail').hidden = false;
@@ -171,13 +175,15 @@ async function openItem(id, opts = {}) {
 // la quiso acostada). Un chip por sección: prende/apaga y, si está prendida, la trae a la vista.
 // Es preferencia de VISTA, no cabina. Persistida, y nunca se apagan todas.
 const GAL_SECS = [
+  { id: 'recursos', label: 'Proyecto y recursos' },
+  { id: 'historial', label: 'Historial' },
   { id: 'portada', label: 'Portada' },
   { id: 'texto', label: 'Texto' },
   { id: 'transcript', label: 'Transcript' },
   { id: 'post', label: 'Post' },
 ];
 let galView = (() => {
-  const def = { portada: true, texto: true, transcript: true, post: true };
+  const def = { recursos: true, historial: false, portada: true, texto: true, transcript: false, post: false };
   try { return { ...def, ...JSON.parse(localStorage.getItem('sf.gal.view') || '{}') }; } catch { return def; }
 })();
 function applyGalView() {
@@ -302,7 +308,7 @@ function renderDetail(it) {
   const cuando = L?.publish_at
     ? `<div class="galWhenBig">${esc(new Date(L.publish_at).toLocaleString('es-MX', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }))}</div>
        <div class="galWhenSub">video · YouTube lo hace público solo a esa hora</div>
-       <div class="galWhenSub">post de comunidad · <b>${L.post_delay_min ?? 5} min después</b> de que el video esté público${it.post_published_at ? ` — ya salió ${esc(new Date(it.post_published_at).toLocaleString('es-MX'))}` : ''}</div>
+       <div class="galWhenSub">${L.post_autopublish === false ? 'post de comunidad · publicación automática desactivada' : `post de comunidad · requiere aprobación y confirmación pública del video (+${L.post_delay_min ?? 5} min)`}${it.post_published_at ? ` — ya salió ${esc(new Date(it.post_published_at).toLocaleString('es-MX'))}` : ''}</div>
        ${L.video_id ? `<a class="galLink" href="https://youtu.be/${esc(L.video_id)}" target="_blank" rel="noopener">youtu.be/${esc(L.video_id)}</a>` : ''}`
     : `<div class="galEmptyBlock">sin fecha todavía. La programa el agente:<br><code>sfpublish &lt;proyecto&gt; launch --at "2026-07-27 11:00"</code></div>`;
 
@@ -333,6 +339,31 @@ function renderDetail(it) {
       ${GAL_SECS.map((s) => `<button class="galSecBtn" data-sec="${s.id}" title="prende/apaga ${s.label} (si ya está, la trae a la vista)"><span class="galLed"></span>${s.label}</button>`).join('')}
     </nav>
     <div class="galDetGrid">
+      <section class="galSec" data-sec="recursos">
+        <h3>Proyecto y recursos</h3>
+        ${it.editor?.state==='live' ? `<p><a class="galLink" href="${esc(it.editor.url)}" target="_blank" rel="noopener">Abrir en el editor ↗</a></p>` : `<p class="galNote">${esc(it.editor?.reason || 'Sala pendiente de comprobar')}</p>`}
+        <a class="galLink" href="/journey.html?project=${encodeURIComponent(it.id)}">Ver el recorrido de este video →</a>
+        ${it.production?.identity ? `<p class="galNote">Identidad permanente · ${esc(it.production.identity.id)}${it.production.identity.parent_id ? `<br>Derivado de ${esc(it.production.identity.parent_id)}` : ''}</p>` : '<p class="galNote">Identidad permanente pendiente de inicializar.</p>'}
+        <div class="galNote">Archivos del proyecto. Disponible significa que el archivo existe; no implica aprobación.</div>
+        ${it.production?.error ? `<p class="galEmptyBlock">${esc(it.production.error)}</p>` : ''}
+        <div class="galResourceList">${(it.production?.resources || []).map(r => `<div class="galResource">
+          <span class="galHmeta">${esc(r.kind)} · ${r.state === 'available' ? 'disponible' : 'falta el archivo'}</span>
+          ${r.state === 'available' ? `<a class="galLink" href="/gallery/resource?id=${encodeURIComponent(it.id)}&resource=${encodeURIComponent(r.id)}" target="_blank" rel="noopener">${esc(r.label)} ↗</a>` : `<strong>${esc(r.label)}</strong>`}
+          <small>${esc(shortPath(r.path))}</small>
+        </div>`).join('') || '<p class="galEmptyBlock">Sin recursos localizados.</p>'}</div>
+        <h3>Pendientes registrados</h3>
+        ${(it.production?.pending || []).map(p => `<p class="galNote">${esc(p)}</p>`).join('') || '<p class="galNote">Sin pendientes registrados. Esto no certifica que el proyecto esté terminado.</p>'}
+      </section>
+      <section class="galSec" data-sec="historial">
+        <h3>Comprobaciones de este video</h3>
+        <p class="galNote">Cada registro declara qué se revisó. Coincidir con la revisión no certifica toda la edición ni reemplaza el juicio artístico.</p>
+        ${(it.production?.history || []).map(run=>`<article class="galResource">
+          <strong>${esc(run.summary)}</strong>
+          <span>${esc(run.result)} · ${run.freshness === 'matching' ? 'coincide con esta revisión' : 'requiere nueva comprobación'}</span>
+          <small>${esc(run.at || '')}<br>Estándar: ${esc(run.standard_revision || 'sin registrar')}<br>${esc(run.coverage || 'Alcance no registrado')}</small>
+          ${(run.invalidation_reasons || []).map(r=>`<p class="galNote">${esc(r)}</p>`).join('')}
+        </article>`).join('') || '<p class="galEmptyBlock">Sin comprobaciones registradas.</p>'}
+      </section>
       <section class="galSec" data-sec="portada">
         <h3>Portada${it.cover ? `<button class="galMini" data-big="${esc(it.cover)}" title="verla a tamaño real (F)">⤢ ver grande</button>` : ''}</h3>
         <div class="galCoverBig"${it.cover ? ` data-big="${esc(it.cover)}" title="click = verla a tamaño real"` : ''}>${cover}</div>
@@ -472,7 +503,7 @@ async function save(patch, hintId = 'galSaveHint') {
     const r = await fetch(`/api/gallery/item?id=${encodeURIComponent(current.id)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(patch),
+      body: JSON.stringify({...patch,publication_revision:current.publication_revision}),
     });
     const j = await r.json();
     if (!r.ok || j.ok === false) throw new Error(j.error || `HTTP ${r.status}`);

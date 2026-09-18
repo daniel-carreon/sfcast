@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { promises as fsp } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { startStatic, serveFile, insideRoot } from '../lib/static-server.js';
+import { query as galleryQuery } from './gallery-query.js';
 import { STAGES, STAGE_COMMANDS, parseTranscript, segmentTranscript, applyEdl } from '../lib/publish.js';
 import {
   defaultRoots, scanRoots, resolveId, readCard, readDossier, applyGalleryPatch,
@@ -49,7 +50,7 @@ if(projectDir && !galleryOnly && await fsp.access(path.join(projectDir,'project.
   const bridge=path.join(brain,'.claude/skills/edicion-de-video/scripts/sala/bridge.py');
   await fsp.access(bridge);
   const child=spawn(process.env.PYTHON || 'python3',[bridge,'--project',projectDir,'--port',String(port)],{
-    stdio:'inherit',env:{...process.env,SFSTUDIO_WEB:WEB},
+    stdio:'inherit',env:{...process.env,SFSTUDIO_WEB:WEB,SFSTUDIO_ROOTS:roots.join(',')},
   });
   for(const sig of ['SIGINT','SIGTERM'])process.on(sig,()=>child.kill(sig));
   child.on('error',e=>{console.error(e.message);process.exit(1);});
@@ -72,10 +73,12 @@ if (projectDir) {
 // ── Galería: se escanea en CADA request. Son decenas de carpetas: el escaneo cuesta microsegundos
 // y un cache aquí solo produce "no aparece mi proyecto nuevo".
 async function galleryEntry(id) {
-  const r = resolveId(roots, id);
+  const r = (await scanRoots(roots)).find(e=>e.id===id || e.legacy_id===id);
   if (!r) return null;
-  try { await fsp.access(path.join(r.dir, 'publish.json')); } catch { return null; }
-  return { id, dir: r.dir, name: r.name, root: roots[r.rootIdx] };
+  const real = await fsp.realpath(r.dir);
+  const root = await fsp.realpath(r.root);
+  if (!insideRoot(root,real)) return null;
+  return r;
 }
 
 function json(res, code, obj) {
@@ -186,6 +189,7 @@ try {
   srv = await startStatic(WEB, {
   port,
   routes: {
+    '/api/health': async (req,res) => json(res,200,{ok:true,pid:process.pid,project:projectDir,contract:'sfstudio-room-v1'}),
     '/api/project': async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       if (!projectDir) return res.end(JSON.stringify({ gallery_only: true, name: 'Galería de Lanzamientos' }));
@@ -311,6 +315,17 @@ try {
     // /api/gallery            → la rejilla (una tarjeta por proyecto con publish.json)
     // /api/gallery/item?id=   → GET la ficha completa · POST el patch (post/portada/título)
     // /gallery/thumb?id=&f=   → la imagen de un proyecto cualquiera (sandbox: solo bajo las raíces)
+    '/api/workflow': async (req,res) => {
+      try{return json(res,200,await galleryQuery({action:'workflow',project:projectDir || '.'}));}
+      catch(e){return json(res,500,{error:e.message});}
+    },
+    '/graph': async (req,res) => {
+      try {
+        const name=new URL(req.url,'http://x').pathname.slice('/graph/'.length);
+        const {file}=await galleryQuery({action:'graph-file',project:projectDir || '.',file:name});
+        return serveFile(req,res,file);
+      }catch(e){return json(res,404,{error:e.message});}
+    },
     '/api/gallery': async (req, res) => {
       const u = new URL(req.url, 'http://x');
       if (u.pathname === '/api/gallery/item') {
@@ -319,9 +334,8 @@ try {
         if (req.method === 'POST') {
           try {
             const patch = JSON.parse(await readBody(req));
-            const { changed } = await applyGalleryPatch(entry.dir, patch);
-            const dossier = await readDossier(entry);
-            return json(res, 200, { ok: true, changed, item: dossier });
+            const result=await galleryQuery({action:'patch',project:projectDir || '.',roots,id:entry.id,patch});
+            return json(res,200,result);
           } catch (e) {
             return json(res, 400, { ok: false, error: e.message });
           }
@@ -346,16 +360,17 @@ try {
     },
     '/gallery/thumb': async (req, res) => {
       const u = new URL(req.url, 'http://x');
-      const entry = await galleryEntry(u.searchParams.get('id'));
-      const f = u.searchParams.get('f') || '';
-      if (!entry || !f || f.includes('/') || f.includes('\\') || f.includes('..')) {
-        res.writeHead(404); res.end('404');
-        return;
-      }
-      const { dir: sub } = await listThumbs(entry.dir);
-      const fp = path.normalize(path.join(entry.dir, sub || 'thumbs', f));
-      if (!insideRoot(entry.dir, fp)) { res.writeHead(403); res.end('403'); return; }
-      await serveFile(req, res, fp);
+      try {
+        const {file} = await galleryQuery({action:'thumb', roots,project:projectDir || '.',id:u.searchParams.get('id'),file:u.searchParams.get('f')});
+        await serveFile(req,res,file);
+      } catch (e) { return json(res,404,{error:e.message}); }
+    },
+    '/gallery/resource': async (req,res) => {
+      const u = new URL(req.url,'http://x');
+      try {
+        const {file} = await galleryQuery({action:'resource',roots,project:projectDir || '.',id:u.searchParams.get('id'),resource:u.searchParams.get('resource')});
+        await serveFile(req,res,file);
+      } catch (e) { return json(res,404,{error:e.message}); }
     },
 
     '/media': async (req, res) => {
@@ -378,6 +393,8 @@ try {
   }
   throw e;
 }
+
+if(projectDir) await fsp.writeFile(path.join(projectDir,'sala-handle.json'),JSON.stringify({pid:process.pid,port:srv.port,project:projectDir},null,2));
 
 process.stdout.write(projectDir
   ? `sfreview: ${timeline.name || path.basename(projectDir)}\n  proyecto: ${projectDir}\n`

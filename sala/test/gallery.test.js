@@ -14,7 +14,7 @@ import {
 // ---------- raíces e identidad ----------
 test('defaultRoots: default bajo business-os, override por SFSTUDIO_ROOTS', () => {
   const d = defaultRoots({}, '/Users/x');
-  assert.equal(d.length, 2);
+  assert.equal(d.length, 3);
   assert.ok(d[0].endsWith('/Developer/business-os/youtube/videos'));
   assert.deepEqual(defaultRoots({ SFSTUDIO_ROOTS: '/a,/b' }, '/Users/x'), ['/a', '/b']);
 });
@@ -35,7 +35,7 @@ test('launchState: programado vs publicado vs sin fecha', () => {
   const pasado = { data: { launch: { publish_at: '2026-07-20T17:00:00Z' } } };
   assert.equal(launchState(futuro, now).key, 'programado');
   assert.equal(launchState(futuro, now).tone, 'wait');
-  assert.equal(launchState(pasado, now).key, 'publicado');
+  assert.equal(launchState(pasado, now).key, 'por-verificar');
   assert.equal(launchState({ stages: { upload: { status: 'done' } } }, now).key, 'subido');
   assert.equal(launchState({ stages: { metadata: { status: 'done' } } }, now).key, 'listo');
   assert.equal(launchState({}, now).key, 'edicion');
@@ -54,6 +54,7 @@ test('postState: sin post → borrador → aprobado → publicado (y el archivo 
 test('coverThumb: la elegida gana; sin elección, la primera; elección fantasma se reporta', () => {
   const files = ['a.png', 'b.png'];
   assert.deepEqual(coverThumb({ data: { thumbnail: { chosen: 'b.png' } } }, files), { file: 'b.png', chosen: true });
+  assert.deepEqual(coverThumb({ data: { thumbnail: { chosen: 'thumbnails/b.png' } } }, files), { file: 'b.png', chosen: true });
   assert.deepEqual(coverThumb({}, files), { file: 'a.png', chosen: false });
   assert.deepEqual(coverThumb({ data: { thumbnail: { chosen: 'z.png' } } }, files),
     { file: 'a.png', chosen: false, missing: 'z.png' });
@@ -208,4 +209,17 @@ test('applyGalleryPatch: la portada debe existir; aprobar sin texto falla; persi
 
   await assert.rejects(() => applyGalleryPatch(path.join(tmp, 'nada'), { cover: 'b.png' }), /publish\.json/);
   await fsp.rm(tmp, { recursive: true, force: true });
+});
+
+
+test('public visibility requires matching observation, never the clock', () => {
+  const p = {data:{launch:{video_id:'video-one',publish_at:'2026-09-18 10:00'},youtube:{}}};
+  assert.equal(launchState(p,new Date('2026-09-18T15:30:00Z')).key,'programado');
+  assert.equal(launchState(p,new Date('2026-09-18T16:30:00Z')).key,'por-verificar');
+  p.data.youtube.observation={video_id:'different',privacy_status:'public',checked_at:'2026-09-18T16:10:00Z'};
+  assert.equal(launchState(p,new Date('2026-09-18T16:30:00Z')).key,'por-verificar');
+  p.data.youtube.observation.video_id='video-one';
+  assert.equal(launchState(p,new Date('2026-09-18T16:30:00Z')).key,'publicado');
+  p.data.youtube.observation.privacy_status='private';
+  assert.equal(launchState(p,new Date('2026-09-18T16:30:00Z')).key,'por-verificar');
 });

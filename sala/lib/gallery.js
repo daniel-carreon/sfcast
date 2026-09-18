@@ -1,3 +1,4 @@
+import {creativeDirection} from './creative-direction.js';
 // lib/gallery.js — el modelo de la GALERÍA DE LANZAMIENTOS.
 //
 // La Sala (`sfreview <proyecto>`) abre UN proyecto. Cuando el video sale, ese proyecto se vuelve
@@ -12,10 +13,14 @@
 //  · Honestidad > relleno: si un dato no está, el estado lo dice; nunca se inventa.
 //  · SIN DOM y SIN red — importable por `node --test`.
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import { promises as fsp } from 'node:fs';
 import { loadPublish, savePublish, parseTranscript, segmentTranscript, applyEdl } from './publish.js';
 import { mdToTiptapHtml } from './community-draft.js';
+import { projectResources } from './project-resources.js';
+import { readIdentity } from './project-history.js';
+import { editorRoom } from './editor-room.js';
 
 const IMG_RE = /\.(png|jpe?g|webp)$/i;
 
@@ -27,6 +32,7 @@ export function defaultRoots(env = process.env, home = os.homedir()) {
   return [
     path.join(bos, 'youtube', 'videos'),
     path.join(bos, 'agent-server', 'workspace', 'generated'),
+    path.join(bos, 'youtube', 'proyectos'),
   ];
 }
 
@@ -59,10 +65,17 @@ export async function scanRoots(roots) {
     for (const name of names) {
       const dir = path.join(roots[i], name);
       try {
-        await fsp.access(path.join(dir, 'publish.json'));
-        found.push({ id: makeId(i, name), dir, name, root: roots[i] });
+        await Promise.any(['publish.json', 'project.json', 'timeline.json'].map(f => fsp.access(path.join(dir, f))));
+        let identity=null,identity_error=null;
+        try {identity=await readIdentity(dir);} catch(e){identity_error=e.message;}
+        found.push({ id: identity ? `p/${identity.id}` : makeId(i,name), legacy_id:makeId(i,name), identity_error, dir, name, root: roots[i] });
       } catch { /* sin publish.json = no es un lanzamiento */ }
     }
+  }
+  const ids=new Set();
+  for(const entry of found) {
+    if(ids.has(entry.id)) throw new Error(`Identidad duplicada: ${entry.id}. La copia requiere una identidad propia.`);
+    ids.add(entry.id);
   }
   return found;
 }
@@ -71,15 +84,33 @@ export async function scanRoots(roots) {
 // Dos ejes independientes: el VIDEO (¿cuándo sale?) y el POST (¿está listo para salir?).
 // `tone` mapea a color en la UI: ok=verde · wait=ámbar · live=morado · idle=gris.
 
+// Historical local dates are Mexico City wall time, never the machine timezone.
+export function scheduledAt(pub) {
+  const launch = pub?.data?.launch;
+  const raw = launch?.publishAt_utc || launch?.publish_at;
+  if (!raw) return null;
+  const normalized = /^\d{4}-\d\d-\d\d[ T]\d\d:\d\d(?::\d\d)?$/.test(raw)
+    ? raw.replace(' ', 'T') + '-06:00' : raw;
+  const date = new Date(normalized);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
 export function launchState(pub, now = new Date()) {
   const d = pub?.data || {};
   const L = d.launch;
-  if (L?.publish_at) {
-    const at = new Date(L.publish_at);
+  const observation = d.youtube?.observation;
+  const videoId = L?.video_id || d.youtube?.video_id || pub?.video?.youtube_id;
+  if (videoId && observation?.video_id === videoId && observation?.privacy_status === 'public'
+      && Number.isFinite(Date.parse(observation.checked_at)) && Date.parse(observation.checked_at) <= now.getTime()) {
+    return { key: 'publicado', label: `público · verificado ${fmtWhen(new Date(observation.checked_at))}`,
+      tone: 'live', checked_at: observation.checked_at };
+  }
+  const at = scheduledAt(pub);
+  if (at) {
     if (at.getTime() > now.getTime()) {
       return { key: 'programado', label: `programado ${fmtWhen(at)}`, tone: 'wait', at: L.publish_at };
     }
-    return { key: 'publicado', label: `publicado ${fmtWhen(at)}`, tone: 'live', at: L.publish_at };
+    return { key: 'por-verificar', label: 'hora cumplida · publicación por verificar', tone: 'wait', at: at.toISOString() };
   }
   const st = (s) => pub?.stages?.[s]?.status;
   if (st('upload') === 'done') return { key: 'subido', label: 'subido · sin programar', tone: 'wait' };
@@ -114,12 +145,12 @@ export function fases(pub, extra = {}, now = new Date()) {
   const md = d.metadata || {};
   const pd = d.post_draft || {};
   const L = d.launch;
-  const publicado = !!(L?.publish_at && new Date(L.publish_at) <= now);
+  const publicado = launchState(pub, now).key === 'publicado';
   return [
     {
       id: 'feedback', n: 1, titulo: 'Tu feedback', de: 'Daniel valida',
       items: [
-        { id: 'corte', label: 'Corte del video', ok: !!extra.hasTranscript, falta: 'sin máster todavía' },
+        { id: 'corte', label: 'Corte del video aprobado', ok: extra.cutApproved === true, falta: 'aprobación del corte por verificar' },
         { id: 'titulo', label: 'Título', ok: !!pub?.video?.titulo, falta: `${(md.titles || []).length} opciones sin elegir`,
           detalle: pub?.video?.titulo || null },
         { id: 'miniatura', label: 'Miniatura', ok: !!d.thumbnail?.chosen, falta: 'sin portada elegida',
@@ -132,7 +163,7 @@ export function fases(pub, extra = {}, now = new Date()) {
       id: 'auto', n: 2, titulo: 'Automático', de: 'lo corre el agente',
       items: [
         { id: 'programado', label: 'Video programado', ok: !!L?.publish_at, falta: 'sin fecha',
-          detalle: L?.publish_at ? fmtWhen(new Date(L.publish_at)) : null },
+          detalle: L?.publish_at ? fmtWhen(scheduledAt(pub)) : null },
         { id: 'publicado', label: 'Video público', ok: publicado, falta: 'espera su hora' },
         { id: 'anunciado', label: 'Post en la comunidad', ok: !!d.post_published_at, falta: `sale +${L?.post_delay_min ?? 5} min después` },
       ],
@@ -178,7 +209,10 @@ export async function resolveThumb(dir, name) {
 
 /** La PORTADA: la elegida por Daniel; si no eligió, la primera candidata (y se dice cuál es cuál). */
 export function coverThumb(pub, files) {
-  const chosen = pub?.data?.thumbnail?.chosen;
+  const raw = pub?.data?.thumbnail?.chosen;
+  // Modern publication stores thumbnails/name.png; legacy stores only name.png.
+  const chosen = typeof raw === 'string' && /^(?:thumbs|thumbnails)\/[^/\\]+$/.test(raw)
+    ? raw.split('/')[1] : raw;
   if (chosen && files.includes(chosen)) return { file: chosen, chosen: true };
   if (chosen) return { file: files[0] || null, chosen: false, missing: chosen };
   return { file: files[0] || null, chosen: false };
@@ -337,13 +371,16 @@ async function readPostFile(dir) {
 // ---------- tarjeta (rejilla) y ficha (expediente) ----------
 export async function readCard(entry, now = new Date()) {
   const pub = await loadPublish(entry.dir);
+  let projectName = '';
+  try { projectName = JSON.parse(await fsp.readFile(path.join(entry.dir,'project.json'),'utf8')).name || ''; } catch { /* optional */ }
   const { dir: thumbsDir, files } = await listThumbs(entry.dir);
   const cover = coverThumb(pub, files);
   const md = pub?.data?.metadata || {};
-  const titulo = pub?.video?.titulo || pub?.data?.launch?.title || md.titles?.[0] || '';
+  const titulo = pub?.video?.titulo || pub?.data?.launch?.title || md.titles?.[0] || projectName || entry.name;
   const hasFile = !pub?.data?.post_draft?.body && !!(await findPostFile(entry.dir));
   return {
     id: entry.id,
+    identity_error: entry.identity_error || null,
     name: entry.name,
     dir: entry.dir,
     slug: pub?.video?.slug || '',
@@ -374,15 +411,20 @@ function lastTouch(pub) {
 }
 
 /** El expediente completo de un lanzamiento (lo que pinta la ficha). */
+export function publicationRevision(pub) {
+  return createHash('sha256').update(JSON.stringify(pub)).digest('hex');
+}
+
 export async function readDossier(entry, now = new Date()) {
   const card = await readCard(entry, now);
   const pub = (await loadPublish(entry.dir)) || {};
   const md = pub.data?.metadata || {};
 
   // descripción: la de publish.json manda; si no hay, el archivo del proyecto (con su procedencia)
-  let description = md.description || '';
-  let descSource = description ? 'publish.json (etapa metadata)' : null;
-  if (!description) {
+  const hasDescription=Object.hasOwn(md,'description');
+  let description = md.description ?? '';
+  let descSource = hasDescription ? 'publish.json (etapa metadata)' : null;
+  if (!hasDescription) {
     const f = await readDescriptionFile(entry.dir);
     if (f) { description = f.text; descSource = `${f.file} (archivo del proyecto, sin correr metadata)`; }
   }
@@ -400,6 +442,7 @@ export async function readDossier(entry, now = new Date()) {
 
   return {
     ...card,
+    publication_revision: publicationRevision(pub),
     fases: fases(pub, { hasTranscript: tr.found }, now),
     log: (pub.log || []).slice(-12).reverse(),
     titles: md.titles || [],
@@ -419,6 +462,9 @@ export async function readDossier(entry, now = new Date()) {
     chapters: parseChapters(description),
     thumbs: files,
     transcript: tr,
+    production: await projectResources(entry.dir),
+    creative: await creativeDirection(entry.dir),
+    editor: await editorRoom(entry.dir),
   };
 }
 
@@ -428,8 +474,19 @@ export async function readDossier(entry, now = new Date()) {
  * de lo que mande el cliente) y con `savePublish` (tmp+rename: el panel ⌘Y pollea el mismo archivo).
  */
 export async function applyGalleryPatch(dir, patch, now = new Date()) {
+  const lock = path.join(dir,'.gallery-write.lock');
+  let held;
+  try { held=await fsp.open(lock,'wx'); }
+  catch(e) {if(e.code==='ENOENT')throw new Error('este proyecto no tiene publish.json');if(e.code==='EEXIST')throw new Error('Otra escritura de galería está en curso; vuelve a intentar');throw e;}
+  try {return await patchUnlocked(dir,patch,now);}
+  finally {await held.close();await fsp.unlink(lock);}
+}
+async function patchUnlocked(dir, patch, now) {
   const pub = (await loadPublish(dir)) || null;
   if (!pub) throw new Error('este proyecto no tiene publish.json');
+  const originalRevision=publicationRevision(pub);
+  if(patch.publication_revision!==undefined && patch.publication_revision!==originalRevision)
+    throw new Error('La publicación cambió; recarga antes de guardar');
   pub.data = pub.data || {};
   const iso = now.toISOString();
   const changed = [];
@@ -478,7 +535,8 @@ export async function applyGalleryPatch(dir, patch, now = new Date()) {
   if (changed.length) {
     pub.log = pub.log || [];
     pub.log.push({ ts: iso, stage: 'galeria', status: 'done', msg: changed.join(' · ') });
-    await savePublish(dir, pub);
+    if(publicationRevision(await loadPublish(dir))!==originalRevision)throw new Error('La publicación cambió durante la edición; recarga');
+    await savePublish(dir, pub, { lockHeld: true });
   }
   return { changed, pub };
 }

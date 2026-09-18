@@ -295,6 +295,7 @@ $('zoomOut').innerHTML = IC.zoomOut;
 $('zoomIn').innerHTML = IC.zoomIn;
 $('zoomFit').innerHTML = IC.fit;
 $('gearBtn').innerHTML = IC.gear;
+$('galleryBtn').addEventListener('click', () => { if (gallery) toggleGallery(true); });
 
 // ---------- panel de Atajos (engrane top-right) ----------
 function toggleHelpPanel(force) {

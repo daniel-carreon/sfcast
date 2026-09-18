@@ -997,3 +997,7 @@ body.adapterBusy main { pointer-events:none; opacity:.7; }
 .galResourceGroup summary { cursor: pointer; padding: 12px 0; font-size: 14px; }
 .galResourceGroup summary:focus-visible { outline: 2px solid var(--accent, #a970ff); outline-offset: 3px; }
 .galResourceGroup .galResource { margin-left: 16px; }
+
+#galleryBtn { background: transparent; color: var(--text); border: 1px solid var(--border, #303039); border-radius: 6px; padding: 7px 12px; cursor: pointer; }
+#galleryBtn:hover { border-color: #9b7bbb; }
+#galleryBtn:focus-visible { outline: 2px solid #a970ff; outline-offset: 2px; }

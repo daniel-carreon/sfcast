@@ -17,3 +17,28 @@ body.journey{overflow:auto;height:auto;min-height:100vh;display:block;background
 .journey h1{font-size:clamp(28px,3vw,40px);margin:10px 0 12px}.journey main{padding-top:24px}.journey nav{margin:22px 0 24px}.creative{margin-top:16px}.creative h3{margin-top:18px}
 
 .feedbackBanner { grid-column: 1 / -1; margin: 0; border-left: 2px solid var(--accent, #c1a67a); padding: 12px 16px; }
+
+/* Intro visual: el detalle operativo aparece únicamente al entrar a una etapa. */
+[hidden]{display:none!important}
+.journey.overview{background:#09090b}
+.journey header{font-size:13px;padding:18px 4vw;background:#09090b}
+.journey header>span{font-size:16px;font-weight:750;letter-spacing:.06em;color:#FD9202}.brandWhite{color:#eee}
+.journey main{max-width:1600px;padding:34px 4vw 28px}
+.introLine{display:flex;align-items:center;justify-content:space-between;gap:20px}
+.toolmark{font-size:13px;color:#aaa;display:flex;align-items:center;gap:10px}.toolmark img{width:26px;height:26px;filter:invert(1)}
+.overview h1{font-family:Georgia,'Iowan Old Style',serif;font-weight:400;font-size:clamp(36px,4.8vw,70px);letter-spacing:-.045em;margin:10px 0 6px;line-height:1.02}
+.pipelineScene{position:relative;margin-top:4px;isolation:isolate}
+.pipelineArt{display:block;width:100%;height:auto;mask-image:linear-gradient(black 85%,transparent);animation:revealArt 1.1s ease-out both}
+.journey #visualStages{display:grid;grid-template-columns:repeat(5,1fr);margin:-7px 0 0;border:0;gap:0;position:relative;z-index:2}
+#visualStages a{display:flex;flex-direction:column;gap:5px;text-decoration:none;padding:14px 15px 22px;border-bottom:1px solid #ffffff24;transition:border-color .25s,transform .25s}
+#visualStages a:hover{border-color:#FD9202;transform:translateY(-5px)}
+#visualStages a>span{font-size:11px;letter-spacing:.14em;color:#bba3d7}#visualStages strong{font-size:clamp(14px,1.65vw,23px);font-weight:550;color:#f3ebde}#visualStages small{color:#a7a0aa;font-size:12px}
+.flowline{position:absolute;bottom:0;left:0;height:2px;width:100%;background:linear-gradient(90deg,#8c27f1,#fd9202);transform-origin:left;animation:flow 2.8s cubic-bezier(.2,.7,.3,1) both}
+.closingLine{display:flex;justify-content:space-between;gap:15px;color:#b8adb8;font-size:14px;margin:25px 0 0}.closingLine span{font-size:12px;color:#8d8596}
+#overviewBack{margin-top:0}.journey #stagePage{max-width:1280px;margin:auto}#stagePage #projectName{font-size:14px;margin-top:20px}
+@keyframes revealArt{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+@keyframes flow{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@media(prefers-reduced-motion:reduce){.pipelineArt,.flowline{animation:none}#visualStages a{transition:none}}
+@media(max-width:700px){.journey main{padding:24px 18px}.journey header{gap:10px;font-size:12px}.toolmark{display:none}.closingLine{display:block}.closingLine span{display:block;margin-top:10px}#visualStages a{padding:8px 4px 12px}#visualStages strong{font-size:12px}#visualStages small{font-size:10px}.pipelineArt{margin-top:20px}}
+
+@media(min-width:701px){.overview main{max-width:1400px;padding-top:24px}.overview h1 br{display:none}.overview h1{font-size:clamp(36px,4vw,62px);margin:14px 0}.pipelineArt{height:clamp(210px,38vh,440px);object-fit:contain}.closingLine{margin-top:18px}}

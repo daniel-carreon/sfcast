@@ -28,18 +28,35 @@ function render(){
   const nodes=data.graph.nodos.filter(n=>stage.nodes.includes(n.id));
   const resources=(item?.production?.resources||[]).filter(r=>stage.kinds.includes(r.kind));
   const loops=data.graph.lazos.filter(l=>stage.nodes.some(n=>l.sobre===`nodo:${n}`));
-  $('detail').innerHTML=`<div><h2>${esc(stage.question)}</h2>${selected===2?creativePanel():''}<details ${selected===2?'':'open'}><summary>Explorar el método</summary>${nodes.map(n=>`<details><summary>${esc(n.label)}</summary><p>${esc(n.resumen||n.desc)}</p><details><summary>Detalle técnico</summary><small>${esc(n.desc||n.ruta||'Sin detalle adicional')}</small></details></details>`).join('')}</details></div>
+  $('detail').innerHTML=`<div><h2>${esc(stage.question)}</h2>${selected===2?creativePanel():''}<details><summary>Explorar el método</summary>${nodes.map(n=>`<details><summary>${esc(n.label)}</summary><p>${esc(n.resumen||n.desc)}</p><details><summary>Detalle técnico</summary><small>${esc(n.desc||n.ruta||'Sin detalle adicional')}</small></details></details>`).join('')}</details></div>
     <div class="evidence">${selected===4?`<p>Publicación: ${esc(item?.launch?.label||'sin evidencia')}</p><p class="journeyNote">${item?.production?.delivery?.state==='changed'?'El archivo local cambió de tamaño desde la subida. ':item?.production?.delivery?.state==='missing'?'El máster registrado no está disponible. ':''}${esc(item?.production?.delivery?.scope||'Esta publicación histórica no tiene recibo que vincule inequívocamente el archivo subido. Las versiones exportadas se conservan abajo.')}</p>`:''}<h3>En este video</h3><ul>${resources.filter(r=>r.kind!=='export').map(resourceRow).join('')||'<li>No hay recursos vinculados a esta etapa todavía.</li>'}</ul>
     ${selected===3?`${item?.editor?.state==='live'?`<p><a target="_blank" rel="noopener" href="${esc(item.editor.url)}">Abrir en el editor ↗</a></p>`:`<p>${esc(item?.editor?.reason||'Sin sala activa')}</p>`}<h3>Comprobaciones registradas</h3><ul>${(item?.production?.history||[]).map(r=>`<li>${esc(r.summary)}<small>${esc(resultLabel(r.result))} · ${esc(freshnessLabel(r.freshness))}</small></li>`).join('')||'<li>Sin comprobaciones registradas.</li>'}</ul><button class="return" id="demoReturn">Mostrar cómo vuelve una corrección</button><p id="demoNote" class="journeyNote">Demostración del lazo. No modifica el video.</p>`:''}
     ${loops.length?`<h3>Qué se compara</h3>${loops.map(l=>`<details><summary>${esc(l.label)}</summary><p>${esc(l.resumen)}</p><small>${esc(l.comparador)}</small></details>`).join('')}`:''}
     ${resources.some(r=>r.kind==='export')?`<details><summary>Versiones exportadas (${resources.filter(r=>r.kind==='export').length})</summary><p class="journeyNote">Archivos existentes. El nombre no demuestra cuál se aprobó o publicó.</p><ul>${resources.filter(r=>r.kind==='export').map(resourceRow).join('')}</ul></details>`:''}</div>`;
-  $('demoReturn')?.addEventListener('click',()=>{selected=2;render();$('detail').insertAdjacentHTML('afterbegin','<p class="journeyNote feedbackBanner">Demostración: una observación de revisión devuelve el trabajo a Diseño. Corregir exige después volver a comprobar.</p>');$('detail').scrollIntoView({block:'start'});});
-  history.replaceState(null,'',location.pathname+location.search+'#'+stage.id);
+  $('demoReturn')?.addEventListener('click',()=>{showStage(2);$('detail').insertAdjacentHTML('afterbegin','<p class="journeyNote feedbackBanner">Demostración: una observación de revisión devuelve el trabajo a Diseño. Corregir exige después volver a comprobar.</p>');$('detail').scrollIntoView({block:'start'});});
+
 }
-$('stages').addEventListener('click',e=>{const b=e.target.closest('button[data-index]');if(b){selected=Number(b.dataset.index);render();}});
+function showStage(index, push=true){
+ selected=index; render(); $('visualOverview').hidden=true; $('stagePage').hidden=false;
+ document.body.classList.remove('overview');
+ if(push) history.pushState(null,'',location.pathname+location.search+'#'+data.stages[index].id);
+ window.scrollTo({top:0,behavior:'instant'});
+}
+function showOverview(push=true){
+ $('visualOverview').hidden=false; $('stagePage').hidden=true; document.body.classList.add('overview');
+ if(push) history.pushState(null,'',location.pathname+location.search);
+ window.scrollTo({top:0,behavior:'instant'});
+}
+$('stages').addEventListener('click',e=>{const b=e.target.closest('button[data-index]');if(b)showStage(Number(b.dataset.index));});
+$('overviewBack').addEventListener('click',()=>showOverview());
+addEventListener('popstate',()=>{if(!data)return;const i=data.stages.findIndex(s=>s.id===location.hash.slice(1));i<0?showOverview(false):showStage(i,false);});
 try{
   [data,item]=await Promise.all([get('/api/workflow'),id?get('/api/gallery/item?id='+encodeURIComponent(id)):Promise.resolve(null)]);
   $('projectName').textContent=item?.titulo || 'Método general · selecciona un video en la galería para ver su evidencia.';
   $('back').href='/'+(item?'#project='+encodeURIComponent(item.id):'');
-  selected=Math.max(0,data.stages.findIndex(s=>s.id===location.hash.slice(1)));render();
+  const labels=['Tu grabación','Lo que importa','Imagen y sonido','Tu criterio','A la audiencia'];
+  $('visualStages').innerHTML=data.stages.map((s,i)=>`<a href="#${esc(s.id)}" data-stage="${i}"><span>0${i+1}</span><strong>${labels[i]||esc(s.label)}</strong><small>${esc(s.label)} ↗</small></a>`).join('');
+  $('visualStages').addEventListener('click',e=>{const a=e.target.closest('[data-stage]');if(a){e.preventDefault();showStage(Number(a.dataset.stage));}});
+  const initial=data.stages.findIndex(s=>s.id===location.hash.slice(1));
+  if(initial>=0)showStage(initial,false);else showOverview(false);
 }catch(e){$('projectName').textContent='No se pudo cargar el recorrido: '+e.message;}

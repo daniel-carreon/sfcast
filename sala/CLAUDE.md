@@ -204,3 +204,6 @@ No inferir un máster aprobado por el nombre más reciente ni fabricar recibos h
 La ficha agrupa recursos en desplegables por función (originales, corte, dirección, publicación, exportaciones y evidencias). Editor y recorrido permanecen visibles. Grupos con archivos faltantes se abren para no esconder el problema; no se elimina ni se interpreta como aprobado ningún recurso al agruparlo.
 
 El retorno didáctico Revisión→Diseño usa un aviso que abarca ambas columnas y desplaza la vista al detalle. Es una demostración etiquetada; no escribe ni aprueba correcciones del proyecto.
+
+### Presentación del proceso (18 sep 2026)
+`journey.html` sin fragmento abre una introducción visual breve: grabado Luminorphism, cinco etapas y movimiento decorativo. Cada etapa abre el detalle y los recursos del mismo proyecto; volver y el historial del navegador preservan esa identidad. Los fragmentos existentes siguen abriendo directamente la etapa. No convertir esta portada en un dashboard ni representar la animación como ejecución real. El grafo canónico conserva su estructura y tiene un único control reversible de vista limpia.

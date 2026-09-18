@@ -1,8 +1,14 @@
 <!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SFStudio · El recorrido de un video</title><link rel="stylesheet" href="style.css"><link rel="stylesheet" href="journey.css"></head>
-<body class="journey"><header><a id="back" href="/">← Galería</a><span>SFSTUDIO / EL PROCESO</span><a href="/graph/index.html?g=edicion-de-video">Mapa técnico completo ↗</a></header>
-<main><p class="eyebrow">DE LA GRABACIÓN A LA AUDIENCIA</p><h1>Una idea. Un video.<br>Un proceso que aprende.</h1>
-<p id="projectName">Cargando el proyecto…</p><nav id="stages" aria-label="Etapas del video"></nav>
-<section id="detail" aria-live="polite"></section><p class="journeyNote">El mapa explica el método. Los archivos y comprobaciones muestran lo que ocurrió en este proyecto.</p></main>
-<script type="module" src="journey.js"></script></body></html>
+<title>SFStudio · De la grabación al video</title><link rel="stylesheet" href="style.css"><link rel="stylesheet" href="journey.css"></head>
+<body class="journey overview"><header><a id="back" href="/">← Galería</a><span>SF<span class="brandWhite">STUDIO</span></span><a href="/graph/index.html?g=edicion-de-video">Ver el grafo ↗</a></header>
+<main>
+<section id="visualOverview" aria-label="El proceso de un video">
+<div class="introLine"><p class="eyebrow">DE TU CÁMARA A TU AUDIENCIA</p><span class="toolmark"><img src="assets/openai.png" alt="OpenAI"> + SFStudio</span></div>
+<h1>Tú grabas.<br> La idea toma forma.</h1>
+<div class="pipelineScene"><img class="pipelineArt" src="assets/pipeline-grabado.png" alt="Cámara y micrófono, corte de película, creación visual, revisión y entrega, unidos por una cinta de cine."><nav id="visualStages" aria-label="Explorar una etapa"></nav><div class="flowline" aria-hidden="true"></div></div>
+<p class="closingLine">Tu criterio guía. Cada revisión mejora el resultado. <span>↖ Explora una etapa</span></p>
+</section>
+<section id="stagePage" hidden><button id="overviewBack" class="return">← Ver el proceso completo</button><p id="projectName">Cargando el proyecto…</p><nav id="stages" aria-label="Etapas del video"></nav>
+<section id="detail" aria-live="polite"></section><p class="journeyNote">El mapa explica el método. Los archivos muestran lo que ocurrió en este video.</p></section>
+</main><script type="module" src="journey.js"></script></body></html>

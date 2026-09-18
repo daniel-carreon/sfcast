@@ -202,3 +202,5 @@ hash registrado no equivalen a aprobación artística; cambios de tamaño/ausenc
 No inferir un máster aprobado por el nombre más reciente ni fabricar recibos históricos.
 
 La ficha agrupa recursos en desplegables por función (originales, corte, dirección, publicación, exportaciones y evidencias). Editor y recorrido permanecen visibles. Grupos con archivos faltantes se abren para no esconder el problema; no se elimina ni se interpreta como aprobado ningún recurso al agruparlo.
+
+El retorno didáctico Revisión→Diseño usa un aviso que abarca ambas columnas y desplaza la vista al detalle. Es una demostración etiquetada; no escribe ni aprueba correcciones del proyecto.

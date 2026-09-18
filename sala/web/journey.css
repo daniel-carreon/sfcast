@@ -15,3 +15,5 @@ body.journey{overflow:auto;height:auto;min-height:100vh;display:block;background
 .decision-state{display:block;font:12px/1.5 Inter,system-ui;color:#c8ad85;margin-top:3px}.creative{margin-top:24px}.creative>p{font-size:14px;color:#bdbdc8}
 
 .journey h1{font-size:clamp(28px,3vw,40px);margin:10px 0 12px}.journey main{padding-top:24px}.journey nav{margin:22px 0 24px}.creative{margin-top:16px}.creative h3{margin-top:18px}
+
+.feedbackBanner { grid-column: 1 / -1; margin: 0; border-left: 2px solid var(--accent, #c1a67a); padding: 12px 16px; }

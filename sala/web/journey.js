@@ -3,12 +3,20 @@ const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 const id=new URLSearchParams(location.search).get('project');
 let data,item,selected=0;
 async function get(url){const r=await fetch(url);const j=await r.json();if(!r.ok||j.error)throw new Error(j.error||'No disponible');return j;}
+function verificationDetails(check){
+ const methods={structural:'Estructura',visual:'Inspección visual',perceptual:'Revisión perceptual'};
+ const states={matching:'Entradas coincidentes',invalidated:'Revisar de nuevo',unbound:'Sin vínculo a esta dirección'};
+ return (check.verification||[]).map(v=>`<p><strong>${esc(methods[v.method]||v.method)} · ${esc(states[v.freshness]||v.freshness)}</strong><br>${esc(v.scope)}<br>Resultado registrado: ${esc(v.result)}</p>${v.reasons.length?`<p>${esc(v.reasons.join('; '))}</p>`:''}${v.evidence.map(e=>{
+  const r=item.production.resources.find(r=>r.declared_by==='run:'+v.run_id && r.path.endsWith('/'+e.path));
+  return r?.state==='available'?`<p><a target="_blank" rel="noopener" href="/gallery/resource?id=${encodeURIComponent(item.id)}&resource=${encodeURIComponent(r.id)}">Ver reporte ↗</a></p>`:'';
+ }).join('')}`).join('');
+}
 function creativePanel(){
  const c=item?.creative;if(!c)return '';
  const labels={planned:'Previsto',excluded:'Descartado con razón',pending:'Pendiente',reported:'Revisión declarada'};
  return `<section class="creative"><h3>Decisiones de este video</h3><p>${esc(c.reason||c.message||'Sin dirección registrada')}</p>
  ${c.decisions.map(d=>`<details><summary>${esc(d.label)} <span class="decision-state">${labels[d.status]}</span></summary><p>${esc(d.reason||'Falta resolver su aplicación a este video.')}</p></details>`).join('')}
- <h3>Revisión y límites</h3>${c.checks.map(d=>`<details><summary>${esc(d.label)} <span class="decision-state">${labels[d.status]}</span></summary><p>${esc(d.evidence||'Sin evidencia declarada.')}</p></details>`).join('')}
+ <h3>Revisión y límites</h3>${c.checks.map(d=>`<details><summary>${esc(d.label)} <span class="decision-state">${labels[d.status]}</span></summary><p>${esc(d.evidence||'Sin revisión visual o perceptual declarada.')}</p>${verificationDetails(d)}</details>`).join('')}
  <p class="journeyNote">${esc(c.scope)}</p><p>Aprobación artística registrada: ${c.artistic_approval?'sí':'no'}.</p></section>`;
 }
 function render(){

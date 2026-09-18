@@ -18,6 +18,9 @@ export async function inputsFor(project,{standard_files,motor_files}={}) {
   const absolute=path.resolve(project,file);
   entries.push({role,path:absolute,method:'sha256',value:await smallDigest(absolute)});
  }
+ const direction=path.join(project,'design/direccion.json');
+ try {entries.push({role:'direction',path:direction,method:'sha256',value:await smallDigest(direction)});}
+ catch(e){if(e.code!=='ENOENT')throw e;}
  const doc=JSON.parse(await fs.readFile(path.join(project,'project.json'),'utf8').catch(e=>{if(e.code==='ENOENT')return '{}';throw e;}));
  const media=new Set();
  for(const source of Object.values(doc.sources || {})) for(const file of [source.path,source.audio_path,source.screen?.path])if(file)media.add(path.resolve(project,file));
@@ -34,7 +37,7 @@ export async function invalidInputs(entries) {
  for(const item of entries || []) {
   try {
    const value=item.method==='sha256'?await smallDigest(item.path):item.method==='stat'?await mediaSignature(item.path):null;
-   if(value!==item.value)reasons.push(`cambió ${item.role==='standard'?'el estándar':item.role==='motor'?'el motor':'un medio'}`);
+   if(value!==item.value)reasons.push(`cambió ${item.role==='standard'?'el estándar':item.role==='motor'?'el motor':item.role==='direction'?'la dirección creativa':'un medio'}`);
   }catch{reasons.push(`falta entrada de ${item.role}`);}
  }
  return reasons;

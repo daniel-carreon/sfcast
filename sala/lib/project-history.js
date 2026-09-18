@@ -46,6 +46,11 @@ export async function revisionOf(project) {
 export async function recordRun(project,input) {
   if(!input.summary || !input.standard_revision || !['passed','failed','pending'].includes(input.result))
     throw new Error('Se requiere resumen, revisión del estándar y resultado explícito');
+  const creative_checks=input.creative_checks || [];
+  const allowed=new Set(['intro_in_motion','face_clear','mobile_legibility','audio_sync','reference_comparison','preview_cta']);
+  if(!Array.isArray(creative_checks) || creative_checks.some(c=>!allowed.has(c.id) || !['structural','visual','perceptual'].includes(c.method) || typeof c.scope!=='string' || !c.scope.trim()))
+    throw new Error('Comprobación creativa requiere id, método y alcance explícitos');
+  if(creative_checks.length && !input.evidence?.length)throw new Error('Comprobación creativa requiere reporte de evidencia');
   const identity=await initIdentity(project);
   const revision=await revisionOf(project);
   if(!revision)throw new Error('Sin proyecto editable');
@@ -60,7 +65,7 @@ export async function recordRun(project,input) {
   }
   if(input.result==='passed' && !evidence.length)throw new Error('Un resultado aprobado exige evidencia');
   const inputs=await inputsFor(project,input);
-  const run={version:2,inputs,id:randomUUID(),project_id:identity.id,at:new Date().toISOString(),revision,
+  const run={version:2,inputs,creative_checks,id:randomUUID(),project_id:identity.id,at:new Date().toISOString(),revision,
     standard_revision:input.standard_revision,summary:input.summary,result:input.result,evidence};
   const dir=path.join(await privateDir(project),'runs');await fs.mkdir(dir,{recursive:true});
   if(await fs.realpath(dir)!==dir)throw new Error('runs no puede ser un enlace');

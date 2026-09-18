@@ -189,3 +189,9 @@ Previsto/descartado describe decisiones; revisión declarada describe un texto d
 no evidencia automáticamente vigente. La aprobación artística se muestra por separado.
 Archivos ausentes o inválidos dejan decisiones pendientes. El historial y el render deben
 probar la revisión concreta antes de afirmar cumplimiento. El método general queda desplegable.
+
+Las comprobaciones creativas de un registro pueden declarar `creative_checks` con `id`,
+`method` (structural/visual/perceptual) y `scope`. Exigen reporte; las entradas fijan también
+`design/direccion.json` cuando existe. Diseño muestra el reporte, su alcance y si las entradas
+siguen coincidiendo. Una comprobación estructural no convierte una revisión visual pendiente
+en aprobada. Cambiar dirección, montaje, código o evidencia invalida el registro correspondiente.

@@ -22,3 +22,28 @@ test('missing and broken direction remain pending without inventing approval',as
   assert.ok(r.decisions.every(x=>x.status==='pending'));
  }finally{await fs.rm(d,{recursive:true,force:true});}
 });
+
+test('review report is bound to direction and montage; changed direction invalidates it',async()=>{
+ const {recordRun,readRuns}=await import('../lib/project-history.js');
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'sf-review-proof-'));
+ try {
+  await fs.mkdir(path.join(dir,'design'));
+  await fs.writeFile(path.join(dir,'project.json'),JSON.stringify({sources:{}}));
+  await fs.writeFile(path.join(dir,'design/direccion.json'),JSON.stringify({intro:{intent:'Original'}}));
+  await fs.writeFile(path.join(dir,'report.json'),'{}');
+  const input={summary:'Coverage only',standard_revision:'fixture',result:'passed',evidence:['report.json'],standard_files:[],motor_files:[],creative_checks:[{id:'preview_cta',method:'structural',scope:'Layout coverage, not face detection'}]};
+  await recordRun(dir,input);
+  let projected=await creativeDirection(dir,await readRuns(dir));
+  let check=projected.checks.find(c=>c.id==='preview_cta');
+  assert.equal(check.status,'pending'); // A structural test is not visual review.
+  assert.equal(check.verification[0].freshness,'matching');
+  assert.equal(projected.artistic_approval,false);
+  await fs.writeFile(path.join(dir,'design/direccion.json'),JSON.stringify({intro:{intent:'Changed'}}));
+  projected=await creativeDirection(dir,await readRuns(dir));
+  check=projected.checks.find(c=>c.id==='preview_cta');
+  assert.equal(check.verification[0].freshness,'invalidated');
+  assert.ok(check.verification[0].reasons.includes('cambió la dirección creativa'));
+  await assert.rejects(recordRun(dir,{...input,creative_checks:[{id:'preview_cta',method:'structural'}]}),/alcance/);
+  await assert.rejects(recordRun(dir,{...input,evidence:[]}),/reporte/);
+ }finally{await fs.rm(dir,{recursive:true,force:true});}
+});

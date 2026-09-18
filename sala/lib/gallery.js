@@ -439,6 +439,7 @@ export async function readDossier(entry, now = new Date()) {
 
   const tr = await computeTranscriptFor([entry.dir, path.join(entry.dir, 'sfreview_project')]);
   const { files } = await listThumbs(entry.dir);
+  const production = await projectResources(entry.dir);
 
   return {
     ...card,
@@ -462,8 +463,8 @@ export async function readDossier(entry, now = new Date()) {
     chapters: parseChapters(description),
     thumbs: files,
     transcript: tr,
-    production: await projectResources(entry.dir),
-    creative: await creativeDirection(entry.dir),
+    production,
+    creative: await creativeDirection(entry.dir, production.history),
     editor: await editorRoom(entry.dir),
   };
 }

@@ -37,6 +37,19 @@ export async function projectResources(dir) {
   await add('cut','Decisiones de corte',project?.editorial_source,'project.json:editorial_source');
   for (const [file,label] of [['publish.json','Paquete de publicación'],['DESCRIPCION-youtube.txt','Descripción'],['post-comunidad.md','Borrador de comunidad']])
     await add('publication',label,file,file,true);
+  let delivery=null;
+  try {
+    const pub=JSON.parse(await fs.readFile(path.join(dir,'publish.json'),'utf8'));
+    const receipt=pub.data?.youtube?.source_file;
+    const vid=pub.data?.youtube?.video_id || pub.video?.youtube_id;
+    if(receipt?.video_id===vid && receipt?.basis==='completed-resumable-session' && typeof receipt.path==='string' && receipt.path.trim() && Number.isSafeInteger(receipt.bytes) && receipt.bytes>=0 && /^[a-f0-9]{64}$/.test(receipt.sha256)){
+      await add('publication','Máster registrado de la subida',receipt.path,'publish.json:data.youtube.source_file');
+      const resource=resources.at(-1);
+      delivery={video_id:vid,resource_id:resource.id,recorded_sha256:receipt.sha256,recorded_bytes:receipt.bytes,
+        state:resource.state==='missing'?'missing':resource.bytes!==receipt.bytes?'changed':'recorded',
+        scope:'Recibo del transporte completado. El catálogo no recalcula el hash del archivo ni certifica la aprobación artística.'};
+    }
+  }catch(e){if(e.code!=='ENOENT')error=error || 'Paquete de publicación ilegible';}
   await add('design','Dirección creativa','design/direccion.json','design/direccion.json',true);
   // Index the actual plans without pretending that the newest filename is approved.
   try {
@@ -53,7 +66,7 @@ export async function projectResources(dir) {
   try {identity=await readIdentity(dir);history=await readRuns(dir);}catch(e){error=error || e.message;}
   for(const run of history)for(const report of run.evidence || [])
     await add('verification',`${run.summary} · ${path.basename(report.path)}`,report.path,`run:${run.id}`);
-  return { revision, identity, history, name: project?.name || null, error, resources,
+  return { revision, identity, history, delivery, name: project?.name || null, error, resources,
     graph: { slug:'edicion-de-video' },
     pending: Array.isArray(project?.pending) ? project.pending : [],
     requirements: project?.review?.presence_contract || null };

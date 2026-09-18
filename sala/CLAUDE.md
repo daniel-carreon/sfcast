@@ -195,3 +195,8 @@ Las comprobaciones creativas de un registro pueden declarar `creative_checks` co
 `design/direccion.json` cuando existe. Diseño muestra el reporte, su alcance y si las entradas
 siguen coincidiendo. Una comprobación estructural no convierte una revisión visual pendiente
 en aprobada. Cambiar dirección, montaje, código o evidencia invalida el registro correspondiente.
+
+`data.youtube.source_file` conserva el recibo seguro del máster de nuevas subidas. La galería
+solo lo vincula si su ID coincide con YouTube y declara transporte completado. Ruta, bytes y
+hash registrado no equivalen a aprobación artística; cambios de tamaño/ausencia se muestran.
+No inferir un máster aprobado por el nombre más reciente ni fabricar recibos históricos.

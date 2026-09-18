@@ -166,3 +166,21 @@ test('history invalidates standards, engine and source replacements without rewr
   assert.equal(disk.result,'passed');assert.equal(disk.freshness,undefined);
  }finally{await fs.rm(dir,{recursive:true,force:true});}
 });
+
+test('completed upload receipt links master but never invents historical binding',async()=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'sf-master-receipt-'));
+ try {
+  await fs.writeFile(path.join(dir,'project.json'),'{}');
+  await fs.writeFile(path.join(dir,'master.mp4'),'fixture');
+  await fs.writeFile(path.join(dir,'publish.json'),JSON.stringify({video:{youtube_id:'abcdefghijk'}}));
+  assert.equal((await projectResources(dir)).delivery,null);
+  const pub={data:{youtube:{video_id:'abcdefghijk',source_file:{video_id:'abcdefghijk',basis:'completed-resumable-session',path:'master.mp4',sha256:'a'.repeat(64),bytes:7}}}};
+  await fs.writeFile(path.join(dir,'publish.json'),JSON.stringify(pub));
+  let result=await projectResources(dir);assert.equal(result.delivery.state,'recorded');
+  assert.equal(result.resources.find(r=>r.id===result.delivery.resource_id).label,'Máster registrado de la subida');
+  await fs.writeFile(path.join(dir,'master.mp4'),'changed size');
+  assert.equal((await projectResources(dir)).delivery.state,'changed');
+  pub.data.youtube.source_file.video_id='different-id';await fs.writeFile(path.join(dir,'publish.json'),JSON.stringify(pub));
+  assert.equal((await projectResources(dir)).delivery,null);
+ } finally {await fs.rm(dir,{recursive:true,force:true});}
+});
